@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<CodeBlocks_project_file>
+	<FileVersion major="1" minor="6" />
+	<Project>
+		<Option title="Arheoskernel" />
+		<Option pch_mode="2" />
+		<Option compiler="null" />
+		<Option virtualFolders="drivers/fat12_driver/include/;drivers/fat12_driver/" />
+		<Build>
+			<Target title="Release">
+				<Option output="bin/Release/Arheoskernel" prefix_auto="1" extension_auto="1" />
+				<Option object_output="obj/Release/" />
+				<Option type="1" />
+				<Option compiler="null" />
+			</Target>
+		</Build>
+		<Unit filename="boot_1440.asm" />
+		<Unit filename="boot_720.asm" />
+		<Unit filename="boot_hdd.asm" />
+		<Unit filename="bootinfo.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="build.sh" />
+		<Unit filename="debug.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="draw.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="driver_elf.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/ext2_driver/ext2_driver.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/ext2_driver/ext2_start.asm" />
+		<Unit filename="drivers/ext2_driver/include/ext2_driver.h" />
+		<Unit filename="drivers/ext2_driver/include/ext2_internal.h" />
+		<Unit filename="drivers/fat12_driver/fat12_boot.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/fat12_driver/fat12_disk.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/fat12_driver/fat12_dma.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/fat12_driver/fat12_driver.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/fat12_driver/fat12_fdc.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/fat12_driver/fat12_start.asm" />
+		<Unit filename="drivers/fat12_driver/include/fat12_boot.h" />
+		<Unit filename="drivers/fat12_driver/include/fat12_disk.h" />
+		<Unit filename="drivers/fat12_driver/include/fat12_dma.h" />
+		<Unit filename="drivers/fat12_driver/include/fat12_driver.h" />
+		<Unit filename="drivers/fat12_driver/include/fat12_fdc.h" />
+		<Unit filename="drivers/fat12_driver/include/fat12_internal.h" />
+		<Unit filename="drivers/fat12_driver/include/fat12_io.h" />
+		<Unit filename="drivers/fb_driver/fb_driver.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/fb_driver/fb_start.asm" />
+		<Unit filename="drivers/fb_driver/font_data_driver.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/fb_driver/include/fb_driver.h" />
+		<Unit filename="drivers/include_drivers/drv_format.h" />
+		<Unit filename="drivers/include_drivers/font_data_driver.h" />
+		<Unit filename="drivers/userspace_driver.ld" />
+		<Unit filename="f12ld.asm" />
+		<Unit filename="font_data.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="gdt.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="hddld.asm" />
+		<Unit filename="idt.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="include-kernel/bootinfo.h" />
+		<Unit filename="include-kernel/debug.h" />
+		<Unit filename="include-kernel/draw.h" />
+		<Unit filename="include-kernel/driver_api.h" />
+		<Unit filename="include-kernel/driver_elf.h" />
+		<Unit filename="include-kernel/font_data.h" />
+		<Unit filename="include-kernel/gdt.h" />
+		<Unit filename="include-kernel/isr.h" />
+		<Unit filename="include-kernel/kernel.h" />
+		<Unit filename="include-kernel/kernel_heap.h" />
+		<Unit filename="include-kernel/lib.h" />
+		<Unit filename="include-kernel/pmm.h" />
+		<Unit filename="include-kernel/syscalls.h" />
+		<Unit filename="include-kernel/task.h" />
+		<Unit filename="include-kernel/use_drivers.h" />
+		<Unit filename="include-kernel/vmm.h" />
+		<Unit filename="include/bootinfo.inc" />
+		<Unit filename="include/bootinfo_builder.inc" />
+		<Unit filename="include/debug.inc" />
+		<Unit filename="include/disk.inc" />
+		<Unit filename="include/e820.inc" />
+		<Unit filename="include/ext2_bootinfo.inc" />
+		<Unit filename="include/ext2_dir.inc" />
+		<Unit filename="include/ext2_group.inc" />
+		<Unit filename="include/ext2_inode.inc" />
+		<Unit filename="include/ext2_load.inc" />
+		<Unit filename="include/ext2_stage2.inc" />
+		<Unit filename="include/ext2debug.inc" />
+		<Unit filename="include/ext2disk.inc" />
+		<Unit filename="include/fat12.inc" />
+		<Unit filename="include/fat12_bootinfo.inc" />
+		<Unit filename="include/fat12_stage2.inc" />
+		<Unit filename="include/font.inc" />
+		<Unit filename="include/gdt.inc" />
+		<Unit filename="include/graphics.inc" />
+		<Unit filename="include/vbe.inc" />
+		<Unit filename="isr.asm" />
+		<Unit filename="isr.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="kernel.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="kernel_heap.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="lib.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="pmm.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="syscalls.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="task.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="use_drivers.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="vmm.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Extensions />
+	</Project>
+</CodeBlocks_project_file>

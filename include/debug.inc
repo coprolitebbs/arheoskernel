@@ -1,0 +1,287 @@
+; ---------- Вывод на экран ----------
+print_char:
+    push ax
+    push bx
+    mov ah, 0x0E
+    int 0x10
+    pop bx
+    pop ax
+
+    ret
+
+print_string:
+    push ax
+    push si
+
+.loop:
+    lodsb
+    test al, al
+    jz .done
+    call print_char
+    jmp .loop
+
+.done:
+    pop si
+    pop ax
+
+    ret
+
+; ---------- Отладка через порт 0xE9 (арифметический метод) ----------
+print_debug:
+    push ax
+    push si
+    push dx
+    mov dx, 0xE9
+
+.loop:
+    lodsb
+    test al, al
+    jz .done
+    out dx, al
+    jmp .loop
+
+.done:
+    pop dx
+    pop si
+    pop ax
+
+    ret
+
+; Вывод байта в hex (AL) через порт 0xE9 (сохраняет все регистры)
+debug_hex_byte:
+    push ax
+    push bx
+    push dx
+    mov bl, al
+    shr al, 4
+    call debug_hex_nibble
+    mov al, bl
+    and al, 0x0F
+    call debug_hex_nibble
+    pop dx
+    pop bx
+    pop ax
+
+    ret
+
+debug_hex_nibble:
+    ;push dx
+    add al, '0'
+    cmp al, '9'
+    jle .print
+    add al, 7
+
+.print:
+    mov dx, 0xE9
+    out dx, al
+    ;pop dx
+
+    ret
+
+; Вывод слова в hex (AX) через порт 0xE9 (сохраняет все регистры)
+debug_hex_word:
+    push ax
+    xchg al, ah
+    call debug_hex_byte
+    pop ax
+    call debug_hex_byte
+
+    ret
+
+debug_out_char:
+    push ax
+    push dx
+    mov dx, 0xE9
+    out dx, al
+    pop dx
+    pop ax
+
+    ret
+
+
+dump_of_catalogue:
+	; ---- ДАМП КОРНЕВОГО КАТАЛОГА (первые 32 байта) ----
+	push si
+	push es
+	push ds
+    mov dx, 0xE9
+    mov si, msg_root_dump
+    call print_debug
+    push es
+    push ds
+    mov ax, 0x8000
+    mov ds, ax
+    mov si, 0
+    mov cx, 32
+
+dump_root:
+    lodsb
+    call debug_hex_byte
+    mov al, ' '
+    out dx, al
+    loop dump_root
+    mov al, 13
+    out dx, al
+    mov al, 10
+    out dx, al
+    pop ds
+    pop es
+    xor ax, ax
+    mov ds, ax
+	pop ds
+	pop es
+	pop si
+
+	ret
+
+cluster_size_debug:
+	push ds
+	push es
+    ; ---- Отладка: cluster и size ----
+    mov dx, 0xE9
+    mov si, msg_debug_info
+    call print_debug
+    mov ax, [cluster]
+    call debug_hex_word
+    mov al, ' '
+    out dx, al
+    mov ax, [file_size]
+    call debug_hex_word
+    mov al, 13
+    out dx, al
+    mov al, 10
+    out dx, al
+	pop es
+	pop ds
+
+	ret
+
+dump_kernel_16bytes:
+	push si
+	; ---- Вывод первых 16 байт ядра ----
+    mov dx, 0xE9
+    mov si, msg_debug
+    call print_debug
+    push ds
+    mov ax, 0x2000
+    mov ds, ax
+    mov si, 0
+    mov cx, 16
+
+dump:
+    lodsb
+    call debug_hex_byte
+    mov al, ' '
+    out dx, al
+    loop dump
+    pop ds
+    mov al, 13
+    out dx, al
+    mov al, 10
+    out dx, al
+    pop si
+
+	ret
+
+
+dump_fb:
+	push si
+	; ---- Вывод первых 16 байт ----
+    mov dx, 0xE9
+    mov si, msg_debug
+    call print_debug
+    push ds
+    mov ax, 0x3000
+    mov ds, ax
+    mov si, 0
+    mov cx, 16
+
+dump2:
+    lodsb
+    call debug_hex_byte
+    mov al, ' '
+    out dx, al
+    loop dump2
+    pop ds
+    mov al, 13
+    out dx, al
+    mov al, 10
+    out dx, al
+    pop si
+
+	ret
+
+
+dump_fat12:
+	push si
+	; ---- Вывод первых 16 байт ----
+    mov dx, 0xE9
+    mov si, msg_debug
+    call print_debug
+    push ds
+    mov ax, 0x3600
+    mov ds, ax
+    mov si, 0
+    mov cx, 16
+
+dump3:
+    lodsb
+    call debug_hex_byte
+    mov al, ' '
+    out dx, al
+    loop dump3
+    pop ds
+    mov al, 13
+    out dx, al
+    mov al, 10
+    out dx, al
+    pop si
+
+	ret
+
+
+debug_hex_dword:
+    push eax
+    push ebx
+    push ecx
+    mov ebx,eax
+    mov ecx,8
+
+.next:
+    rol ebx,4
+    mov al,bl
+    and al,0x0F
+    call debug_hex_nibble
+    loop .next
+    pop ecx
+    pop ebx
+    pop eax
+
+    ret
+
+
+; ------------------------------------------------------------
+; newline
+;
+; вывод CR LF через debug port
+;
+; ------------------------------------------------------------
+newline:
+    push ax
+    push dx
+    mov dx,0xE9
+    mov al,13
+    out dx,al
+    mov al,10
+    out dx,al
+    pop dx
+    pop ax
+
+    ret
+
+; ============================================================
+; Variables
+; ============================================================
+msg_root_dump   db "Root dump: ", 0
+msg_debug_info  db "Cluster/Size: ", 0
+msg_debug       db "Kernel bytes: ", 0

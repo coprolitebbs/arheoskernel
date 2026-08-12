@@ -1,0 +1,41 @@
+; ============================================================
+; EXT2 filesystem info builder
+; ============================================================
+
+
+build_fs_info:
+    push edi
+    mov edi,FSINFO_ADDR
+    mov dword [edi+FS_TYPE],FS_EXT2
+
+    xor eax,eax
+    mov ax,[ext2_block_size]
+    mov [edi+FS_BLOCK_SIZE],eax
+
+    ; blocks per group
+
+    xor eax,eax
+    mov ax,[ext2_blocks_per_group]
+    mov [edi+FS_BLOCKS_PER_GROUP],eax
+
+    ; inodes per group
+
+    xor eax,eax
+    mov ax,[ext2_inodes_per_group]
+    mov [edi+FS_INODES_PER_GROUP],eax
+
+    ; inode size
+
+    xor eax,eax
+    mov ax,[ext2_inode_size]
+    mov [edi+FS_INODE_SIZE],eax
+
+    ; first data block
+
+    xor eax,eax
+    mov ax,[ext2_first_data_block]
+    mov [edi+FS_FIRST_DATA_BLOCK],eax
+
+    pop edi
+
+    ret
