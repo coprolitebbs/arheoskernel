@@ -55,17 +55,14 @@ ext2_load_file:
     shl ax, 1
     rcl dx, 1
 
-    mov eax, [cs:file_load_offset]      ; EAX = 32-битное смещение в байтах
-mov ecx, eax
-shr ecx, 4                          ; ECX = смещение / 16 (прибавка к сегменту)
-and eax, 0x000F                     ; EAX = смещение % 16 (остаток)
+    mov bx, [cs:file_load_offset]
+    push ax
+    mov ax, [cs:file_load_segment]
+    mov es, ax
+    pop ax
 
-mov bx, [cs:file_load_segment]      ; BX = базовый сегмент
-add bx, cx                          ; BX = итоговый сегмент
-mov es, bx
-mov bx, ax                          ; BX = итоговое смещение (0..15)
-
-
+    mov cx, bx
+    shr cx, 4
     push ax
     mov ax, es
     add ax, cx

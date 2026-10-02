@@ -29,9 +29,6 @@ _stage2_entry:
     call ext2_read_group_table
     jc .fatal_halt
 
-    call a20_init
-    call a20_enable
-
     ;Грузим Ядро
     mov si, kernel_filename
     call ext2_find_file
@@ -41,7 +38,7 @@ _stage2_entry:
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, 0x1000
+    mov ax, KERNEL_SEG
     mov [cs:file_load_segment], ax
     mov ax, [kernel_inode]
     call ext2_load_file
@@ -109,7 +106,7 @@ _stage2_entry:
 
     ;Инициализация VBE и A20
     call vbe_init
-    ;call a20_init
+    call a20_init
 
     ;Получение карты памяти через E820
     push es
@@ -127,7 +124,7 @@ _stage2_entry:
     call build_modules_info
     call build_boot_info
 
-    ;call a20_enable
+    call a20_enable
 
     ;Переход в защищённый режим
     lgdt [gdtr]
@@ -154,17 +151,17 @@ pm_entry:
     cli
 
     ;Копирование ядра в 100000
-    ;push esi
-    ;push edi
-    ;push ecx
-    ;cld
-    ;mov esi, 0x20000
-    ;mov edi, 0x100000
-    ;mov ecx, [kernel_size_pm]
-    ;rep movsb
-    ;pop ecx
-    ;pop edi
-    ;pop esi
+    push esi
+    push edi
+    push ecx
+    cld
+    mov esi, 0x20000
+    mov edi, 0x100000
+    mov ecx, [kernel_size_pm]
+    rep movsb
+    pop ecx
+    pop edi
+    pop esi
 
     cli
     mov ebx, BOOTINFO_ADDR
