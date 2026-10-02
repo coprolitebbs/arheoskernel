@@ -41,8 +41,7 @@ _stage2_entry:
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, KERNEL_PHYS_SEG       ; unreal-сегмент 0x10000 -> линейный адрес 0x100000
-    mov es, ax                    ; high word ES сохраняется (unreal-режим)
+    mov ax, KERNEL_SEG
     mov [cs:file_load_segment], ax
     mov ax, [kernel_inode]
     call ext2_load_file
@@ -117,7 +116,7 @@ _stage2_entry:
 
     ;Инициализация VBE и A20
     call vbe_init
-    ;call a20_init
+    call a20_init
 
     ;Получение карты памяти через E820
     push es
@@ -135,7 +134,7 @@ _stage2_entry:
     call build_modules_info
     call build_boot_info
 
-    ;call a20_enable
+    call a20_enable
 
     ;Переход в защищённый режим
     lgdt [gdtr]
@@ -159,7 +158,20 @@ pm_entry:
     mov ss, ax
     mov esp, 0x90000
 
-    ;Ядро уже загружено в 0x100000 напрямую (unreal-режим, ext2_read_sectors)
+    cli
+
+    ;Копирование ядра в 100000
+    push esi
+    push edi
+    push ecx
+    cld
+    mov esi, 0x20000
+    mov edi, 0x100000
+    mov ecx, [kernel_size_pm]
+    rep movsb
+    pop ecx
+    pop edi
+    pop esi
 
     cli
     mov ebx, BOOTINFO_ADDR
