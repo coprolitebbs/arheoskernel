@@ -149,104 +149,154 @@ ext2_read_sectors:
     shl edx, 3                    ; *8
     add edx, 0x1F0                ; база портов: 0x1F0 или 0x170
 
+; --- цикл чтения по секторам (PIO, последовательность SFF/ATA) ---
+; EBX = текущий LBA, ESI = линейный адрес приёма, EDI = счётчик секторов,
+; EDX = база портов канала (0x1F0/0x170). EAX как рабочий регистр значений.
 .sector_loop:
-    ; --- Setup: выбор диска, режим LBA, адрес, команда READ ---
-    ; Все записи идут через DX (порт) и EAX (данные); EBX хранит полный LBA.
-    push edx                        ; сохранить базу портов
+    ; --- Setup: Drive/Head, Sector Count, LBA Low/Mid/High ---
+    mov ecx, edx                    ; сохранить базу портов
     mov eax, ebx
-    shr eax, 24                     ; EAX = LBA[24..31]
+    shr eax, 24                     ; LBA[24..31]
     and eax, 0x0F
-    or eax, 0xE0                    ; reserved bits + LBA mode (bit6) + bit7
-    movzx ecx, byte [ss:drive]      ; 0x80 -> master, 0x81 -> slave
-    and ecx, 1
-    shl ecx, 4                      ; бит D4 = выбор привода на канале
-    or eax, ecx                     ; DH = 0xE0 | drive<<4 | LBA[28..31]
-    xchg eax, edx                   ; AL = значение Drive/Head, DL = база
+    or eax, 0xE0                    ; LBA mode + reserved bits
+    movzx edi, byte [ss:drive]      ; 0x80 -> master, 0x81 -> slave
+    and edi, 1
+    shl edi, 4                      ; бит D4 = выбор привода на канале
+    or eax, edi
+    mov edx, ecx                    ; восстановить базу портов
     add dl, 6                       ; порт Drive/Head = base+6
-    out dx, al                      ; 0xE0 | drive<<4 | LBA[28..31]
-    pop edx                         ; восстановить базу портов
-
-    mov eax, ebx
-    inc dl                          ; база+1 = error/features
-    out dx, al                      ; dummy write в Error register
+    out dx, al
     mov al, 1                       ; Sector Count = 1 (PIO по одному сектору)
-    inc dl                          ; база+2
+    sub dl, 4                       ; база+2 = Sector Count
     out dx, al
-    mov al, bl                      ; LBA Low  = LBA[0..7]
-    inc dl                          ; база+3
+    mov ecx, edx                    ; сохранить базу портов
+    mov eax, ebx                    ; полный LBA
+    inc dl                          ; база+3 = LBA Low
     out dx, al
-    mov al, bh                      ; LBA Mid  = LBA[8..15]
-    inc dl                          ; база+4
+    shr eax, 8
+    inc dl                          ; база+4 = LBA Mid
     out dx, al
-    mov eax, ebx
-    shr eax, 16                     ; AL = LBA High = LBA[16..23]
-    inc dl                          ; база+5
+    shr eax, 8
+    inc dl                          ; база+5 = LBA High
     out dx, al
-    ; --- выдержка ~2 мкс после записи регистров (по статус-порту) ---
-    sub dl, 6                       ; статус-порт (база+7)
-    in al, dx
-    in al, dx
-    in al, dx
-    in al, dx
+    mov edx, ecx                    ; восстановить базу портов
+    add dl, 5                       ; база+7 = Status/Command
+    in al, dx                       ; discard status (первая операция после записей)
+    in al, dx                       ; вторая discard (settle time)
 
-    ; --- диск должен быть готов до подачи команды ---
+.wait_free:
+    ; --- диск должен быть свободен до подачи команды ---
+    in al, dx
+    test al, 0x80                   ; BSY
+    jnz .wait_free
     test al, 0x01                   ; ERR
     jnz .read_error
     test al, 0x40                   ; DRDY
     jz .read_error
 
-    mov al, 0x20                    ; CMD: READ SECTORS (PIO, CHS/LBA regs)
+    mov ecx, edx                    ; сохранить порт статуса
+    mov al, 0x20                    ; CMD: READ SECTORS (PIO)
     inc dl                          ; база+7 = command
     out dx, al
+    mov edx, ecx                    ; восстановить порт статуса
 
-    ; --- ожидание сброса BSY (команда принята) ---
-.wait_bsy:
+.wait_drq:
+    ; --- ожидание DRQ (или ошибки) ---
+    in al, dx
+    test al, 0x08                   ; DRQ
+    jnz .transfer
+    test al, 0x80                   ; BSY
+    jz .read_error                  ; не BSY и не DRQ -> ошибка
+    jmp .wait_drq
+
+.transfer:
+    ; --- переключение контроллера в 16-битный режим (diskmode = 0) ---
+    ; иначе high byte дублируется и rep insw пишет мусор по 2 байта
+    mov ecx, edx                    ; сохранить порт статуса
+    sub edx, 5                      ; база+2 = Device Control
+    in al, dx
+    and al, 0xF7
+    out dx, al
+    mov edx, ecx                    ; восстановить порт статуса
+
+    ; --- подтверждение готовности: BSY=0, DRQ=1, DSC=1 ---
+.confirm:
     in al, dx
     test al, 0x80                   ; BSY
-    jnz .wait_bsy
-    test al, 0x01                   ; ERR
-    jnz .read_error
-
-    ; --- ожидание DRQ (или ошибки) ---
-.wait_drq:
-    in al, dx
-    test al, 0x01                   ; ERR
-    jnz .read_error
+    jnz .confirm
     test al, 0x08                   ; DRQ
-    jz .wait_drq
+    jz .read_error
+    test al, 0x10                   ; DSC
+    jz .read_error
 
     ; --- вычитываем сектор в linear-адресуемую память ---
     sub dl, 7                       ; data-порт (база+0)
     mov ecx, 256                    ; 512 байт = 256 слов
     cld
-    rep insw                        ; порт -> ES:ESI (flat 4GB, пишет хоть в 0x100000)
+    rep insw                        ; порт -> ESI (flat 4GB, пишет хоть в 0x100000)
 
     ; --- следующая секция ---
     add esi, 512                    ; сдвинуть буфер приёма на следующий сектор
-    inc ebx                         ; следующий LBA (EBX не портился в цикле)
-    dec edi
-    jnz .sector_loop
-    jmp .read_done
+    inc ebx                         ; следующий LBA (EBX не портился в блоке setup)
+    mov edi, ecx                    ; ...кроме ECX: сохраняем порт статуса
+    dec word [ss:bp+6]              ; счётчик секторов в кадре
+    jz .drain_last
+    mov edx, edi                    ; порт статуса
+    jmp .sector_loop
 
+.drain_last:
+    ; --- drain последних данных сектора (4 слова) ---
+    mov edx, edi                    ; порт статуса
+    push edx
+    sub edx, 7                      ; data-порт
+    in ax, dx
+    in ax, dx
+    in ax, dx
+    in ax, dx
+    pop edx                         ; порт статуса
+
+.drain_wait:
+    ; --- финальный статус: ждём сброса BSY/DRQ ---
+    in al, dx
+    test al, 0x88                   ; BSY | DRQ
+    jnz .drain_wait
+    test al, 0x01                   ; ERR?
+    jnz .read_error
+
+.read_done:
+    ; --- вернуть BIOS-совместимое состояние диска (INT 13h может читаться позже) ---
+    push edx                        ; порт статуса
+    mov eax, ebx
+    shr eax, 24
+    and eax, 0x0F
+    or eax, 0xE0                    ; LBA mode (бит привода не важен)
+    sub edx, 1                      ; база+6 = Drive/Head
+    out dx, al
+    mov al, 0x0E                    ; CMD: VERIFY (без transfer, быстрый reset-ready)
+    mov al, 0xC8                    ; CMD: WRITE MULTIPLE... нет: используем SET MULTIPLE
+    mov al, 0x08                    ; CMD: SET MULTIPLE MODE
+    mov ecx, edx                    ; база+6
+    add cl, 1                       ; база+7 = Command
+    mov edx, ecx
+    out dx, al
+    pop edx                         ; порт статуса
+    in al, dx                       ; discard
+    in al, dx                       ; discard
+.mult_wait:
+    in al, dx
+    test al, 0x80                   ; BSY
+    jnz .mult_wait
+    ; ERR по SET MULTIPLE не критичен — игнорируем
 
 .read_error:
     mov al, '?'                     ; debugcon: ошибка чтения сектора
     out 0xE9, al
-.set_cf:
-    ; стек (RM-адресуемый, < 1MB): [bp+6]=CX [bp+8]=AX [bp+10]=DX [bp+12]=BX
-    ;   [bp+14]=ES [bp+16..30]=pusha [bp+32]=DS [bp+34]=EFLAGS(сохран. pushf)
     ; ставим CF=1 в сохранённый кадром EFLAGS — iret восстановит его целиком
-    or word [ss:bp+34], 1         ; CF=1 -> вызывающий увидит ошибку
+    or word [ss:bp+34], 1           ; CF=1 -> вызывающий увидит ошибку
     jmp .back_rm
 
-.read_done:
-    and word [ss:bp+34], ~1       ; CF=0 в сохранённые EFLAGS вызывающего
-
 .back_rm:
-    ; --- восстановление unreal-состояния сегментных регистров (в PM!) ---
-    ; временные плоские дескрипторы затёрли high words DS/ES; грузаем
-    ; исходные селекторы из кадра, пока CPU ещё в protected mode
-    ; (дескриптор 0x10 имеет limit 4GB -> GP при загрузке не будет).
+    ; снимаем RM-счётчик секторов из кадра (он больше не нужен)
     movzx eax, word [ss:bp+34]      ; сохранённый push ds селектор DS
     mov ds, ax
     movzx eax, word [ss:bp+14]      ; ES вызывающего (unreal-сегмент буфера)
