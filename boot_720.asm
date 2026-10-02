@@ -144,7 +144,5 @@ disk_heads dw 2
 ; ---- Включаем disk.inc (он должен быть адаптирован для 720K) ----
 %include "include/disk.inc"
 
-
-
 times 510-($-$$) db 0
 dw 0xAA55

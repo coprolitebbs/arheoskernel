@@ -1,4 +1,3 @@
-
 #ifndef KERNEL_H
 #define KERNEL_H
 
@@ -6,209 +5,23 @@
 #define high_word(address) (short)(((address) >> 16) & 0xFFFF)
 
 //#define MAX_MB 128  // отображаем первые 128 МБ
-
+#define STACK_ADDRESS 0x90000
 
 #include <stdint.h>      // для uint32_t и других целочисленных типов
 #include "draw.h"        // графические функции (draw_char, draw_string, fill_screen)
 #include "isr.h"         // обработка прерываний (struct regs, idt_init, pic_init, isr_handler)
 #include "syscalls.h"    // системные вызовы (SYS_* константы, sys_draw_char)
 
-//#include "fb_driver_bin.h"
 #include "use_drivers.h"
 
-
-
-//extern uint8_t fb_driver[];
-//extern uint32_t fb_driver_size;
-
-
-
-static uint8_t user_prog[] =
-{
-    // x = 100
-    0xBB,0x64,0x00,0x00,0x00,
-
-    // y = 100
-    0xB9,0x64,0x00,0x00,0x00,
-
-    // char A
-    0xBA,0x41,0x00,0x00,0x00,
-
-    // color = 0x00FFFFFF
-    0xBE,0xFF,0xFF,0xFF,0x00,
-
-    // SYS_DRAW_CHAR
-    0xB8,0x01,0x00,0x00,0x00,
-    0xCD,0x80,
-
-    // x++
-    0x43,
-
-    // назад к SYS_DRAW_CHAR
-    0xEB,0xF1
-};
-
-/*
-static uint8_t user_prog2[] =
-{
-    // x = 1000
-    0xBB,0xE8,0x03,0x00,0x00,
-
-    // y = 110
-    0xB9,0x6E,0x00,0x00,0x00,
-
-    // char B
-    0xBA,0x42,0x00,0x00,0x00,
-
-    // color = 0x00FFFFFF
-    0xBE,0xFF,0xFF,0xFF,0x00,
-
-    // SYS_DRAW_CHAR
-    0xB8,0x01,0x00,0x00,0x00,
-    0xCD,0x80,
-
-    // x--
-    0x4B,
-
-    // y++
-    0x41,
-
-    // назад
-    0xEB,0xF5
-};
-*/
-
-
-static uint8_t user_prog2[] =
-{
-// =================================================
-// Первая страница
-// =================================================
-
-// SYS_ALLOC_PAGE
-// eax = 8
-0xB8, 0x08, 0x00, 0x00, 0x00,     // mov eax, 8
-0xCD, 0x80,                       // int 80
-
-// -------------------------------------------------
-// Выводим "40001000"
-// x = 100, y = 130
-// -------------------------------------------------
-
-// '4'
-0xBB, 0x64, 0x00, 0x00, 0x00,     // ebx = 100
-0xB9, 0x82, 0x00, 0x00, 0x00,     // ecx = 130
-0xBA, 0x34, 0x00, 0x00, 0x00,     // edx = '4'
-0xBE, 0xFF, 0xFF, 0xFF, 0x00,     // esi = color
-0xB8, 0x01, 0x00, 0x00, 0x00,     // SYS_DRAW_CHAR
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xBA, 0x30, 0x00, 0x00, 0x00,     // edx = '0'
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xCD, 0x80,
-
-// '1'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xBA, 0x31, 0x00, 0x00, 0x00,     // edx = '1'
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xBA, 0x30, 0x00, 0x00, 0x00,     // edx = '0'
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xCD, 0x80,
-
-
-// =================================================
-// Вторая страница
-// =================================================
-
-// SYS_ALLOC_PAGE
-0xB8, 0x08, 0x00, 0x00, 0x00,     // mov eax, 8
-0xCD, 0x80,
-
-// -------------------------------------------------
-// Выводим "40002000"
-// x = 100, y = 140
-// -------------------------------------------------
-
-// '4'
-0xBB, 0x64, 0x00, 0x00, 0x00,     // ebx = 100
-0xB9, 0x8C, 0x00, 0x00, 0x00,     // ecx = 140
-0xBA, 0x34, 0x00, 0x00, 0x00,     // edx = '4'
-0xBE, 0xFF, 0xFF, 0xFF, 0x00,     // esi = color
-0xB8, 0x01, 0x00, 0x00, 0x00,     // SYS_DRAW_CHAR
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xBA, 0x30, 0x00, 0x00, 0x00,     // edx = '0'
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xCD, 0x80,
-
-// '2'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xBA, 0x32, 0x00, 0x00, 0x00,     // edx = '2'
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xBA, 0x30, 0x00, 0x00, 0x00,     // edx = '0'
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xCD, 0x80,
-
-// '0'
-0x83, 0xC3, 0x0A,                 // add ebx, 10
-0xCD, 0x80,
-
-
-// =================================================
-// Бесконечный цикл:
-// SYS_YIELD
-// =================================================
-
-0xB8, 0x04, 0x00, 0x00, 0x00,     // mov eax, SYS_YIELD
-0xCD, 0x80,
-
-0xEB, 0xF7                         // jmp назад к SYS_YIELD
-};
-
-
-// Точка входа ядра (определена в kernel.c)
+//Точка входа ядра (определена в kernel.c)
 void _start(void);
 
 void switch_to_usermode(uint32_t entry);
 
-//void draw_memory_map(void);
-//void draw_hex_dump(uint32_t addr, int num_bytes, int x, int y);
+uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset);
+uint32_t get_geode_gx1_framebuffer_address(void);
 
-
-
+void kernel_halt_all(void);
 
 #endif

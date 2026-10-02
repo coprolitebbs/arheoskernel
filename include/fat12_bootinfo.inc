@@ -1,6 +1,4 @@
-; ============================================================
-; FAT12 filesystem info builder
-; ============================================================
+;FAT12 filesystem info builder
 
 build_fs_info:
     push edi

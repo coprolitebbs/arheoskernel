@@ -3,104 +3,67 @@
 #include "include-kernel/lib.h"
 #include "include-kernel/draw.h"
 #include "include-kernel/debug.h"
-
-
+#include "include-kernel/comdebug.h"
+#include "include-kernel/kconsole.h"
 
 
 static page_directory_t *kernel_dir = NULL;
 page_directory_t *kernel_directory = NULL;
-static uint32_t last_directory_phys=0;
+static uint32_t last_directory_phys = 0;
+
+uint32_t test_buffer_phys_start = 0;
 
 // Создание нового каталога страниц
-page_directory_t* vmm_create_address_space(uint32_t *phys_out)
-{
-    uint32_t phys=(uint32_t)pmm_alloc_page();
+page_directory_t* vmm_create_address_space(uint32_t *phys_out){
+    uint32_t phys = (uint32_t)pmm_alloc_page();
+    if(!phys) return NULL;
+    page_directory_t *dir = (page_directory_t*)phys;
+    memset(dir, 0, PAGE_SIZE);
 
-    if(!phys)
-        return NULL;
+    //Зеркально копируем первые 32 записи каталога ядра (все 128 МБ системной памяти)
+    for(int t = 0; t < 32; t++){
+        (*dir)[t] = (*kernel_directory)[t] & ~PAGE_USER;
+    }
+    //Для всех остальных индексов каталога (пользовательское пространство)
+    for(int t = 32; t < 1024; t++){
+        if ((*kernel_directory)[t] != 0){
+            (*dir)[t] = (*kernel_directory)[t] | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        }
+    }
 
-    page_directory_t *dir=(page_directory_t*)phys;
-
-    memcpy(
-        dir,
-        kernel_directory,
-        PAGE_SIZE
-    );
-
-	for(uint32_t i=0;i<768;i++)
-	{
-		if(i!=0 && i!=1) (*dir)[i]=0;
-	}
-
-
-	(*dir)[0] &= ~PAGE_USER;
-	(*dir)[1] &= ~PAGE_USER;
-
-
-
-	//memset(dir,0,PAGE_SIZE);
-
-	//for(int i=768;i<1024;i++) (*dir)[i]=(*kernel_directory)[i];
-
-
-    *phys_out=phys;
-
-
-
+    *phys_out = phys;
     return dir;
 }
 
-// Отображение страницы
-void vmm_map_page(page_directory_t *dir,uint32_t virt,uint32_t phys,uint32_t flags){
 
-
+void vmm_map_page(page_directory_t *dir, uint32_t virt, uint32_t phys, uint32_t flags){
     uint32_t pd_index = virt >> 22;
     uint32_t pt_index = (virt >> 12) & 0x3FF;
 
     uint32_t entry = (*dir)[pd_index];
+    uint32_t *table;
 
-    page_table_t *table;
-
-    if(!(entry & PAGE_PRESENT))
-    {
+    if (!(entry & PAGE_PRESENT)){
         uint32_t table_phys = (uint32_t)pmm_alloc_page();
-
-        if(!table_phys)
-            return;
-
-        table = (page_table_t*)table_phys;
-
-        memset(
-            table,
-            0,
-            PAGE_SIZE
-        );
-
-
+        if (!table_phys) return;
+        table = (uint32_t*)table_phys;
+        memset(table, 0, PAGE_SIZE);
         (*dir)[pd_index] = table_phys | PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
-		//(*table)[pt_index] = (phys & 0xFFFFF000) | PAGE_PRESENT | flags;
-
-
-    }
-    else
-    {
-        table =
-            (page_table_t*)(entry & 0xFFFFF000);
-
-
-        (*dir)[pd_index] |= PAGE_USER;
+    } else {
+        table = (uint32_t*)(entry & 0xFFFFF000);
     }
 
-
-    (*table)[pt_index] =
-        (phys & 0xFFFFF000) |
-        PAGE_PRESENT |
-        PAGE_WRITE |
-        PAGE_USER;
+    //Записываем физический адрес целевой страницы в таблицу страниц
+    table[pt_index] = (phys & 0xFFFFF000) | flags;
 }
 
+
+
+
+
+
 // Удаление отображения
-void vmm_unmap_page(page_directory_t *dir, uint32_t virt) {
+void vmm_unmap_page(page_directory_t *dir, uint32_t virt){
     uint32_t pd_index = virt >> 22;
     uint32_t pt_index = (virt >> 12) & 0x3FF;
 
@@ -108,11 +71,11 @@ void vmm_unmap_page(page_directory_t *dir, uint32_t virt) {
     if (!(entry & PAGE_PRESENT)) return;
 
     page_table_t *table = (page_table_t*)(entry & 0xFFFFF000);
-    (*table)[pt_index] = 0;  // очищаем запись
+    (*table)[pt_index] = 0;
 }
 
-// Получить физический адрес по виртуальному
-uint32_t vmm_get_phys_addr(page_directory_t *dir, uint32_t virt) {
+//Получить физический адрес по виртуальному
+uint32_t vmm_get_phys_addr(page_directory_t *dir, uint32_t virt){
     uint32_t pd_index = virt >> 22;
     uint32_t pt_index = (virt >> 12) & 0x3FF;
 
@@ -128,118 +91,59 @@ uint32_t vmm_get_phys_addr(page_directory_t *dir, uint32_t virt) {
 
 // Переключение каталога
 void vmm_switch_directory(uint32_t phys){
-    asm volatile(
-        "mov %0,%%cr3"
-        :
-        :"r"(phys & 0xFFFFF000)
-        :"memory"
-    );
+    asm volatile("mov %0,%%cr3"::"r"(phys & 0xFFFFF000):"memory");
 }
 
-// Инициализация VMM
-void vmm_init(uint32_t vbe_phys){
+//Инициализация VMM
+void vmm_init(void){
+    //com_puts("[VMM] Initializing...\n");
     kernel_directory = (page_directory_t*)pmm_alloc_page();
 
-    if (!kernel_directory)
+    if (!kernel_directory){
+        //com_puts("[VMM] ERROR: Failed to alloc page directory!\n");
         for(;;);
-
+    }
     memset(kernel_directory,0,PAGE_SIZE);
-
-
-    /*
-        1. Identity map ядра
-        Только первые 16 МБ пока.
-        Без USER!
-    */
-
+    //Identity map ядра, только первые 16 МБ пока. Без USER
     uint32_t phys = 0;
-
-
-    for(uint32_t t=0;t<4;t++)
-    {
-        page_table_t *table =
-            (page_table_t*)pmm_alloc_page();
-
-        if(!table)
-            for(;;);
-
-
-        memset(table,0,PAGE_SIZE);
-
-
-        for(int i=0;i<1024;i++)
-        {
-            (*table)[i] =
-                phys |
-                PAGE_PRESENT |
-                PAGE_WRITE;
-
+    for(uint32_t t = 0; t < 32; t++){
+        page_table_t *table = (page_table_t*)pmm_alloc_page();
+        if(!table) for(;;);
+        memset(table, 0, PAGE_SIZE);
+        for(int i = 0; i < 1024; i++){
+            //Identity mapping: виртуальный адрес равен физическому
+            (*table)[i] = phys | PAGE_PRESENT | PAGE_WRITE;
             phys += PAGE_SIZE;
         }
-
-
-        (*kernel_directory)[t] =
-            (uint32_t)table |
-            PAGE_PRESENT |
-            PAGE_WRITE;
+        //Записываем таблицу в каталог страниц ядра
+        (*kernel_directory)[t] = (uint32_t)table | PAGE_PRESENT | PAGE_WRITE;
     }
 
-
-
-    /*
-       2. VBE framebuffer только kernel
-    */
-
-    if(vbe_phys)
-    {
-        uint32_t size=3*1024*1024;
-
-        for(uint32_t i=0;
-            i<size;
-            i+=PAGE_SIZE)
-        {
-            vmm_map_page(
-                kernel_directory,
-                vbe_phys+i,
-                vbe_phys+i,
-                PAGE_PRESENT|PAGE_WRITE
-            );
-        }
-    }
-
-
-
-    /*
-       включаем paging
-    */
-
-
-    asm volatile(
-        "mov %0,%%cr3"
-        :
-        :"r"(kernel_directory)
-    );
-
-
+    //включаем paging
+    //com_puts("[VMM] Enabling paging...\n");
+    asm volatile("mov %0,%%cr3"::"r"(kernel_directory));
     uint32_t cr0;
-
-    asm volatile(
-        "mov %%cr0,%0"
-        :"=r"(cr0)
-    );
-
-
+    asm volatile("mov %%cr0,%0":"=r"(cr0));
     cr0 |= 0x80000000;
-
-
-    asm volatile(
-        "mov %0,%%cr0"
-        :
-        :"r"(cr0)
-    );
+    asm volatile("mov %0,%%cr0"::"r"(cr0));
+    //com_puts("[VMM] Paging enabled. Hello from protected mode with paging!\n");
 }
 
-// Выделить страницу в виртуальном адресном пространстве ядра (пока простая заглушка)
+
+
+void vmm_map_pages(uint32_t vbe_phys, uint32_t vbe_size){
+    if(vbe_phys != 0 && vbe_size != 0){
+        for(uint32_t offset = 0; offset < vbe_size; offset += PAGE_SIZE) {
+            uint32_t p_addr = vbe_phys + offset;
+            uint32_t v_addr = vbe_phys + offset;
+            vmm_map_page(kernel_directory, v_addr, p_addr, PAGE_PRESENT | PAGE_WRITE);
+        }
+    }
+}
+
+
+
+//Выделить страницу в виртуальном адресном пространстве ядра (пока простая заглушка)
 void* vmm_alloc_kernel_page(void) {
     // TODO: реализовать выделение виртуальной страницы
     return NULL;
@@ -256,15 +160,7 @@ page_directory_t* vmm_create_user_space(void){
     if(!dir)
         return NULL;
     memset(dir,0,PAGE_SIZE);
-    /*
-       Копируем ядро
-       в верхнюю часть адресного пространства
 
-       пока ничего не копируем,
-       потому что ядро ниже 16МБ
-
-       позже перенесем в 0xC0000000
-    */
     for(int i=0;i<4;i++){
         (*dir)[i]=(*kernel_directory)[i];
     }
@@ -283,7 +179,6 @@ void vmm_copy_kernel_space(page_directory_t *dir){
     }
 }
 
-uint32_t vmm_get_last_directory_phys(void)
-{
+uint32_t vmm_get_last_directory_phys(void){
     return last_directory_phys;
 }

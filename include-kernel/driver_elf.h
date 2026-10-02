@@ -4,12 +4,15 @@
 #include "bootinfo.h"
 #include "../drivers/include_drivers/drv_format.h"
 
-//‘тартовый адрес длЯ загрузки драйверов
+//РЎС‚Р°СЂС‚РѕРІС‹Р№ Р°РґСЂРµСЃ РґР»СЏ Р·Р°РіСЂСѓР·РєРё РґСЂР°Р№РІРµСЂРѕРІ
 extern uint32_t driver_start_load_addr;
 
 void *load_driver_elf(unsigned char *elf_image,struct boot_info *boot);
 
 void *load_driver_elf_mem(uint32_t addr,uint32_t size,struct boot_info *boot);
+
+void* load_driver_elf_from_disk(const char *path, struct boot_info *boot);
+
 
 
 #endif

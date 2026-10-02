@@ -5,7 +5,7 @@
 		<Option title="Arheoskernel" />
 		<Option pch_mode="2" />
 		<Option compiler="null" />
-		<Option virtualFolders="drivers/fat12_driver/include/;drivers/fat12_driver/" />
+		<Option virtualFolders="drivers/fat12_driver/include/;drivers/fat12_driver/;drivers/ext2_driver/" />
 		<Build>
 			<Target title="Release">
 				<Option output="bin/Release/Arheoskernel" prefix_auto="1" extension_auto="1" />
@@ -21,6 +21,12 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="build.sh" />
+		<Unit filename="comdebug.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="config.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="debug.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -30,10 +36,14 @@
 		<Unit filename="driver_elf.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="drivers/ext2_driver/ext2_disk.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="drivers/ext2_driver/ext2_driver.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="drivers/ext2_driver/ext2_start.asm" />
+		<Unit filename="drivers/ext2_driver/include/ext2_disk.h" />
 		<Unit filename="drivers/ext2_driver/include/ext2_driver.h" />
 		<Unit filename="drivers/ext2_driver/include/ext2_internal.h" />
 		<Unit filename="drivers/fat12_driver/fat12_boot.c">
@@ -58,7 +68,6 @@
 		<Unit filename="drivers/fat12_driver/include/fat12_driver.h" />
 		<Unit filename="drivers/fat12_driver/include/fat12_fdc.h" />
 		<Unit filename="drivers/fat12_driver/include/fat12_internal.h" />
-		<Unit filename="drivers/fat12_driver/include/fat12_io.h" />
 		<Unit filename="drivers/fb_driver/fb_driver.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -69,6 +78,12 @@
 		<Unit filename="drivers/fb_driver/include/fb_driver.h" />
 		<Unit filename="drivers/include_drivers/drv_format.h" />
 		<Unit filename="drivers/include_drivers/font_data_driver.h" />
+		<Unit filename="drivers/kbd_driver/include/kbd_driver.h" />
+		<Unit filename="drivers/kbd_driver/include/kbd_internal.h" />
+		<Unit filename="drivers/kbd_driver/kbd_driver.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/kbd_driver/kbd_start.asm" />
 		<Unit filename="drivers/userspace_driver.ld" />
 		<Unit filename="f12ld.asm" />
 		<Unit filename="font_data.c">
@@ -77,26 +92,34 @@
 		<Unit filename="gdt.c">
 			<Option compilerVar="CC" />
 		</Unit>
-		<Unit filename="hddld.asm" />
-		<Unit filename="idt.c">
+		<Unit filename="hardware.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="hddld.asm" />
 		<Unit filename="include-kernel/bootinfo.h" />
+		<Unit filename="include-kernel/comdebug.h" />
+		<Unit filename="include-kernel/config.h" />
 		<Unit filename="include-kernel/debug.h" />
 		<Unit filename="include-kernel/draw.h" />
-		<Unit filename="include-kernel/driver_api.h" />
 		<Unit filename="include-kernel/driver_elf.h" />
+		<Unit filename="include-kernel/elf32.h" />
 		<Unit filename="include-kernel/font_data.h" />
 		<Unit filename="include-kernel/gdt.h" />
+		<Unit filename="include-kernel/hardware.h" />
 		<Unit filename="include-kernel/isr.h" />
+		<Unit filename="include-kernel/kconsole.h" />
 		<Unit filename="include-kernel/kernel.h" />
 		<Unit filename="include-kernel/kernel_heap.h" />
 		<Unit filename="include-kernel/lib.h" />
 		<Unit filename="include-kernel/pmm.h" />
+		<Unit filename="include-kernel/ports_io.h" />
+		<Unit filename="include-kernel/spinlock.h" />
 		<Unit filename="include-kernel/syscalls.h" />
 		<Unit filename="include-kernel/task.h" />
 		<Unit filename="include-kernel/use_drivers.h" />
+		<Unit filename="include-kernel/vfs.h" />
 		<Unit filename="include-kernel/vmm.h" />
+		<Unit filename="include/a20.inc" />
 		<Unit filename="include/bootinfo.inc" />
 		<Unit filename="include/bootinfo_builder.inc" />
 		<Unit filename="include/debug.inc" />
@@ -110,7 +133,6 @@
 		<Unit filename="include/ext2_stage2.inc" />
 		<Unit filename="include/ext2debug.inc" />
 		<Unit filename="include/ext2disk.inc" />
-		<Unit filename="include/fat12.inc" />
 		<Unit filename="include/fat12_bootinfo.inc" />
 		<Unit filename="include/fat12_stage2.inc" />
 		<Unit filename="include/font.inc" />
@@ -119,6 +141,9 @@
 		<Unit filename="include/vbe.inc" />
 		<Unit filename="isr.asm" />
 		<Unit filename="isr.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="kconsole.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="kernel.c">
@@ -133,6 +158,9 @@
 		<Unit filename="pmm.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="ports_io.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="syscalls.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -140,6 +168,81 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="use_drivers.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/examples/allocram/allocram.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/examples/arr_test/arr_test.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/examples/cat/ucat.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/examples/hello/hello.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/examples/kb_check/kb_check.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/examples/vfs_test/vfs_test.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/filesystem/config/boot/boot.cfg" />
+		<Unit filename="userspace/filesystem/config/sekhmet/config.cfg" />
+		<Unit filename="userspace/filesystem/config/sekhmet/sekhmet.hlp" />
+		<Unit filename="userspace/include/syscall.h" />
+		<Unit filename="userspace/include/uconfig.h" />
+		<Unit filename="userspace/include/uimage.h" />
+		<Unit filename="userspace/include/umemory.h" />
+		<Unit filename="userspace/include/ustd.h" />
+		<Unit filename="userspace/lib/uconfig.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/lib/uimage.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/lib/umemory.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/lib/userspace.ld" />
+		<Unit filename="userspace/lib/ustd.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/cat/cat.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/free/free.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/halt/halt.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/horus/horus.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/ls/ls.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/mkdir/mkdir.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/rm/rm.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/rmdir/rmdir.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/sekhmet/sekhmet.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/setbg/setbg.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/touch/touch.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="vfs.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="vmm.c">
