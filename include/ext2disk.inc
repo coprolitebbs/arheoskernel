@@ -75,56 +75,193 @@ ext2_get_geometry:
     ret
 
 
-; ext2_read_sectors
+; ext2_read_sectors - чтение секторов с IDE-диска (LBA)
+; Вход:   AX:DX = LBA (относительно начала раздела), CX = кол-во секторов,
+;         ES:BX = буфер. Для адресов выше 1 МБ в unreal-режиме ES должен быть
+;         равен физическому адресу >> 4 (например 0x10000 -> 0x100000).
+; Выход:  CF=0 - успех, CF=1 - ошибка
+; Реализация: прямой PIO-доступ к IDE-портам через IN/OUT.
+; INT 13h не используется принципиально: в unreal-режиме вызов BIOS приводит
+; к порче high word'ов сегментных регистраторов и невозможности писать > 1 МБ.
+; Функция сама переключает CPU в protected mode (GDT с 4GB-дескрипторами) для
+; линейной записи в ES:BX и возвращается обратно в real/unreal mode.
 
 ext2_read_sectors:
     add ax, EXT2_START_LBA
     adc dx, 0
 
     pushf
-    push ds
+    push ds                 ; [bp+34] = селектор DS вызывающего (для unreal-возврата)
     pusha
 
-    mov bp, sp
+    mov bp, sp              ; фиксированный кадр: в PM [bp+...] читается линейно (< 1MB)
 
-    xor ax, ax
+    ; Сохраняем параметры вызова на стеке: [ES:BX] -> физический адрес, LBA, кол-во
+    push es                 ; [bp+14] = буферный сегмент
+    push bx                 ; [bp+12] = буферное смещение
+    push dx                 ; [bp+10] = LBA high
+    push ax                 ; [bp+8]  = LBA low
+    push cx                 ; [bp+6]  = количество секторов
+
+    cli                     ; IRQ в PM без IDT = мгновенный triple fault
+
+    ; GDT с flat-дескрипторами (0x08 код / 0x10 данные, base=0, limit=4GB).
+    ; Копируем дескрипторы и готовим pseudo-GDTR в свободной low memory на
+    ; 0x91000 (PM-стек позже стартует от 0x90000 вниз; 0x91000-0x91100 свободен).
+    ; ВАЖНО: временный плоский сегмент грузим в DS, ES НЕ трогаем — иначе
+    ; будет испорчено unreal-состояние ES (high word), а именно в ES:BX
+    ; пишется читаемый с диска data.
+    push ds                         ; сохранить сегмент stage2
+    push si
+    push di
+    mov ax, 0x9100                  ; временный DS: base=0x91000, high word=0
     mov ds, ax
+    mov si, gdt_start               ; источник: сами дескрипторы (внутри stage2)
+    mov di, 0x2                     ; приёмник: линейный 0x91002
+    mov cx, (gdt_end - gdt_start) / 2
+    cld
+    rep movsw                       ; копия GDT -> 0x91002 (ES не затронут)
+    mov word [di], ((gdt_end - gdt_start) - 1) & 0xFFFF   ; limit pseudo-gdtr (0x9100A)
+    mov dword [di+2], 0x91002       ; base pseudo-gdtr (0x9100C)
+    pop di
+    pop si
+    pop ds                          ; вернуть сегмент stage2
+    lgdt [0x9100]                   ; DS=stage2: offset читается как seg*16+off
+                                    ;           = линейный адрес псевдо-GDTR
+    mov eax, cr0
+    or eax, 1
+    mov cr0, eax
+    jmp 0x08:.pm
 
-    mov si, dap
-    mov byte [si], 16
-    mov byte [si+1], 0
+.pm:
+    mov ax, 0x10
+    mov ds, ax
+    mov ss, ax              ; ESP остаётся прежним -> linear < 1MB, стек цел
+    movzx esi, word [bp+12]       ; смещение буфера
+    movzx eax, word [bp+14]       ; сегмент буфера (в unreal ES = phys>>4)
+    add esi, eax                  ; ESI = физический адрес назначения
+    movzx edi, word [bp+6]        ; EDI = количество секторов
+    movzx ebx, word [bp+8]        ; LBA low
+    movzx eax, word [bp+10]       ; LBA high
+    shl eax, 16
+    or ebx, eax                   ; EBX = полный LBA
+    movzx edx, byte [ss:drive]    ; drive: 0 -> primary, 1 -> secondary
+    shl edx, 3                    ; *8
+    add edx, 0x1F0                ; база портов: 0x1F0 или 0x170
 
-    mov cx, [bp+12]
-    mov bx, [bp+8]
+.sector_loop:
+    ; --- Setup: выбор диска, режим LBA, адрес, команда READ ---
+    ; Все записи идут через DX (порт) и EAX (данные); EBX хранит полный LBA.
+    push edx                        ; сохранить базу портов
+    mov eax, ebx
+    shr eax, 24                     ; EAX = LBA[24..31]
+    and eax, 0x0F
+    or eax, 0xE0                    ; reserved bits + LBA mode (bit6) + bit7
+    movzx ecx, byte [ss:drive]      ; 0x80 -> master, 0x81 -> slave
+    and ecx, 1
+    shl ecx, 4                      ; бит D4 = выбор привода на канале
+    or eax, ecx                     ; DH = 0xE0 | drive<<4 | LBA[28..31]
+    xchg eax, edx                   ; AL = значение Drive/Head, DL = база
+    add dl, 6                       ; порт Drive/Head = base+6
+    out dx, al                      ; 0xE0 | drive<<4 | LBA[28..31]
+    pop edx                         ; восстановить базу портов
 
-    mov [si+2], cx
-    mov [si+4], bx
-    mov [si+6], es
+    mov eax, ebx
+    inc dl                          ; база+1 = error/features
+    out dx, al                      ; dummy write в Error register
+    mov al, 1                       ; Sector Count = 1 (PIO по одному сектору)
+    inc dl                          ; база+2
+    out dx, al
+    mov al, bl                      ; LBA Low  = LBA[0..7]
+    inc dl                          ; база+3
+    out dx, al
+    mov al, bh                      ; LBA Mid  = LBA[8..15]
+    inc dl                          ; база+4
+    out dx, al
+    mov eax, ebx
+    shr eax, 16                     ; AL = LBA High = LBA[16..23]
+    inc dl                          ; база+5
+    out dx, al
+    ; --- выдержка ~2 мкс после записи регистров (по статус-порту) ---
+    sub dl, 6                       ; статус-порт (база+7)
+    in al, dx
+    in al, dx
+    in al, dx
+    in al, dx
 
-    mov ax, [bp+14]
-    mov dx, [bp+10]
+    ; --- диск должен быть готов до подачи команды ---
+    test al, 0x01                   ; ERR
+    jnz .read_error
+    test al, 0x40                   ; DRDY
+    jz .read_error
 
-    mov [si+8], ax
-    mov [si+10], dx
-    mov word [si+12], 0
-    mov word [si+14], 0
+    mov al, 0x20                    ; CMD: READ SECTORS (PIO, CHS/LBA regs)
+    inc dl                          ; база+7 = command
+    out dx, al
 
-    mov dl, [drive]
-    mov ah, 42h
-    int 13h
-    jc .error
+    ; --- ожидание сброса BSY (команда принята) ---
+.wait_bsy:
+    in al, dx
+    test al, 0x80                   ; BSY
+    jnz .wait_bsy
+    test al, 0x01                   ; ERR
+    jnz .read_error
 
-    popa
-    pop ds
-    popf
-    clc
-    ret
+    ; --- ожидание DRQ (или ошибки) ---
+.wait_drq:
+    in al, dx
+    test al, 0x01                   ; ERR
+    jnz .read_error
+    test al, 0x08                   ; DRQ
+    jz .wait_drq
 
-.error:
-    mov al, '?'
+    ; --- вычитываем сектор в linear-адресуемую память ---
+    sub dl, 7                       ; data-порт (база+0)
+    mov ecx, 256                    ; 512 байт = 256 слов
+    cld
+    rep insw                        ; порт -> ES:ESI (flat 4GB, пишет хоть в 0x100000)
+
+    ; --- следующая секция ---
+    add esi, 512                    ; сдвинуть буфер приёма на следующий сектор
+    inc ebx                         ; следующий LBA (EBX не портился в цикле)
+    dec edi
+    jnz .sector_loop
+    jmp .read_done
+
+
+.read_error:
+    mov al, '?'                     ; debugcon: ошибка чтения сектора
     out 0xE9, al
+.set_cf:
+    ; стек (RM-адресуемый, < 1MB): [bp+6]=CX [bp+8]=AX [bp+10]=DX [bp+12]=BX
+    ;   [bp+14]=ES [bp+16..30]=pusha [bp+32]=DS [bp+34]=EFLAGS(сохран. pushf)
+    ; ставим CF=1 в сохранённый кадром EFLAGS — iret восстановит его целиком
+    or word [ss:bp+34], 1         ; CF=1 -> вызывающий увидит ошибку
+    jmp .back_rm
+
+.read_done:
+    and word [ss:bp+34], ~1       ; CF=0 в сохранённые EFLAGS вызывающего
+
+.back_rm:
+    ; --- восстановление unreal-состояния сегментных регистров (в PM!) ---
+    ; временные плоские дескрипторы затёрли high words DS/ES; грузаем
+    ; исходные селекторы из кадра, пока CPU ещё в protected mode
+    ; (дескриптор 0x10 имеет limit 4GB -> GP при загрузке не будет).
+    movzx eax, word [ss:bp+34]      ; сохранённый push ds селектор DS
+    mov ds, ax
+    movzx eax, word [ss:bp+14]      ; ES вызывающего (unreal-сегмент буфера)
+    mov es, ax
+
+    add sp, 10                      ; снимаем 5 сохранённых параметров (ES,BX,DX,AX,CX)
     popa
-    pop ds
-    popf
-    stc
-    ret
+    pop ds                          ; DS вызывающего (сегмент stage2)
+    add sp, 2                       ; убрать со стека сохранённые pushf EFLAGS
+    sti                             ; прерывания снова легальны (real mode, BIOS IDT цела)
+    iret                            ; возврат к вызывающему с восстановленными
+                                    ; EFLAGS (в т.ч. CF): popf в PM не восстановил бы VM-бит
+
+; --- стек на момент возврата (высокий адрес -> низкий):
+; [bp+38]=CS(ret) [bp+36]=IP(ret) [bp+34]=EFLAGS(pushf) [bp+32]=DS(push)
+; [bp+30..16]=pusha [bp+14]=ES [bp+12]=BX [bp+10]=DX [bp+8]=AX [bp+6]=CX [bp+4]=BP
+; Выход: mov ds/es из кадра (PM) / add sp,10 / popa / pop ds / add sp,2 / sti / iret
+; CF ошибки передаётся через правку слова EFLAGS в кадре ([bp+34]) до iret.

@@ -32,7 +32,7 @@ _stage2_entry:
     call a20_init
     call a20_enable
 
-    ;Грузим Ядро
+    ;Грузим Ядро сразу в 0x100000 (unreal-режим, ES = phys>>4)
     mov si, kernel_filename
     call ext2_find_file
     jc .fatal_halt
@@ -41,7 +41,8 @@ _stage2_entry:
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, 0x1000
+    mov ax, KERNEL_PHYS_SEG       ; unreal-сегмент 0x10000 -> линейный адрес 0x100000
+    mov es, ax                    ; high word ES сохраняется (unreal-режим)
     mov [cs:file_load_segment], ax
     mov ax, [kernel_inode]
     call ext2_load_file
@@ -50,7 +51,7 @@ _stage2_entry:
     mov eax, [file_size]
     mov [kernel_size_pm], eax
 
-    ;Грузим Framebuffer Driver
+    ;Грузим Framebuffer Driver (unreal-режим: ES = phys>>4, прямая запись по физ. адресам)
     mov si, fb_driver_filename
     call ext2_find_file
     jc .fatal_halt
@@ -59,7 +60,8 @@ _stage2_entry:
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, 0x3000
+    mov ax, FB_SEG                ; 0x3000 -> линейный адрес 0x30000
+    mov es, ax
     mov [cs:file_load_segment], ax
     mov ax, [fb_inode]
     call ext2_load_file
@@ -68,7 +70,7 @@ _stage2_entry:
     mov eax, [file_size]
     mov [fb_driver_size], eax
 
-    ;Грузим Драйвер FAT12
+    ;Грузим Драйвер FAT12 (unreal-режим)
     mov si, fat12_driver_filename
     call ext2_find_file
     jc .fatal_halt
@@ -77,7 +79,8 @@ _stage2_entry:
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, 0x4000
+    mov ax, F12_SEG               ; 0x4000 -> линейный адрес 0x40000
+    mov es, ax
     mov [cs:file_load_segment], ax
     mov ax, [fat12_inode]
     call ext2_load_file
@@ -86,7 +89,7 @@ _stage2_entry:
     mov eax, [file_size]
     mov [fat12_driver_size], eax
 
-    ;Грузим Драйвер EXT2
+    ;Грузим Драйвер EXT2 (unreal-режим)
     mov si, ext2_driver_filename
     call ext2_find_file
     jc .fatal_halt
@@ -95,7 +98,8 @@ _stage2_entry:
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, 0x5000
+    mov ax, EXT2DRV_SEG           ; 0x5000 -> линейный адрес 0x50000
+    mov es, ax
     mov [cs:file_load_segment], ax
     mov ax, [ext2_inode]
     call ext2_load_file
@@ -103,6 +107,10 @@ _stage2_entry:
 
     mov eax, [file_size]
     mov [ext2_driver_size], eax
+
+    ; Восстанавливаем обычный real-mode ES (stage2 лежит на 0x7E00)
+    mov ax, 0x7E0
+    mov es, ax
 
     pop es
     cli
@@ -151,20 +159,7 @@ pm_entry:
     mov ss, ax
     mov esp, 0x90000
 
-    cli
-
-    ;Копирование ядра в 100000
-    ;push esi
-    ;push edi
-    ;push ecx
-    ;cld
-    ;mov esi, 0x20000
-    ;mov edi, 0x100000
-    ;mov ecx, [kernel_size_pm]
-    ;rep movsb
-    ;pop ecx
-    ;pop edi
-    ;pop esi
+    ;Ядро уже загружено в 0x100000 напрямую (unreal-режим, ext2_read_sectors)
 
     cli
     mov ebx, BOOTINFO_ADDR
@@ -188,6 +183,11 @@ halt:
     jmp .loop
 
 ;Переменные
+KERNEL_PHYS_SEG equ 0x10000     ; unreal-сегмент для ядра: 0x10000*16 = 0x100000
+FB_SEG          equ 0x3000      ; линейный адрес драйвера FB = 0x30000 (совпадает с bootinfo)
+F12_SEG         equ 0x4000      ; линейный адрес драйвера FAT12 = 0x40000
+EXT2DRV_SEG     equ 0x5000      ; линейный адрес драйвера EXT2 = 0x50000
+
 kernel_size_pm       dd 0
 kernel_inode         dw 0
 fb_inode             dw 0
