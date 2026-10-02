@@ -41,8 +41,9 @@ _stage2_entry:
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, KERNEL_SEG
-    mov [cs:file_load_segment], ax
+    mov word [cs:file_load_segment], KERNEL_PHYS_SEG
+                                    ; unreal-сегмент: 0x10000*16 = 0x100000;
+                                    ; ES выставляет ext2_load_file (.read)
     mov ax, [kernel_inode]
     call ext2_load_file
     jc .fatal_halt
@@ -160,20 +161,9 @@ pm_entry:
 
     cli
 
-    ;Копирование ядра в 100000
-    push esi
-    push edi
-    push ecx
-    cld
-    mov esi, 0x20000
-    mov edi, 0x100000
-    mov ecx, [kernel_size_pm]
-    rep movsb
-    pop ecx
-    pop edi
-    pop esi
+    ;Ядро уже загружено в 0x100000 напрямую (unreal-режим, stage2),
+    ;релокация не нужна.
 
-    cli
     mov ebx, BOOTINFO_ADDR
 
     jmp 0x08:0x100000

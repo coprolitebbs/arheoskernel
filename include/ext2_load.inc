@@ -22,6 +22,8 @@ ext2_load_file:
     mov [cs:file_inode], ax
     mov word [cs:file_load_offset], 0
     mov word [cs:file_load_offset+2], 0
+    mov ax, [cs:file_load_segment]
+    mov [cs:file_base_seg], ax
 
     mov ax, [cs:file_inode]
     call ext2_read_inode
@@ -51,25 +53,23 @@ ext2_load_file:
     test ax, ax
     jz .done
 
+    ;блок на диске -> сектор (LBA AX = block*2)
     xor dx, dx
     shl ax, 1
     rcl dx, 1
 
+    ;назначение: file_base_seg + (смещение внутри файла >> 4).
+    ;Файл грузится с начала блока (смещение кратно 1024), поэтому старшие
+    ;биты смещения всегда нулевые и adc не нужен.
     mov bx, [cs:file_load_offset]
-    push ax
-    mov ax, [cs:file_load_segment]
-    mov es, ax
-    pop ax
+    shr bx, 1
+    shr bx, 1
+    shr bx, 1
+    shr bx, 1                       ;BX = смещение внутри файла >> 4
+    add bx, [cs:file_base_seg]      ;BX = unreal-сегмент назначения
+    mov es, bx                      ;16-битная загрузка сохраняет high word ES
+    xor bx, bx                      ;адресация выровнена по 16 байт
 
-    mov cx, bx
-    shr cx, 4
-    push ax
-    mov ax, es
-    add ax, cx
-    mov es, ax
-    pop ax
-
-    and bx, 0x0F
     mov cx, 2
     call ext2_read_sectors
     jc .error
@@ -80,6 +80,11 @@ ext2_load_file:
     jmp .next
 
 .done:
+    ;восстановить unreal-состояние ES вызывающего: после чтения PM-прокси
+    ;high word ES обнулён; low word тот же, поэтому повторная загрузка того
+    ;же селектора восстанавливает полный 32-битный дескриптор.
+    mov ax, [cs:file_load_segment]
+    mov es, ax
     clc
     jmp .exit
 
@@ -132,7 +137,7 @@ ext2_get_file_block:
     shl ax, 1
     rcl dx, 1
     push ax
-    mov ax, INDIRECT_SEG
+    mov ax, INDIRECT_SEG            ; 0x1800 -> линейный 0x18000 (< 1MB)
     mov es, ax
     pop ax
     xor bx, bx
@@ -170,7 +175,8 @@ file_inode          dw 0
 file_load_offset    dd 0
 file_inode_offset   dw 0
 file_block_index    dw 0
-file_load_segment   dw 0
+file_load_segment   dw 0       ;unreal-сегмент базы файла (phys >> 4)
+file_base_seg       dw 0       ;то же, что file_load_segment (для аддинга)
 file_indirect_loaded db 0
 file_indirect_block  dd 0
 
