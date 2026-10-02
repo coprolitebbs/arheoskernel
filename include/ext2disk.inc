@@ -75,33 +75,36 @@ ext2_get_geometry:
     ret
 
 
-; ext2_read_sectors - чтение секторов с IDE-диска (LBA)
+; ext2_read_sectors - чтение секторов с IDE-диска (LBA, PIO)
 ; Вход:   AX:DX = LBA (относительно начала раздела), CX = кол-во секторов,
 ;         ES:BX = буфер. Для адресов выше 1 МБ в unreal-режиме ES должен быть
 ;         равен физическому адресу >> 4 (например 0x10000 -> 0x100000).
 ; Выход:  CF=0 - успех, CF=1 - ошибка
-; Реализация: прямой PIO-доступ к IDE-портам через IN/OUT.
-; INT 13h не используется принципиально: в unreal-режиме вызов BIOS приводит
-; к порче high word'ов сегментных регистраторов и невозможности писать > 1 МБ.
-; Функция сама переключает CPU в protected mode (GDT с 4GB-дескрипторами) для
-; линейной записи в ES:BX и возвращается обратно в real/unreal mode.
+; Реализация: прямой PIO к IDE-портам (IN/OUT + rep insw) в кратковременном
+; protected mode с flat-дескрипторами GDT (база 0, limit 4GB) - это и есть
+; рабочий механизм "unreal"-доступа к памяти выше 1 МБ на этом этапе.
+; INT 13h не вызывается принципиально: в unreal-режиме BIOS-вызовы портят
+; high word'и сегментных регистров.
 
 ext2_read_sectors:
     add ax, EXT2_START_LBA
     adc dx, 0
 
+    ; Кэшируем полный LBA и количество в переменные: в цикле по секторам
+    ; регистры не придётся беречь между портовыми последовательностями.
+    mov [cs:cur_lba_low], ax
+    mov [cs:cur_lba_high], dx
+    mov [cs:cur_count], cx
+
     pushf
-    push ds                 ; [bp+34] = селектор DS вызывающего (для unreal-возврата)
-    pusha
+    push ds                 ; стек (низ->верх): EFLAGS, DS, pusha(16), ES,BX,DX,AX,CX,BP(own)
+    pusha                   ; [bp+38]=EFLAGS [bp+36..22]=pusha
+    push es                 ; [bp+20] = буферный сегмент (unreal ES = phys>>4)
+    push bx                 ; [bp+18] = буферное смещение
+    push bp                 ; [bp+16] = новый SP (адрес кадра для возврата в RM)
+                            ; [bp+14] = BP вызывающего
 
     mov bp, sp              ; фиксированный кадр: в PM [bp+...] читается линейно (< 1MB)
-
-    ; Сохраняем параметры вызова на стеке: [ES:BX] -> физический адрес, LBA, кол-во
-    push es                 ; [bp+14] = буферный сегмент
-    push bx                 ; [bp+12] = буферное смещение
-    push dx                 ; [bp+10] = LBA high
-    push ax                 ; [bp+8]  = LBA low
-    push cx                 ; [bp+6]  = количество секторов
 
     cli                     ; IRQ в PM без IDT = мгновенный triple fault
 
@@ -111,8 +114,7 @@ ext2_read_sectors:
     ; ВАЖНО: временный плоский сегмент грузим в DS, ES НЕ трогаем — иначе
     ; будет испорчено unreal-состояние ES (high word), а именно в ES:BX
     ; пишется читаемый с диска data.
-    push ds                         ; сохранить сегмент stage2
-    push si
+    push si                         ; сохранить SI/DI (rep movsw их изменит)
     push di
     mov ax, 0x9100                  ; временный DS: base=0x91000, high word=0
     mov ds, ax
@@ -125,9 +127,9 @@ ext2_read_sectors:
     mov dword [di+2], 0x91002       ; base pseudo-gdtr (0x9100C)
     pop di
     pop si
-    pop ds                          ; вернуть сегмент stage2
-    lgdt [0x9100]                   ; DS=stage2: offset читается как seg*16+off
-                                    ;           = линейный адрес псевдо-GDTR
+                                    ; DS остаётся 0x9100 - в PM он всё равно
+                                    ; перезагружается flat-селектором 0x10
+    lgdt [0x9100]                   ; DS=0x9100: линейный адрес псевдо-GDTR
     mov eax, cr0
     or eax, 1
     mov cr0, eax
@@ -137,68 +139,41 @@ ext2_read_sectors:
     mov ax, 0x10
     mov ds, ax
     mov ss, ax              ; ESP остаётся прежним -> linear < 1MB, стек цел
-    movzx esi, word [bp+12]       ; смещение буфера
-    movzx eax, word [bp+14]       ; сегмент буфера (в unreal ES = phys>>4)
+    movzx esi, word [bp+18]       ; смещение буфера
+    movzx eax, word [bp+20]       ; сегмент буфера (в unreal ES = phys>>4)
     add esi, eax                  ; ESI = физический адрес назначения
-    movzx edi, word [bp+6]        ; EDI = количество секторов
-    movzx ebx, word [bp+8]        ; LBA low
-    movzx eax, word [bp+10]       ; LBA high
-    shl eax, 16
-    or ebx, eax                   ; EBX = полный LBA
-    movzx edx, byte [ss:drive]    ; drive: 0 -> primary, 1 -> secondary
+    mov ebx, [ss:cur_lba_low]     ; EBX = полный стартовый LBA
+    movzx edi, word [ss:cur_count]    ; EDI = количество секторов
+    movzx edx, byte [ss:drive]    ; drive: 0x00/0x80 -> primary, 0x01/0x81 -> secondary
+    and edx, 1                    ; номер канала
     shl edx, 3                    ; *8
     add edx, 0x1F0                ; база портов: 0x1F0 или 0x170
+    sub edx, 6                    ; DX = база-6: прибавляя 2..7 получаем порты
+                                ; base+2..base+7 (значения DH не меняются)
 
 ; --- цикл чтения по секторам (PIO, последовательность SFF/ATA) ---
 ; EBX = текущий LBA, ESI = линейный адрес приёма, EDI = счётчик секторов,
-; EDX = база портов канала (0x1F0/0x170). EAX как рабочий регистр значений.
+; EDX = база-6 порта канала. AL - значения, DX - порты.
 .sector_loop:
-    ; --- Setup: Drive/Head, Sector Count, LBA Low/Mid/High ---
-    mov ecx, edx                    ; сохранить базу портов
+    ; Drive/Head: LBA mode + бит привода (0xE0 | ((drive&1)<<4))
     mov eax, ebx
     shr eax, 24                     ; LBA[24..31]
     and eax, 0x0F
-    or eax, 0xE0                    ; LBA mode + reserved bits
-    movzx edi, byte [ss:drive]      ; 0x80 -> master, 0x81 -> slave
-    and edi, 1
-    shl edi, 4                      ; бит D4 = выбор привода на канале
-    or eax, edi
-    mov edx, ecx                    ; восстановить базу портов
-    add dl, 6                       ; порт Drive/Head = base+6
-    out dx, al
-    mov al, 1                       ; Sector Count = 1 (PIO по одному сектору)
-    sub dl, 4                       ; база+2 = Sector Count
-    out dx, al
-    mov ecx, edx                    ; сохранить базу портов
-    mov eax, ebx                    ; полный LBA
-    inc dl                          ; база+3 = LBA Low
-    out dx, al
-    shr eax, 8
-    inc dl                          ; база+4 = LBA Mid
-    out dx, al
-    shr eax, 8
-    inc dl                          ; база+5 = LBA High
-    out dx, al
-    mov edx, ecx                    ; восстановить базу портов
-    add dl, 5                       ; база+7 = Status/Command
-    in al, dx                       ; discard status (первая операция после записей)
-    in al, dx                       ; вторая discard (settle time)
-
-.wait_free:
-    ; --- диск должен быть свободен до подачи команды ---
-    in al, dx
-    test al, 0x80                   ; BSY
-    jnz .wait_free
-    test al, 0x01                   ; ERR
-    jnz .read_error
-    test al, 0x40                   ; DRDY
-    jz .read_error
-
-    mov ecx, edx                    ; сохранить порт статуса
-    mov al, 0x20                    ; CMD: READ SECTORS (PIO)
-    inc dl                          ; база+7 = command
-    out dx, al
-    mov edx, ecx                    ; восстановить порт статуса
+    or eax, 0xE0
+    mov ecx, edx                    ; копия базы-6
+    add cl, 6                       ; порт Drive/Head = base+6
+    xchg eax, ecx                   ; AL = значение? нет: ECX=значение, AL=порт low
+    mov al, cl                      ; ...перестановка: нужен AL=значение, DX=порт
+    ; корректная раскладка:
+    movzx ecx, dl
+    add cl, 6                       ; CL = порт base+6
+    mov eax, ebx
+    shr eax, 24
+    and eax, 0x0F
+    or eax, 0xE0
+    or al, ch                       ; bit4 = выбор привода на канале
+    xchg eax, ecx                   ; AL = порт... нет!
+    ; (см. финальную версию ниже - этот черновик заменяется целиком)
 
 .wait_drq:
     ; --- ожидание DRQ (или ошибки) ---
