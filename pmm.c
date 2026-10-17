@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include-kernel/pmm.h"
 #include <stddef.h>
 #include "include-kernel/lib.h"   // вместо <string.h>
@@ -169,7 +186,7 @@ size_t pmm_get_total_memory(void){
 
 
 void graphics_init_uma_address(uint32_t total_mem, int lfb_available, uint32_t lfb_addr_from_boot){
-    com_init(); //Инициализируем COM сразу
+    //com_init(); //Инициализируем COM сразу
     //com_puts("[GRAPHICS] Init UMA address...\n");
 
     if (lfb_available && lfb_addr_from_boot != 0){

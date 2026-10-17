@@ -1,9 +1,179 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include/ext2_disk.h"
 #include "include/ext2_internal.h"
 #include "../../include-kernel/bootinfo.h"
 #include "../../include-kernel/lib.h"
 #include "../../include-kernel/ports_io.h"
 #include "include/ext2_driver.h"
+
+
+
+
+//Освобождает один физический блок в битовой карте его группы
+//Возвращает 1 если блок был занят и освобождён, 0 если он уже был свободен,
+//отрицательный FS_* при ошибке.
+int ext2_free_single_block(ext2_volume_t *vol, uint32_t block_no){
+    if (block_no == 0) return 0;
+
+    //Отсекаем метаданные группы 0 (блок 1 = SB, 2 = BGDT при block_size 1024)
+    if (block_no == 1 || block_no == 2) return FS_CORRUPTED;
+    if (block_no < vol->sb.s_first_data_block) return FS_CORRUPTED;
+
+    uint32_t rel = block_no - vol->sb.s_first_data_block;
+    uint32_t group = rel / vol->sb.s_blocks_per_group;
+    uint32_t idx_in_group = rel % vol->sb.s_blocks_per_group;
+
+    if (group >= vol->groups_count) return FS_CORRUPTED;
+
+    uint8_t *bg_desc_bytes = vol->bg_desc_table + (group * 32);
+    uint32_t block_bitmap_no = *(uint32_t *)(bg_desc_bytes + 0);
+    if (block_bitmap_no == 0) return FS_CORRUPTED;
+
+    uint8_t *bitmap_buf = (uint8_t *)api_ptr->malloc_ptr(vol->block_size);
+    if (!bitmap_buf) return FS_IO_ERROR;
+
+    int r = ext2_read_block(vol, block_bitmap_no, bitmap_buf);
+    if (r != FS_OK){ api_ptr->free_ptr(bitmap_buf); return r; }
+
+    uint32_t byte_idx = idx_in_group / 8;
+    uint32_t bit_idx  = idx_in_group % 8;
+
+    //Если бит не выставлен — блок уже свободен, тихо выходим
+    if (!(bitmap_buf[byte_idx] & (1 << bit_idx))){
+        api_ptr->free_ptr(bitmap_buf);
+        return 0;
+    }
+
+    bitmap_buf[byte_idx] &= ~(1 << bit_idx);
+
+    r = ext2_write_block(vol, block_bitmap_no, bitmap_buf);
+    api_ptr->free_ptr(bitmap_buf);
+    if (r != FS_OK) return r;
+
+    uint16_t *free_blocks_ptr = (uint16_t *)(bg_desc_bytes + 12);
+    if (*free_blocks_ptr < 0xFFFF) (*free_blocks_ptr)++;
+    if (vol->sb.s_free_blocks_count < 0xFFFFFFFF) vol->sb.s_free_blocks_count++;
+
+    return 1;
+}
+
+
+
+//Рекурсивно освобождает дерево блоков, начиная с block_no
+//depth: 0 = сам блок является data-блоком,
+//       1 = single indirect (в нём лежат указатели на data),
+//       2 = double indirect, 3 = triple indirect.
+//Возвращает число освобождённых блоков (data + metadata) или FS_* при ошибке.
+int ext2_free_block_tree(ext2_volume_t *vol, uint32_t block_no, int depth){
+    if (block_no == 0) return 0;
+
+    int total_freed = 0;
+    uint32_t ptrs = vol->block_size / 4;
+
+    if (depth > 0){
+        uint32_t *indirect_buf = (uint32_t *)api_ptr->malloc_ptr(vol->block_size);
+        if (!indirect_buf) return FS_IO_ERROR;
+
+        int r = ext2_read_block(vol, block_no, (uint8_t *)indirect_buf);
+        if (r != FS_OK){ api_ptr->free_ptr(indirect_buf); return r; }
+
+        for (uint32_t i = 0; i < ptrs; i++){
+            if (indirect_buf[i] == 0) continue;
+            int sub = ext2_free_block_tree(vol, indirect_buf[i], depth - 1);
+            if (sub < 0){ api_ptr->free_ptr(indirect_buf); return sub; }
+            total_freed += sub;
+        }
+        api_ptr->free_ptr(indirect_buf);
+    }
+
+    // Освобождаем сам блок (это либо data-блок при depth==0, либо таблица)
+    int fr = ext2_free_single_block(vol, block_no);
+    if (fr < 0) return fr;
+    return total_freed + fr;
+}
+
+
+
+//Полностью освобождает все данные инода и зануляет i_size / i_blocks / i_block[]
+//Инод in-memory обновляется, затем записывается на диск
+//Метаданные группы (BGDT) и суперблок синхронизируются
+int ext2_truncate_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *inode){
+    if (!vol || !inode || !vol->mounted) return FS_IO_ERROR;
+    //Не позволяем случайно обнулить каталог
+    if ((inode->i_mode & 0xF000) == 0x4000) return FS_ACCESS_DENIED;
+    //Прямые блоки 0..11
+    for (int i = 0; i < 12; i++){
+        if (inode->i_block[i] == 0) continue;
+        int r = ext2_free_single_block(vol, inode->i_block[i]);
+        if (r < 0) return r;
+        inode->i_block[i] = 0;
+    }
+
+    //Одинарная косвенность (i_block[12])
+    if (inode->i_block[12] != 0){
+        int r = ext2_free_block_tree(vol, inode->i_block[12], 1);
+        if (r < 0) return r;
+        inode->i_block[12] = 0;
+    }
+
+    //Двойная косвенность (i_block[13])
+    if (inode->i_block[13] != 0){
+        int r = ext2_free_block_tree(vol, inode->i_block[13], 2);
+        if (r < 0) return r;
+        inode->i_block[13] = 0;
+    }
+
+    //Тройная косвенность (i_block[14])
+    if (inode->i_block[14] != 0){
+        int r = ext2_free_block_tree(vol, inode->i_block[14], 3);
+        if (r < 0) return r;
+        inode->i_block[14] = 0;
+    }
+
+    //Обнуляем размеры
+    inode->i_size   = 0;
+    inode->i_blocks = 0;
+
+    //Пишем инод обратно на диск
+    int wr = ext2_write_inode(vol, inode_no, inode);
+    if (wr != FS_OK) return wr;
+
+    //Синхронизируем BGDT и суперблок (в них инкрементированы счётчики свободного)
+    uint32_t bgdt_block = (vol->block_size == 1024) ? 2 : 1;
+    uint32_t bgdt_lba = vol->partition_start_lba + (bgdt_block * vol->sectors_per_block);
+    uint32_t bgdt_size_bytes = vol->groups_count * sizeof(ext2_bg_desc_t);
+    uint32_t bgdt_sectors = (bgdt_size_bytes + 512 - 1) / 512;
+    ext2_disk_write_sectors(bgdt_lba, bgdt_sectors, vol->bg_desc_table);
+
+    uint32_t sb_lba = vol->partition_start_lba + 2;
+    uint8_t *sb_save_buf = (uint8_t *)api_ptr->malloc_ptr(4096);
+    if (sb_save_buf){
+        if (ext2_disk_read_sectors(sb_lba, 2, sb_save_buf) == FS_OK){
+            memcpy(sb_save_buf, &vol->sb, sizeof(ext2_superblock_t));
+            ext2_disk_write_sectors(sb_lba, 2, sb_save_buf);
+        }
+        api_ptr->free_ptr(sb_save_buf);
+    }
+
+    return FS_OK;
+}
+
 
 
 int ext2_disk_read_sectors(uint32_t lba, uint32_t count, void *buf){

@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #ifndef SYSCALLS_H
 #define SYSCALLS_H
 
@@ -10,6 +27,7 @@
 #define PROCESS_IS_ACTIVE      -2
 
 #define LINE_BUFFER_SIZE 1024
+#define MAX_SYSCALLS 100
 
 #define STR(x) #x
 #define XSTR(x) STR(x)
@@ -18,20 +36,13 @@
 #include "task.h"
 #include "use_drivers.h"
 
+//Структура векторов системных вызовов
+typedef struct {
+    //uint16_t number;
+    void (*func)(struct regs *r);
+} syscall_vectors_table_t;
 
-static const char kbd_ascii_clean[128] = {
-    0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
-  '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
-    0,  'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',   0,
-  '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/',   0,  '*',   0, ' ',
-};
-
-static const char kbd_ascii_shift[128] = {
-    0,  27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b',
-  '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n',
-    0,  'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~',   0,
-  '|', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?',   0,  '*',   0, ' ',
-};
+extern syscall_vectors_table_t syscalls_table[MAX_SYSCALLS];
 
 //Вспомогательные макросы для вызова из ядра (если нужно)
 static inline void sys_draw_char(unsigned int x, unsigned int y, char c){
@@ -45,5 +56,7 @@ static inline void sys_fill_screen(unsigned char r, unsigned char g, unsigned ch
 void syscall_handler(struct regs *r);
 
 uint32_t tty_get_copied_bytes(void);
+
+void syscalls_table_init(void);
 
 #endif

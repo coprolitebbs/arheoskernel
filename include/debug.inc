@@ -1,4 +1,55 @@
+ ; Copyright (C) 2026 ARHeOS by Dmitry H
+ ;
+ ; This program is free software: you can redistribute it and/or modify
+ ; it under the terms of the GNU General Public License as published by
+ ; the Free Software Foundation, either version 3 of the License, or
+ ; (at your option) any later version.
+ ;
+ ; This program is distributed in the hope that it will be useful,
+ ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+ ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ ; GNU General Public License for more details.
+ ;
+ ; You should have received a copy of the GNU General Public License
+ ; along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 ;Вывод на экран
+
+;Один символ: AL = символ
+debug_char:
+    push ax
+    push bx
+    mov ah, 0x0E
+    mov bx, 0x0007          ;page 0, light gray on black
+    int 0x10
+    pop bx
+    pop ax
+    ret
+
+;Один ниббл: AL = 0..15
+debug_nibble:
+    and al, 0x0F
+    cmp al, 10
+    jb .digit
+    add al, 'A' - 10
+    jmp .out
+.digit:
+    add al, '0'
+.out:
+    jmp debug_char
+
+;Байт: AL
+debug_hex_byte:
+    push ax
+    mov ah, al
+    shr al, 4
+    call debug_nibble
+    mov al, ah
+    call debug_nibble
+    pop ax
+    ret
+
+
 print_char:
     push ax
     push bx
@@ -47,22 +98,7 @@ print_debug:
 
     ret
 
-; Вывод байта в hex (AL) через порт 0xE9 (сохраняет все регистры)
-debug_hex_byte:
-    push ax
-    push bx
-    push dx
-    mov bl, al
-    shr al, 4
-    call debug_hex_nibble
-    mov al, bl
-    and al, 0x0F
-    call debug_hex_nibble
-    pop dx
-    pop bx
-    pop ax
 
-    ret
 
 debug_hex_nibble:
     ;push dx
@@ -81,11 +117,10 @@ debug_hex_nibble:
 ;Вывод слова в hex (AX) через порт 0xE9 (сохраняет все регистры)
 debug_hex_word:
     push ax
-    xchg al, ah
+    mov al, ah
     call debug_hex_byte
     pop ax
     call debug_hex_byte
-
     ret
 
 debug_out_char:
@@ -259,19 +294,13 @@ debug_hex_dword:
     ret
 
 ;newline
-;вывод CR LF через debug port
-
 newline:
     push ax
-    push dx
-    mov dx,0xE9
-    mov al,13
-    out dx,al
-    mov al,10
-    out dx,al
-    pop dx
+    mov al, 13
+    call debug_char
+    mov al, 10
+    call debug_char
     pop ax
-
     ret
 
 ;Вывод символа AL на экран (BIOS Teletype)
@@ -360,6 +389,20 @@ screen_newline:
     call screen_print_char
     mov al, 10
     call screen_print_char
+    pop ax
+    ret
+
+debug_puts:
+    push ax
+    push si
+.next:
+    lodsb
+    test al, al
+    jz .done
+    call debug_char
+    jmp .next
+.done:
+    pop si
     pop ax
     ret
 

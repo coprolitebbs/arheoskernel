@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include-kernel/task.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -17,6 +34,7 @@
 #include "include-kernel/kconsole.h"
 #include "include-kernel/config.h"
 #include "include-kernel/elf32.h"
+#include "include-kernel/font_vga.h"
 
 static spinlock_t sched_spinlock = {0};
 
@@ -233,6 +251,8 @@ task_t* create_task(uint32_t entry){
     task->state = TASK_READY;
 	task->parameter = 0;
     task->heap_next = 0x50000000;//0x40001000;
+    task->tty_flags = TTY_DEFAULT;   // по умолчанию — ASCII
+
     //task->heap_next = virt_addr + pages * PAGE_SIZE;
     uint32_t pd_phys;
     task->page_dir = vmm_create_address_space(&pd_phys);
@@ -424,6 +444,7 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
     task->state = TASK_READY;
     task->parameter = 0;
     task->heap_next = 0x50000000;//0x40001000;
+    task->tty_flags = TTY_DEFAULT;   // по умолчанию — ASCII
     //task->heap_next = virt_addr + pages * PAGE_SIZE;
 
     uint32_t pd_phys;
@@ -523,14 +544,14 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
 
 
 
-// Функция парсинга и загрузки исполняемого ELF-файла в пользовательское пространство (Ring 3)
+//Функция парсинга и загрузки исполняемого ELF-файла в пользовательское пространство (Ring 3)
 task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, const char *cmdline){
     Elf32_Ehdr *ehdr = (Elf32_Ehdr*)elf_image;
 
-    // Базовый адрес (Delta) для релокации PIE-исполняемого файла
-    // Если файл статический (ehdr->type == ET_EXEC), load_base будет 0.
-    // Если файл позиционно-независимый (ehdr->type == ET_DYN), сажаем на 0x40000000.
-    uint32_t load_base = (ehdr->type == 3) ? 0x40000000 : 0; // ET_DYN = 3
+    //Базовый адрес (Delta) для релокации PIE-исполняемого файла
+    //Если файл статический (ehdr->type == ET_EXEC), load_base будет 0.
+    //Если файл позиционно-независимый (ehdr->type == ET_DYN), сажаем на 0x40000000.
+    uint32_t load_base = (ehdr->type == 3) ? 0x40000000 : 0; //ET_DYN = 3
 
     task_t *task = (task_t*)kmalloc(sizeof(task_t));
     if (!task) return NULL;
@@ -547,6 +568,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
     task->pid = next_pid++;
     task->state = TASK_READY;
     task->heap_next = 0x50000000;
+    task->tty_flags = TTY_DEFAULT;   //по умолчанию — ASCII
 
     uint32_t pd_phys;
     task->page_dir = vmm_create_address_space(&pd_phys);
@@ -555,13 +577,13 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
 
     task->user_stack = create_user_stack(task);
 
-    // 1. ЗАГРУЗКА СЕГМЕНТОВ PT_LOAD С УЧЕТОМ LOAD_BASE
+    //Загрузка сегментов PT_LOAD с учетом LOAD_BASE
     Elf32_Phdr *phdr = (Elf32_Phdr*)(elf_image + ehdr->phoff);
     Elf32_Shdr *sections = (Elf32_Shdr*)(elf_image + ehdr->shoff);
 
     for (int i = 0; i < ehdr->phnum; i++) {
-        if (phdr[i].type == 1) { // PT_LOAD
-            // Применяем смещение load_base к виртуальному адресу сегмента
+        if (phdr[i].type == 1) { //PT_LOAD
+            //Применяем смещение load_base к виртуальному адресу сегмента
             uint32_t vaddr = phdr[i].vaddr + load_base;
             uint32_t memsize = phdr[i].memsz;
             uint32_t filesize = phdr[i].filesz;
@@ -600,11 +622,11 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
         }
     }
 
-    // 2. ДИНАМИЧЕСКАЯ РЕЛОКАЦИЯ ПЕРЕМЕННЫХ И СТРОК (PIE ДИНАМИЧЕСКИЙ ЛИНКОВЩИК)
-    // Ищем релокационные таблицы в заголовках секций ELF-образа
+    //Динамическая релокация переменных и строк (PIE динамический линкер)
+    //Ищем релокационные таблицы в заголовках секций ELF-образа
     if (load_base > 0) {
         for (int i = 0; i < ehdr->shnum; i++) {
-            // Ищем секции релокаций (SHT_REL == 9)
+            //Ищем секции релокаций (SHT_REL == 9)
             if (sections[i].type == 9 || (sections[i].type == 1 && sections[i].entsize == sizeof(Elf32_Rel))) {
                 Elf32_Rel *rels = (Elf32_Rel*)(elf_image + sections[i].offset);
                 int num_relocs = sections[i].size / sizeof(Elf32_Rel);
@@ -616,12 +638,12 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
                 for (int r = 0; r < num_relocs; r++) {
                     uint32_t type = ELF32_R_TYPE(rels[r].info);
 
-                    // Нас интересует базовый тип относительного смещения PIE-компилятора
-                    if (type == R_386_RELATIVE || type == 1) { // R_386_32 / R_386_RELATIVE
-                        // Вычисляем адрес, куда указывает релокация, в памяти процесса
+                    //Нас интересует базовый тип относительного смещения PIE-компилятора
+                    if (type == R_386_RELATIVE || type == 1) {//R_386_32 / R_386_RELATIVE
+                        //Вычисляем адрес, куда указывает релокация, в памяти процесса
                         uint32_t *patch_ptr = (uint32_t*)(rels[r].offset + load_base);
 
-                        // Прибавляем смещение load_base (0x40000000) к значению по этому адресу
+                        //Прибавляем смещение load_base (0x40000000) к значению по этому адресу
                         *patch_ptr += load_base;
                     }
                 }
@@ -631,7 +653,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
         }
     }
 
-    // 3. ПОДГОТОВКА СТЕКА И АРГУМЕНТОВ (Оставляем старую рабочую схему)
+    //Подготовка стека и аргументов
     uint32_t old_cr3;
     __asm__ __volatile__("mov %%cr3, %0" : "=r"(old_cr3));
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(task->page_dir_phys));
@@ -690,7 +712,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
     if (current_task && current_task->pid != 0) strcpy(task->cwd, current_task->cwd);
     else strcpy(task->cwd, "/");
 
-    // Критический фикс: Точка входа также смещается на load_base!
+    //Точка входа также смещается на load_base
     uint32_t entry_point = ehdr->entry + load_base;
     prepare_task_stack(task, entry_point);
 
@@ -852,35 +874,40 @@ task_t* create_kernel_thread(uint32_t entry_virt){
 
 void kernel_init_thread(void){
     drivers_init();
+
     kconsole_init();
 
-    __asm__ __volatile__("sti" ::: "memory");
+    //__asm__ __volatile__("sti" ::: "memory");
 
-    com_puts("[KERNEL THREAD] System Init Thread started successfully!\n");
+    //com_puts("[KERNEL THREAD] System Init Thread started successfully!\n");
     //Инициализация драйверов дисковода и VFS
     //Планировщик в этот момент работает, прерывание 32 тикает фоном
     //Драйвер ФС сам переключает свой локальный schedule_lock на время чтения портов
     int r = vfs_init_system();
     //Выводим статус монтирования на COM-порт или дебаг-область
-    com_puts("[KERNEL THREAD] VFS Init Status: ");
-    com_puthex(r);
-    com_puts("\n");
+    //com_puts("[KERNEL THREAD] VFS Init Status: ");
+    //com_puthex(r);
+    //com_puts("\n");
 
     if(r == VFS_STATUS_OK){
+        kprintf("Open boot config...");
         cfg_file_t *cfg = cfg_open("/config/boot/boot.cfg", FS_OPEN_READ,true);
+        kprintf("OK\n");
+        init_standard_locales();
 
         kconsole_reconfigure(cfg);
+
         int adddrv_status = load_additional_drivers(cfg);
         if(adddrv_status != DRV_STATUS_OK){
-            com_puts("[KERNEL THREAD] Additional drv load error: ");
-            com_puthex(adddrv_status);
-            com_puts("\n");
+            //com_puts("[KERNEL THREAD] Additional drv load error: ");
+            //com_puthex(adddrv_status);
+            //com_puts("\n");
         }
         cfg_close(cfg);
     }
 
     //task_spawn_from_file("/usbin/hello.bin", 0x40000000,"-v --test-mode");
-    task_spawn_from_file("/bin/horus.bin", 0x40000000, NULL);
+    task_spawn_from_file("/bin/chorus.bin", 0x40000000, NULL);
     //task_spawn_from_file("/usbin/vfs_test.bin", 0x40000000, NULL);
     //task_spawn_from_file("/usbin/cat.bin", 0x40000000, NULL);
     //task_spawn_from_file("/usbin/hello.bin", 0x40000000, NULL);

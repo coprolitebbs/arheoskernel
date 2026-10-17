@@ -1,3 +1,18 @@
+ ; Copyright (C) 2026 ARHeOS by Dmitry H
+ ;
+ ; This program is free software: you can redistribute it and/or modify
+ ; it under the terms of the GNU General Public License as published by
+ ; the Free Software Foundation, either version 3 of the License, or
+ ; (at your option) any later version.
+ ;
+ ; This program is distributed in the hope that it will be useful,
+ ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+ ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ ; GNU General Public License for more details.
+ ;
+ ; You should have received a copy of the GNU General Public License
+ ; along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 BITS 16
 
 ;Глобальные переменные
@@ -40,7 +55,7 @@ vbe_init:
 
     ;Отладка: Старт
     mov al, 'V'
-    out 0xE9, al
+    call debug_char
 
     ;Получение информации о контроллере
     mov ax, cs
@@ -52,7 +67,7 @@ vbe_init:
     jne .vbe_fail
 
     mov al, 'O' ;OK Controller
-    out 0xE9, al
+    call debug_char
 
     ;Перебор режимов
     mov bx, 0x0100
@@ -166,13 +181,13 @@ vbe_init:
 
     ;Успех без LFB
     mov al, 'N' ; No LFB
-    out 0xE9, al
+    call debug_char
     jmp .success_fill_vars
 
 .success_lfb:
     ;Успех с LFB
     mov al, 'L' ; LFB OK
-    out 0xE9, al
+    call debug_char
     ;Устанавливаем бит 0 в graphics_flags
     mov dword [graphics_flags], 1
     jmp .success_fill_vars
@@ -233,7 +248,7 @@ vbe_init:
 
 .pmi_fail:
     mov al, 'P'         ;PMI не найден
-    out 0xE9, al
+    call debug_char
 
 .finish_vars:
     mov bx, [best_mode]
@@ -277,11 +292,11 @@ vbe_init:
 
     ;Отладка - Успешно
     mov al, 'S'
-    out 0xE9, al
+    call debug_char
     mov al, 'O'
-    out 0xE9, al
+    call debug_char
     mov al, 'K'
-    out 0xE9, al
+    call debug_char
 
     pop ds
     pop es
@@ -290,7 +305,7 @@ vbe_init:
 
 .vbe_fail_info:
     mov al, 'I'
-    out 0xE9, al
+    call debug_char
     jmp .vbe_fail
 
 .vbe_fail:

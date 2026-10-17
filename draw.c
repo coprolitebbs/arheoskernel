@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <stdint.h>
 #include "include-kernel/draw.h"
 #include "include-kernel/font_data.h"   //массив font_data[256][8]
@@ -34,6 +51,8 @@ void back_buffer_screen_flip(void){
 }
 
 //Рисование символа
+//c — байт в CP866. Для ASCII (0x00..0x7F) совпадает с codepoint
+//Для codepoint-based рендера использовать fb->draw_codepoint
 void _draw_char(unsigned int x, unsigned int y,
                 unsigned char c,
                 unsigned char r, unsigned char g, unsigned char b,
@@ -258,9 +277,50 @@ void kernel_fill_screen(uint32_t color){
     }
 }
 
-void kernel_draw_string(uint32_t x,uint32_t y,const char *str,uint32_t color){
-    if(fb && fb->draw_string){
+
+//Fallback: fb-драйвер ещё не загружен.
+//Работаем через font_data[] — таблицу CP866-шрифта из BIOS.
+//Всё, что приходит, конвертируется в CP866-байты для _draw_char.
+//Это низкоуровневый путь для ранних паник; после init_drivers() сюда
+//попасть уже нельзя — fb->draw_string уйдёт в font_draw_codepoint.
+void kernel_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t color){
+    if (fb && fb->draw_string){
         fb->draw_string(x, y, str, color);
+    } else {
+        //Драйвер фреймбуфера еще не загружен. Используем низкоуровневую функцию _draw_char(),
+        //которая пишет напрямую по физическому адресу LFB из boot_info.
+        //Добавляем локальный автомат UTF-8 -> CP866, чтобы ранняя отладка кириллицы работала
+        uint8_t lead_byte = 0;
+        while (*str){
+            uint8_t b = (uint8_t)*str;
+            //Ловим стартовый байт русской буквы в UTF-8
+            if (b == 0xD0 || b == 0xD1){
+                lead_byte = b;
+                str++;
+                continue;
+            }
+            //Если есть сохраненный стартовый байт — транслируем кириллицу в CP866
+            if (lead_byte != 0){
+                uint8_t cp866_char = ' ';
+                if (lead_byte == 0xD0){
+                    if (b >= 0x90 && b <= 0xBF){
+                        if (b <= 0xAF) cp866_char = b - 0x90 + 0x80;
+                        else           cp866_char = b - 0xB0 + 0xA0;
+                    }
+                    else if (b == 0x81) cp866_char = 0xF0; //'Ё'
+                }
+                else if (lead_byte == 0xD1){
+                    if (b >= 0x80 && b <= 0x8F)  cp866_char = b - 0x80 + 0xE0;
+                    else if (b == 0x91)          cp866_char = 0xF1; //'ё'
+                }
+                b = cp866_char;
+                lead_byte = 0;
+            }
+            //Вызываем _draw_char с дефолтным белым цветом (0xFF, 0xFF, 0xFF),
+            //прозрачным фоном (1) и черной подложкой
+            _draw_char(x, y, b, 0xFF, 0xFF, 0xFF, 1, 0, 0, 0);
+            x += 8; //Сдвиг сетки строго на 1 символ шрифта
+            str++;
+        }
     }
 }
-

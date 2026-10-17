@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include/fat12_driver.h"
 #include "include/fat12_internal.h"
 #include "include/fat12_boot.h"
@@ -19,8 +36,11 @@ fs_driver_api_t *api_ptr;
 uint8_t fat12_path_buffer[FAT12_PATH_MAX] __attribute__((aligned(4)));
 uint8_t *fat12_path_buffer_ptr;
 
+description_driver_api_t descr_api;
 
 //  ----- внутренние функции  -----
+
+
 
 
 int fat12_read_file_at(fat12_fs_t *vol,uint16_t start_cluster,uint32_t position,void *buffer,uint32_t size){
@@ -509,6 +529,46 @@ int fat12_find_parent_cluster(fat12_fs_t *vol, const char *path, uint16_t *out_p
 }
 
 
+//Освобождает всю цепочку кластеров, начиная со start_cluster
+//Кластеры < 2 и >= 0xFF8 игнорируются (это не данные, а маркеры FAT)
+//Возвращает FS_OK или код ошибки от fat12_flush_fat
+static int fat12_free_chain(fat12_fs_t *vol, uint16_t start_cluster){
+    if (!vol || !vol->mounted) return FS_IO_ERROR;
+    uint16_t cluster = start_cluster;
+    bool freed_any = false;
+    while (cluster >= 2 && cluster < 0xFF8){
+        uint16_t next = fat12_get_next_cluster(vol, cluster);
+        fat12_set_cluster_value(vol, cluster, 0x000);
+        cluster = next;
+        freed_any = true;
+    }
+    //Если реально освободили хоть один кластер — сбрасываем FAT на диск
+    if (freed_any){
+        return fat12_flush_fat(vol);
+    }
+    return FS_OK;
+}
+
+
+//Обнуляет файл: освобождает цепочку кластеров и пишет 0/0 в dirent родителя
+//parent_cluster == 0 означает корневой каталог дискеты
+static int fat12_truncate_file(fat12_fs_t *vol,
+                               uint16_t parent_cluster,
+                               uint32_t entry_id,
+                               uint16_t start_cluster){
+    if (!vol || !vol->mounted) return FS_IO_ERROR;
+    //Обнуляем метаданные в dirent родителя start_cluster = 0, file_size = 0
+    int r = fat12_update_dirent(vol, parent_cluster, entry_id, 0, 0);
+    if (r != FS_OK) return r;
+    //Освобождаем цепочку кластеров в FAT
+    r = fat12_free_chain(vol, start_cluster);
+    if (r != FS_OK) return r;
+
+
+    return FS_OK;
+}
+
+
 //  -----  внешние функции  -----
 
 int fat12_mount(uint32_t drive){
@@ -652,7 +712,9 @@ int fat12_open(void *vol_ptr, const char *name, uint32_t flags){
     if (!vol->mounted) return FS_IO_ERROR;
 
     //Особый случай: открытие корня "/"
-    if (strcmp(name, "/") == 0) {
+    if (strcmp(name, "/") == 0){
+        // Корень — каталог, операции записи и TRUNCATE запрещены
+        if ((flags & FS_OPEN_WRITE) || (flags & FS_OPEN_TRUNCATE)) return FS_ACCESS_DENIED;
         for (int fd = 0; fd < FAT12_MAX_OPEN_FILES; fd++) {
             if (fat12_files_ptr[fd].used == 0) {
                 fat12_files_ptr[fd].used = 1;
@@ -691,7 +753,32 @@ int fat12_open(void *vol_ptr, const char *name, uint32_t flags){
         r = fat12_lookup_in_dir(vol, parent_cluster, name83, &entry, &entry_id);
     }
 
-    if (r != FS_OK) return r; // Файл не найден
+    if (r != FS_OK) return r; //Файл не найден
+
+    //Проверки прав
+    bool is_dir      = (entry.attr & 0x10) != 0;   //FAT subdirectory bit
+    bool is_readonly = (entry.attr & 0x01) != 0;   //FAT read-only bit
+    if (flags & FS_OPEN_WRITE){
+        //Каталог на запись не открываем
+        if (is_dir) return FS_ACCESS_DENIED;
+        //Readonly-файл на запись не открываем
+        if (is_readonly) return FS_ACCESS_DENIED;
+    }
+    //TRUNCATE — деструктивная операция, без права записи не имеет смысла
+    if ((flags & FS_OPEN_TRUNCATE) && !(flags & FS_OPEN_WRITE)){
+        return FS_ACCESS_DENIED;
+    }
+    if (flags & FS_OPEN_TRUNCATE){
+        if (is_dir){
+            //TRUNCATE на каталоге молча игнорируем
+        } else {
+            int tr = fat12_truncate_file(vol, parent_cluster, entry_id, entry.cluster_low);
+            if (tr != FS_OK) return tr;
+            //Синхронизируем локальную копию dirent, чтобы заполнение fat12_files_ptr ниже взяло актуальные 0
+            entry.cluster_low = 0;
+            entry.size        = 0;
+        }
+    }
 
     //Ищем свободное место в таблице дескрипторов файлов
     for (int fd = 0; fd < FAT12_MAX_OPEN_FILES; fd++){
@@ -702,7 +789,7 @@ int fat12_open(void *vol_ptr, const char *name, uint32_t flags){
             fat12_files_ptr[fd].file_size = entry.size;
             fat12_files_ptr[fd].position = 0;
 
-            // Конвертируем DOS-атрибуты в системные флаги ядра
+            //Конвертируем DOS-атрибуты в системные флаги ядра
             uint32_t core_attributes = 0;
             if (entry.attr & 0x10) core_attributes |= FS_ATTR_DIRECTORY;
             if (entry.attr & 0x01) core_attributes |= FS_ATTR_READONLY;
@@ -710,7 +797,7 @@ int fat12_open(void *vol_ptr, const char *name, uint32_t flags){
 
             fat12_files_ptr[fd].entry_id = entry_id;
 
-            // Фиксируем инод родителя, чтобы функция записи знала куда сбрасывать dirent
+            //Фиксируем инод родителя, чтобы функция записи знала куда сбрасывать dirent
             fat12_files_ptr[fd].parent_dir_cluster = parent_cluster;
 
             return fd;
@@ -758,6 +845,7 @@ int fat12_write(int fd, const void *buffer, uint32_t size){
     if (!buffer || size == 0) return 0;
 
     if (file->attributes & FS_ATTR_DIRECTORY) return FS_ACCESS_DENIED;
+    if (file->attributes & FS_ATTR_READONLY)  return FS_ACCESS_DENIED;
 
     uint16_t start_cluster = file->start_cluster;
 
@@ -801,7 +889,6 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
 
     fat12_file_t *file = &fat12_files_ptr[dir];
     if (!file->used) return FS_IO_ERROR;
-    // Проверяем, что это действительно каталог
     if (!(file->attributes & FS_ATTR_DIRECTORY) && !(file->attributes & 0x10)) {
         return FS_ACCESS_DENIED;
     }
@@ -809,7 +896,7 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
     fat12_fs_t *vol = file->vol;
     uint32_t entry_size = sizeof(fat12_dirent_t); // 32 байта
 
-    //Сценарийц 1 - Читаем КОРНЕВОЙ каталог дискеты (start_cluster == 0)
+    // Сценарий 1 — КОРНЕВОЙ каталог дискеты (start_cluster == 0)
     if (file->start_cluster == 0) {
         uint32_t root_bytes = vol->root_size * vol->bytes_per_sector;
         if (file->position >= root_bytes) return FS_NOT_FOUND;
@@ -823,14 +910,13 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
             if (fat12_read_sectors(vol, lba, 1, sector_buf) != FS_OK) return FS_IO_ERROR;
             fat12_dirent_t *fat_entry = (fat12_dirent_t *)(sector_buf + entry_offset);
 
-            // Сдвигаем позицию файла на следующую запись (на 32 байта вперед)
             file->position += entry_size;
 
             uint8_t first = (uint8_t)fat_entry->name[0];
-            if (first == 0x00) return FS_NOT_FOUND; // Записей больше нет
-            if (first == 0xE5 || (fat_entry->attr & 0x0F) == 0x0F) continue; // Удален или LFN
+            if (first == 0x00) return FS_NOT_FOUND;
+            if (first == 0xE5 || (fat_entry->attr & 0x0F) == 0x0F) continue;
 
-            // Декодируем имя FAT 8.3 в entry->name
+            // 8.3 → читаемое имя
             int n = 0;
             for (int i = 0; i < 11; i++){
                 if (i == 8 && fat_entry->name[8] != ' ') entry->name[n++] = '.';
@@ -839,26 +925,31 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
             }
             entry->name[n] = '\0';
 
-            entry->inode = file->position / entry_size; // Имитируем номер инода для VFS
-            entry->size = fat_entry->size;
-            entry->type = (fat_entry->attr & 0x10) ? FS_ATTR_DIRECTORY : 0;
+            // Полностью заполняем все поля структуры
+            entry->inode      = file->position / entry_size;
+            entry->id         = entry->inode;
+            entry->size       = fat_entry->size;
+            entry->type       = (fat_entry->attr & 0x10) ? FS_ATTR_DIRECTORY : 0;
+            entry->attributes = 0;
+            if (fat_entry->attr & 0x10) entry->attributes |= FS_ATTR_DIRECTORY;
+            if (fat_entry->attr & 0x01) entry->attributes |= FS_ATTR_READONLY;
+            if (fat_entry->attr & 0x02) entry->attributes |= FS_ATTR_HIDDEN;
+            if (fat_entry->attr & 0x04) entry->attributes |= FS_ATTR_SYSTEM;
+            if (fat_entry->attr & 0x20) entry->attributes |= FS_ATTR_ARCHIVE;
 
             return FS_OK;
         }
         return FS_NOT_FOUND;
     }
 
-    //Сценарий 2 - Читаем подкаталог области данных (start_cluster >= 2)
-    //Подкаталог в FAT12 может расти бесконечно, поэтому читаем его кластер за кластером
+    // Сценарий 2 — подкаталог области данных (start_cluster >= 2)
     uint32_t cluster_size = vol->sectors_per_cluster * vol->bytes_per_sector;
     uint8_t block_buf[512] __attribute__((aligned(4)));
 
-    //Подкаталоги не имеют фиксированного размера в байтах, читаем пока не встретим 0x00
     while (true) {
         uint32_t cluster_index = file->position / cluster_size;
         uint32_t offset_in_cluster = file->position % cluster_size;
 
-        //Ищем физический кластер, в котором сейчас находится указатель file->position
         uint16_t cluster = file->start_cluster;
         bool cluster_valid = true;
 
@@ -871,7 +962,7 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
             cluster = next;
         }
 
-        if (!cluster_valid) return FS_NOT_FOUND; // Цепочка кластеров папки закончилась
+        if (!cluster_valid) return FS_NOT_FOUND;
 
         uint32_t cluster_lba = vol->data_start + ((uint32_t)(cluster - 2) * vol->sectors_per_cluster);
         uint32_t sector_in_cluster = offset_in_cluster / vol->bytes_per_sector;
@@ -883,14 +974,12 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
 
         fat12_dirent_t *fat_entry = (fat12_dirent_t *)(block_buf + entry_offset_in_sector);
 
-        // Шагаем по позиции вперед
         file->position += entry_size;
 
         uint8_t first = (uint8_t)fat_entry->name[0];
-        if (first == 0x00) return FS_NOT_FOUND; // Конец записей в подкаталоге
-        if (first == 0xE5 || (fat_entry->attr & 0x0F) == 0x0F) continue; // Пропускаем удаленные/LFN
+        if (first == 0x00) return FS_NOT_FOUND;
+        if (first == 0xE5 || (fat_entry->attr & 0x0F) == 0x0F) continue;
 
-        // Декодируем 8.3 имя
         int n = 0;
         for (int i = 0; i < 11; i++){
             if (i == 8 && fat_entry->name[8] != ' ') entry->name[n++] = '.';
@@ -899,14 +988,19 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
         }
         entry->name[n] = '\0';
 
-        entry->inode = file->position / entry_size;
-        entry->size = fat_entry->size;
-        entry->type = (fat_entry->attr & 0x10) ? FS_ATTR_DIRECTORY : 0;
+        entry->inode      = file->position / entry_size;
+        entry->id         = entry->inode;
+        entry->size       = fat_entry->size;
+        entry->type       = (fat_entry->attr & 0x10) ? FS_ATTR_DIRECTORY : 0;
+        entry->attributes = 0;
+        if (fat_entry->attr & 0x10) entry->attributes |= FS_ATTR_DIRECTORY;
+        if (fat_entry->attr & 0x01) entry->attributes |= FS_ATTR_READONLY;
+        if (fat_entry->attr & 0x02) entry->attributes |= FS_ATTR_HIDDEN;
+        if (fat_entry->attr & 0x04) entry->attributes |= FS_ATTR_SYSTEM;
+        if (fat_entry->attr & 0x20) entry->attributes |= FS_ATTR_ARCHIVE;
 
         return FS_OK;
     }
-
-    return FS_NOT_FOUND;
 }
 
 
@@ -963,10 +1057,10 @@ void *fat12_get_volume(uint32_t id){
     if(id >= FAT12_MAX_VOLUMES) return 0;
     for(int i = 0; i < FAT12_MAX_VOLUMES; ++i){
         fat12_fs_t *vol = &fat12_volumes_ptr[i];
-        if(vol->drive == id && vol->mounted == 1) return &fat12_volumes_ptr[id];
+        if(vol->drive == id && vol->mounted == 1) return vol;
     }
 
-    return FS_OK;
+    return 0;//FS_OK;
 }
 
 
@@ -1067,6 +1161,7 @@ int fat12_unlink(void *vol_ptr, const char *path){
     if (entry.attr & 0x10) return FS_ACCESS_DENIED;
 
     // Освобождаем цепочку кластеров файла в таблице FAT
+    /*
     uint16_t cluster = entry.cluster_low;
     while (cluster >= 2 && cluster < 0xFF8) {
         uint16_t next = fat12_get_next_cluster(vol, cluster);
@@ -1074,6 +1169,10 @@ int fat12_unlink(void *vol_ptr, const char *path){
         cluster = next;
     }
     fat12_flush_fat(vol); // Сбрасываем изменения таблицы FAT на дискету
+    */
+    // Освобождаем цепочку кластеров файла в таблице FAT
+    int fc_res = fat12_free_chain(vol, entry.cluster_low);
+    if (fc_res != FS_OK) return fc_res;
 
     //Помечаем запись в родительском каталоге как удаленную (0xE5)
     uint32_t entries_per_sector = vol->bytes_per_sector / sizeof(fat12_dirent_t);
@@ -1149,13 +1248,17 @@ int fat12_rmdir(void *vol_ptr, const char *path){
     }
 
     //Освободим цепочку кластеров удаляемой папки в FAT
-    uint16_t free_cluster = target_cluster;
+    /*uint16_t free_cluster = target_cluster;
     while (free_cluster >= 2 && free_cluster < 0xFF8) {
         uint16_t next = fat12_get_next_cluster(vol, free_cluster);
         fat12_set_cluster_value(vol, free_cluster, 0x000); // Обнуляем кластер в FAT
         free_cluster = next;
     }
     fat12_flush_fat(vol); // Сбрасываем обновленную FAT на дискету
+    */
+    // Освободим цепочку кластеров удаляемой папки в FAT
+    int fc_res = fat12_free_chain(vol, target_cluster);
+    if (fc_res != FS_OK) return fc_res;
 
     //Маркируем запись о папке в родительском каталоге как удаленную (0xE5)
     uint32_t scan_start = (parent_cluster == 0) ? vol->root_start : (vol->data_start + (uint32_t)(parent_cluster - 2) * vol->sectors_per_cluster);
@@ -1189,6 +1292,9 @@ void fs_init(struct boot_info *boot){
 void driver_main(struct boot_info *boot){
     fs_init(boot);
 
+    description_driver_api_t *descr_api_ptr = &descr_api;
+    descr_api_ptr->type = DESCR_FILESYSTEM_DRIVER;
+
     api_ptr = &api;
     //fs_driver_api_t *a = &api;
 
@@ -1221,10 +1327,12 @@ void driver_main(struct boot_info *boot){
     }
 
     fat12_path_buffer_ptr = fat12_path_buffer;
+
+    descr_api_ptr->struct_ptr = (void *)&api;
 }
 
 
-fs_driver_api_t *driver_get_api(void){
-    return &api;
+description_driver_api_t *driver_get_api(void){
+    return &descr_api;
 }
 

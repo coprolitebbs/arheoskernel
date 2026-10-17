@@ -1,4 +1,19 @@
-;рабочая версия загрузчика Stage 2
+ ; Copyright (C) 2026 ARHeOS by Dmitry H
+ ;
+ ; This program is free software: you can redistribute it and/or modify
+ ; it under the terms of the GNU General Public License as published by
+ ; the Free Software Foundation, either version 3 of the License, or
+ ; (at your option) any later version.
+ ;
+ ; This program is distributed in the hope that it will be useful,
+ ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+ ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ ; GNU General Public License for more details.
+ ;
+ ; You should have received a copy of the GNU General Public License
+ ; along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+;рабочая версия загрузчика Stage 2 для hdd
 
 BITS 16
 ORG 0x7E00
@@ -18,9 +33,15 @@ _stage2_entry:
     mov sp, 0xFFF0
     sti
 
+    mov [drive], dl
+
+    ;Инициализация VBE и A20
+    call vbe_init
+    call a20_init
+    call a20_enable
+
     push es
 
-    mov [drive], dl
     call ext2_disk_init
 
     call ext2_init
@@ -29,29 +50,7 @@ _stage2_entry:
     call ext2_read_group_table
     jc .fatal_halt
 
-    call a20_init
-    call a20_enable
-
-    ;Грузим Ядро сразу в 0x100000 (unreal-режим, ES = phys>>4)
-    mov si, kernel_filename
-    call ext2_find_file
-    jc .fatal_halt
-    mov [kernel_inode], ax
-
-    call ext2_inode_to_group
-    call ext2_get_group_inode_table
-
-    mov word [cs:file_load_segment], KERNEL_PHYS_SEG
-                                    ; unreal-сегмент: 0x10000*16 = 0x100000;
-                                    ; ES выставляет ext2_load_file (.read)
-    mov ax, [kernel_inode]
-    call ext2_load_file
-    jc .fatal_halt
-
-    mov eax, [file_size]
-    mov [kernel_size_pm], eax
-
-    ;Грузим Framebuffer Driver (unreal-режим: ES = phys>>4, прямая запись по физ. адресам)
+    ;Грузим Framebuffer Driver
     mov si, fb_driver_filename
     call ext2_find_file
     jc .fatal_halt
@@ -60,8 +59,7 @@ _stage2_entry:
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, FB_SEG                ; 0x3000 -> линейный адрес 0x30000
-    mov es, ax
+    mov ax, 0x3000
     mov [cs:file_load_segment], ax
     mov ax, [fb_inode]
     call ext2_load_file
@@ -70,7 +68,7 @@ _stage2_entry:
     mov eax, [file_size]
     mov [fb_driver_size], eax
 
-    ;Грузим Драйвер FAT12 (unreal-режим)
+    ;Грузим Драйвер FAT12
     mov si, fat12_driver_filename
     call ext2_find_file
     jc .fatal_halt
@@ -79,8 +77,7 @@ _stage2_entry:
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, F12_SEG               ; 0x4000 -> линейный адрес 0x40000
-    mov es, ax
+    mov ax, 0x4000
     mov [cs:file_load_segment], ax
     mov ax, [fat12_inode]
     call ext2_load_file
@@ -89,7 +86,7 @@ _stage2_entry:
     mov eax, [file_size]
     mov [fat12_driver_size], eax
 
-    ;Грузим Драйвер EXT2 (unreal-режим)
+    ;Грузим Драйвер EXT2
     mov si, ext2_driver_filename
     call ext2_find_file
     jc .fatal_halt
@@ -98,8 +95,7 @@ _stage2_entry:
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, EXT2DRV_SEG           ; 0x5000 -> линейный адрес 0x50000
-    mov es, ax
+    mov ax, 0x5000
     mov [cs:file_load_segment], ax
     mov ax, [ext2_inode]
     call ext2_load_file
@@ -108,16 +104,7 @@ _stage2_entry:
     mov eax, [file_size]
     mov [ext2_driver_size], eax
 
-    ; Восстанавливаем обычный real-mode ES (stage2 лежит на 0x7E00)
-    mov ax, 0x7E0
-    mov es, ax
-
     pop es
-    cli
-
-    ;Инициализация VBE и A20
-    call vbe_init
-    call a20_init
 
     ;Получение карты памяти через E820
     push es
@@ -130,15 +117,55 @@ _stage2_entry:
     pop di
     pop es
 
+    ;Грузим Ядро
+    mov si, kernel_filename
+    call ext2_find_file
+    jc .fatal_halt
+    mov [kernel_inode], ax
+
+    call ext2_inode_to_group
+    call ext2_get_group_inode_table
+
+    mov ax, [kernel_inode]
+    call ext2_read_inode
+    jc .fatal_halt
+
+    mov ax, INODE_SEG
+    mov ds, ax
+    mov si, [cs:inode_offset]
+    mov eax, [si+4]               ;Читаем 32-битный размер ядра
+    mov [cs:kernel_size_pm], eax
+
+    ;Вызываем изолированную функцию загрузки ядра
+    call ext2_load_kernel_high
+    jc .fatal_halt
+
+    ;Восстанавливаем дефолтные сегменты для сборщиков метаданных
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+
+
+    ;call dump_kernel
+    ;jmp halt
+
+
     ;Формирование структур для ядра
     call build_fs_info
     call build_modules_info
     call build_boot_info
 
-    call a20_enable
+    cli
+
+    mov eax, [cs:gdtr+2]
+    cmp eax, 0x7E00
+    jae .final_gdt_ok
+    add eax, 0x7E00
+    mov [cs:gdtr+2], eax
+.final_gdt_ok:
 
     ;Переход в защищённый режим
-    lgdt [gdtr]
+    lgdt [cs:gdtr]
     mov eax, cr0
     or eax, 1
     mov cr0, eax
@@ -161,11 +188,7 @@ pm_entry:
 
     cli
 
-    ;Ядро уже загружено в 0x100000 напрямую (unreal-режим, stage2),
-    ;релокация не нужна.
-
     mov ebx, BOOTINFO_ADDR
-
     jmp 0x08:0x100000
 
 halt32:
@@ -185,11 +208,6 @@ halt:
     jmp .loop
 
 ;Переменные
-KERNEL_PHYS_SEG equ 0x10000     ; unreal-сегмент для ядра: 0x10000*16 = 0x100000
-FB_SEG          equ 0x3000      ; линейный адрес драйвера FB = 0x30000 (совпадает с bootinfo)
-F12_SEG         equ 0x4000      ; линейный адрес драйвера FAT12 = 0x40000
-EXT2DRV_SEG     equ 0x5000      ; линейный адрес драйвера EXT2 = 0x50000
-
 kernel_size_pm       dd 0
 kernel_inode         dw 0
 fb_inode             dw 0

@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include-kernel/isr.h"
 #include "include-kernel/syscalls.h"   //для SYS_* констант
 #include "include-kernel/draw.h"       //для вызова draw_char из системного вызова
@@ -9,6 +26,9 @@
 #include "drivers/include_drivers/drv_format.h"
 #include "include-kernel/syscalls.h"
 #include "include-kernel/kconsole.h"
+#include "include-kernel/kbd_translate.h"
+#include "include-kernel/locale.h"
+#include "include-kernel/font_vga.h"
 
 volatile uint8_t floppy_irq_fired = 0;
 volatile uint32_t tick_count = 0;
@@ -256,72 +276,61 @@ void isr_pagefault(struct regs *r){
 
 
 void irq33_handler(struct regs *r){
+    //Аппаратно вычитываем скан-код клавиши из порта контроллера i8042
     uint8_t scancode = inb(0x60);
+    //Посылаем сигнал EOI (End of Interrupt) контроллеру прерываний PIC,
+    //чтобы клавиатурная шина не вешала систему на время выполнения кода
     outb(0x20, 0x20);
-
-    if(!current_tty || current_tty->foreground_pid == 0) return;
-    static bool ctrl_pressed = false;
-    static bool caps_lock_active = false;
-
-    extern bool shift_pressed;
-    extern volatile uint8_t stdin_cancel_flag;
-
-    if (scancode == 0x1D){
-        ctrl_pressed = true;
-    } else if (scancode == 0x9D){
-        ctrl_pressed = false;
+    //Обрабатываем хоткей смены раскладки. Он читает только
+    //состояние модификаторов и переключает раскладку при нажатии комбинации,
+    //сам скан-код при этом идёт дальше обычным путём
+    kbd_hotkey_process(scancode);
+    //Передаем скан-код в драйвер клавы
+    //Это наполнит кольцевой буфер kbd_event_buf, и sekhmet_read_line(), или кому там еще нужно, увидит нажатие
+    if (kbd_driver_api && kbd_driver_api->irq_callback){
+        kbd_driver_api->irq_callback(scancode);
     }
-
-    if (ctrl_pressed && scancode == 0x2E){
-        stdin_cancel_flag = 1;
-        if (ready_queue){
-            task_t *start = ready_queue;
-            task_t *t = start;
-            do {
-                if (t->state == TASK_BLOCKED && t->wait_reason == 1){
-                    if (t->pid == current_tty->foreground_pid){
-                        t->state = TASK_READY;
-                    }
-                }
-                t = t->next;
-            } while (t != start);
-        }
+    if (current_tty && current_tty->foreground_pid != 0) {
+        //Если терминал захвачен активным шеллом/процессором Ring 3 — выходим
+        //Оставим только обработку переключения TTY по комбинациям клавиш
         return;
     }
+    //Fallback ядра
+    if (!current_tty) return;
+    static bool caps_lock_active = false;
+    static bool ctrl_pressed = false;
+    extern bool shift_pressed;
 
+    if (scancode == 0x1D)      ctrl_pressed = true;
+    else if (scancode == 0x9D) ctrl_pressed = false;
     if (current_tty->line_ready) return;
 
+    //Вспомогательные лямбды восстановления символов под курсором ядра
     void restore_char_at_cursor(uint32_t buffer_idx){
         uint32_t cx, cy;
         kconsole_get_render_coords(buffer_idx, &cx, &cy);
-        uint32_t cell_x = cx / 8;
-        uint32_t cell_y = cy / LINE_HEIGHT;
-        char orig_char = ' ';
-
-        if (cell_y < CONSOLE_ROWS && cell_x < CONSOLE_COLS){
-            orig_char = current_tty->matrix[cell_y][cell_x].ascii;
+        uint32_t cell_x = cx / current_tty->cell_w; uint32_t cell_y = cy / current_tty->cell_h;
+        uint32_t orig_char = ' ';
+        if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols){
+            orig_char = current_tty->matrix[cell_y][cell_x].codepoint;
         }
-
-        if (fb && fb->clear_tile) {
-            fb->clear_tile(cx, cy, console_bgcolor);
-        } else {
-            fb->draw_char(cx, cy, current_tty->cursor_code, console_bgcolor);
-        }
-
-        if (orig_char != ' ' && orig_char != '\0'){
-            fb->draw_char(cx, cy, orig_char, console_fgcolor);
-        }
+        if (fb && fb->clear_tile) fb->clear_tile(cx, cy, console_bgcolor);
+        else
+            fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_bgcolor);
+            //fb->draw_char(cx, cy, current_tty->cursor_code, console_bgcolor);
+        if (orig_char != ' ' && orig_char != '\0') fb->draw_codepoint(cx, cy, orig_char, console_fgcolor);
     }
 
     void force_draw_new_cursor(void){
         uint32_t new_cx, new_cy;
         kconsole_get_render_coords(current_tty->line_cursor_pos, &new_cx, &new_cy);
-        fb->draw_char(new_cx, new_cy, current_tty->cursor_code, console_fgcolor);
+        //fb->draw_char(new_cx, new_cy, current_tty->cursor_code, console_fgcolor);
+        fb->draw_codepoint(new_cx, new_cy, current_tty->cursor_code, console_fgcolor);
         current_tty->cursor_visible = true;
         current_tty->last_blink_tick = tick_count;
     }
 
-    if (scancode == 0x4B){//Стрелочка <-
+    if (scancode == 0x4B){ //Стрелочка <-
         if (current_tty->line_cursor_pos > 0){
             restore_char_at_cursor(current_tty->line_cursor_pos);
             current_tty->line_cursor_pos--;
@@ -330,7 +339,7 @@ void irq33_handler(struct regs *r){
         }
         return;
     }
-    if (scancode == 0x4D){//Стрелочка ->
+    if (scancode == 0x4D){ //Стрелочка ->
         if (current_tty->line_cursor_pos < current_tty->copied_bytes){
             restore_char_at_cursor(current_tty->line_cursor_pos);
             current_tty->line_cursor_pos++;
@@ -340,198 +349,28 @@ void irq33_handler(struct regs *r){
         return;
     }
 
-    if (scancode == 0x47){//HOME
-        if (current_tty->line_cursor_pos > 0){
+    if (scancode < 128){
+        if (scancode == 0x3A) { caps_lock_active = !caps_lock_active; return; }
+        if (scancode == 0x2A || scancode == 0x36) { shift_pressed = true; return; }
+
+        const locale_t *loc = locale_get_active();
+        uint32_t cp = locale_resolve_key(loc, scancode, shift_pressed);
+        if (cp != 0){
+            //char ascii = (char)cp866_from_codepoint(cp);
             restore_char_at_cursor(current_tty->line_cursor_pos);
-            current_tty->line_cursor_pos = 0;
-            kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
-            force_draw_new_cursor();
-        }
-        return;
-    }
-    if (scancode == 0x4F){//END
-        if (current_tty->line_cursor_pos < current_tty->copied_bytes){
-            restore_char_at_cursor(current_tty->line_cursor_pos);
-            current_tty->line_cursor_pos = current_tty->copied_bytes;
-            kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
-            force_draw_new_cursor();
-        }
-        return;
-    }
-
-    if (scancode == 0x53){//DELETE
-        if (current_tty->line_cursor_pos < current_tty->copied_bytes){
-            uint32_t del_idx = current_tty->line_cursor_pos;
-            uint32_t old_copied_bytes = current_tty->copied_bytes;
-
-            restore_char_at_cursor(current_tty->line_cursor_pos);
-
-            for (uint32_t i = del_idx; i < current_tty->copied_bytes - 1; i++){
-                current_tty->line_buffer[i] = current_tty->line_buffer[i + 1];
-            }
-            current_tty->copied_bytes--;
-            current_tty->line_buffer[current_tty->copied_bytes] = 0;
-
-            uint32_t draw_cx, draw_cy;
-            kconsole_get_render_coords(current_tty->line_cursor_pos, &draw_cx, &draw_cy);
-            current_tty->cursor_x = draw_cx;
-            current_tty->cursor_y = draw_cy;
-
-            for (uint32_t i = current_tty->line_cursor_pos; i < old_copied_bytes; i++){
-                char char_to_draw = ' ';
-                if (i < current_tty->copied_bytes){
-                    char_to_draw = current_tty->line_buffer[i];
-                }
-                //fb->draw_char(current_tty->cursor_x, current_tty->cursor_y, current_tty->cursor_code, console_bgcolor);
-                if (fb && fb->clear_tile) {
-                    fb->clear_tile(current_tty->cursor_x, current_tty->cursor_y, console_bgcolor);
-                } else {
-                    fb->draw_char(current_tty->cursor_x, current_tty->cursor_y, current_tty->cursor_code, console_bgcolor);
-                }
-                kernel_stdout_write_char(char_to_draw, console_fgcolor);
-            }
-
-            kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
-            force_draw_new_cursor();
-        }
-        return;
-    }
-
-    if (kbd_driver_api && kbd_driver_api->irq_callback){
-        kbd_driver_api->irq_callback(scancode);
-
-        if (scancode < 128){
-            if (scancode == 0x3A) {
-                caps_lock_active = !caps_lock_active;
-                return;
-            }
-
-            if (scancode == 0x2A || scancode == 0x36){
-                shift_pressed = true;
-                return;
-            }
-
-            char char_clean = kbd_ascii_clean[scancode];
-            char char_shift = kbd_ascii_shift[scancode];
-            char ascii = 0;
-
-            if (char_clean != 0){
-                bool is_alpha = ((char_clean >= 'a' && char_clean <= 'z') ||
-                                 (char_clean >= 'A' && char_clean <= 'Z') ||
-                                 ((unsigned char)char_clean >= 0x80));
-
-                if (is_alpha){
-                    if (caps_lock_active) {
-                        ascii = shift_pressed ? char_clean : char_shift;
-                    } else {
-                        ascii = shift_pressed ? char_shift : char_clean;
-                    }
-                } else {
-                    ascii = shift_pressed ? char_shift : char_clean;
-                }
-            }
-
-            if (ascii != 0){
-                restore_char_at_cursor(current_tty->line_cursor_pos);
-
-                if (ascii == '\b'){
-                    if (current_tty->line_cursor_pos > 0) {
-                        uint32_t del_idx = current_tty->line_cursor_pos - 1;
-                        uint32_t old_copied_bytes = current_tty->copied_bytes;
-
-                        for (uint32_t i = del_idx; i < current_tty->copied_bytes - 1; i++) {
-                            current_tty->line_buffer[i] = current_tty->line_buffer[i + 1];
-                        }
-                        current_tty->copied_bytes--;
-                        current_tty->line_buffer[current_tty->copied_bytes] = 0;
-                        current_tty->line_cursor_pos--;
-
-                        uint32_t draw_cx, draw_cy;
-                        kconsole_get_render_coords(current_tty->line_cursor_pos, &draw_cx, &draw_cy);
-                        current_tty->cursor_x = draw_cx;
-                        current_tty->cursor_y = draw_cy;
-
-                        for (uint32_t i = current_tty->line_cursor_pos; i < old_copied_bytes; i++) {
-                            char char_to_draw = ' ';
-                            if (i < current_tty->copied_bytes) {
-                                char_to_draw = current_tty->line_buffer[i];
-                            }
-                            //fb->draw_char(current_tty->cursor_x, current_tty->cursor_y, current_tty->cursor_code, console_bgcolor);
-                            if (fb && fb->clear_tile) {
-                                fb->clear_tile(current_tty->cursor_x, current_tty->cursor_y, console_bgcolor);
-                            } else {
-                                fb->draw_char(current_tty->cursor_x, current_tty->cursor_y, current_tty->cursor_code, console_bgcolor);
-                            }
-                            kernel_stdout_write_char(char_to_draw, console_fgcolor);
-                        }
-
-                        kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
-                    }
-
-                    force_draw_new_cursor();
-                    return;
-                }
-                else if (ascii != '\n' && ascii != '\r'){
-                    if (!ctrl_pressed){
-                        if (current_tty->copied_bytes < LINE_BUFFER_SIZE - 1){
-                            for (uint32_t i = current_tty->copied_bytes; i > current_tty->line_cursor_pos; i--){
-                                current_tty->line_buffer[i] = current_tty->line_buffer[i - 1];
-                            }
-
-                            current_tty->line_buffer[current_tty->line_cursor_pos] = ascii;
-                            current_tty->copied_bytes++;
-
-                            uint32_t draw_cx, draw_cy;
-                            kconsole_get_render_coords(current_tty->line_cursor_pos, &draw_cx, &draw_cy);
-                            current_tty->cursor_x = draw_cx;
-                            current_tty->cursor_y = draw_cy;
-
-                            for (uint32_t i = current_tty->line_cursor_pos; i < current_tty->copied_bytes; i++){
-                                //fb->draw_char(current_tty->cursor_x, current_tty->cursor_y, current_tty->cursor_code, console_bgcolor);
-                                if (fb && fb->clear_tile) {
-                                    fb->clear_tile(current_tty->cursor_x, current_tty->cursor_y, console_bgcolor);
-                                } else {
-                                    fb->draw_char(current_tty->cursor_x, current_tty->cursor_y, current_tty->cursor_code, console_bgcolor);
-                                }
-                                kernel_stdout_write_char(current_tty->line_buffer[i], console_fgcolor);
-                            }
-
-                            current_tty->line_cursor_pos++;
-
-                            kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
-                            force_draw_new_cursor();
-                        }
-                    }
-                }
-            }
-        } else {
-            if (scancode == 0x2A || scancode == 0x36 || scancode == 0xAA || scancode == 0xB6){
-                if (scancode == 0xAA || scancode == 0xB6){
-                    shift_pressed = false;
-                }
+            if (cp == '\n'){
+                kernel_stdout_write_char('\n', console_fgcolor);
+                current_tty->line_ready = true;
             }
         }
 
-        if (scancode == 0x1C){
-            restore_char_at_cursor(current_tty->line_cursor_pos);
-            kernel_stdout_write_char('\n', console_fgcolor);
-            current_tty->line_ready = true;
-            if (ready_queue){
-                task_t *start = ready_queue;
-                task_t *t = start;
-                do {
-                    if (t->state == TASK_BLOCKED && t->wait_reason == 1){
-                        if (t->pid == current_tty->foreground_pid){
-                            t->state = TASK_READY;
-                        }
-                    }
-                    t = t->next;
-                } while (t != start);
-            }
+    } else {
+        if (scancode == 0x2A || scancode == 0x36 || scancode == 0xAA || scancode == 0xB6){
+            if (scancode == 0xAA || scancode == 0xB6) shift_pressed = false;
         }
-
     }
 }
+
 
 
 

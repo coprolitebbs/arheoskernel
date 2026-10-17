@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include/kbd_driver.h"
 #include "include/kbd_internal.h"
 #include "../../include-kernel/bootinfo.h"
@@ -6,6 +23,9 @@
 
 kbd_driver_api_t api;
 kbd_driver_api_t *api_ptr;
+
+description_driver_api_t descr_api;
+
 
 // Внутренний кольцевой буфер символов драйвера
 kbd_event_t kbd_event_buf[KBD_BUFFER_SIZE];
@@ -39,7 +59,7 @@ static void kbd_update_leds(void) {
 
 // Асинхронный коллбек прерывания (вызывается из ядра по IRQ1)
 void kbd_irq_callback(uint8_t scancode){
-    //Если Capslock, зажечь индикатор
+    // Если Capslock, зажечь индикатор
     if (scancode == 0xFA){
         if (led_command_state == 1){
             uint8_t led_mask = 0;
@@ -57,25 +77,38 @@ void kbd_irq_callback(uint8_t scancode){
             return;
         }
     }
-    if (scancode == 0x3A) {
+    if (scancode == 0x3A){
         driver_caps_lock_state = !driver_caps_lock_state;
         return;
     }
-    //Если прилетел скан-код отпускания клавиши (старший бит 0x80 взведен),
-    //завершаем работу функции, не засоряя кольцевой буфер
-    if (scancode & 0x80) {
+    //Префикс расширенных клавиш 0xE0 имеет взведенный бит 0x80,
+    //но его нельзя отсекать как событие отпускания! Пропускаем его в буфер.
+    if (scancode != 0xE0){
+        //Если прилетел скан-код отпускания обычной клавиши (старший бит 0x80 взведен),
+        //упаковываем его со специальным типом (type = 0) и пропускаем, либо обрабатываем.
+        uint32_t next_head = (kbd_head + 1) % KBD_BUFFER_SIZE;
+        if (next_head == kbd_tail) return; //Переполнение
+
+        if (scancode & 0x80){
+            // Событие отпускания клавиши (Release)
+            kbd_event_buf_ptr[kbd_head].scancode = scancode & 0x7F; // Чистый код клавиши
+            kbd_event_buf_ptr[kbd_head].type = 0;                  // Type 0 = Отпущена
+        } else {
+            // Событие нажатия клавиши (Press)
+            kbd_event_buf_ptr[kbd_head].scancode = scancode;
+            kbd_event_buf_ptr[kbd_head].type = 1;                  // Type 1 = Нажата
+        }
+        kbd_head = next_head;
         return;
     }
-
+    //Если прилетел чистый префикс 0xE0 — пишем его в буфер как нажатие (type = 1)
     uint32_t next_head = (kbd_head + 1) % KBD_BUFFER_SIZE;
-    if (next_head == kbd_tail) {
-        return; //Переполнение буфера
-    }
-
-    kbd_event_buf_ptr[kbd_head].scancode = scancode;
-    kbd_event_buf_ptr[kbd_head].type = 1; //Нажата
+    if (next_head == kbd_tail) return;
+    kbd_event_buf_ptr[kbd_head].scancode = 0xE0;
+    kbd_event_buf_ptr[kbd_head].type = 1;
     kbd_head = next_head;
 }
+
 
 
 
@@ -126,17 +159,22 @@ void kbd_init(struct boot_info *boot){
 void driver_main(struct boot_info *boot){
     kbd_init(boot);
 
+    description_driver_api_t *descr_api_ptr = &descr_api;
+    descr_api_ptr->type = DESCR_KEYBOARD_DRIVER;
+
     api_ptr = &api;
 
     api_ptr->irq_callback = kbd_irq_callback;
     api_ptr->has_chars = kbd_has_events;
 
     api_ptr->get_char_blocked = kbd_get_event_blocked;
+
+    descr_api_ptr->struct_ptr = (void *)&api;
 }
 
 
-kbd_driver_api_t *driver_get_api(void){
-    return &api;
+description_driver_api_t *driver_get_api(void){
+    return &descr_api;
 }
 
 

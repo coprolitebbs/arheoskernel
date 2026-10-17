@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include-kernel/use_drivers.h"
 #include "include-kernel/bootinfo.h"
 #include "include-kernel/driver_elf.h"
@@ -12,6 +29,9 @@
 #include "drivers/include_drivers/drv_format.h"
 #include "include-kernel/config.h"
 #include "include-kernel/kconsole.h"
+#include "include-kernel/font_data.h"
+#include "include-kernel/locale.h"
+#include "include-kernel/font.h"
 
 //указатель на api драйвера framebuffer
 fb_driver_api_t *fb = 0;
@@ -23,13 +43,21 @@ fs_driver_t fs_apis[FILESYSTEMS_API_MAX];
 kbd_driver_api_t *kbd_driver_api = 0;
 
 //char* additional_drivers_list = "kbdps2.drv";
+//обертка для получения локали
+static const void *kernel_get_active_locale(void){
+    return (const void *)locale_get_active();
+}
 
 
 void drivers_init(void){
     module_info_t *m = 0;
 
     m = &boot_info->modules[0];
-    fb = (fb_driver_api_t *)load_driver_elf_mem(m->start,m->size,boot_info);
+
+    description_driver_api_t *fb_descr = (description_driver_api_t *)load_driver_elf_mem(m->start,m->size,boot_info);
+    if(fb_descr && fb_descr->type == DESCR_FRAMEBUFFER_DRIVER)
+        fb = (fb_driver_api_t *)fb_descr->struct_ptr;
+    //(fb_driver_api_t *)load_driver_elf_mem(m->start,m->size,boot_info);
 
     if(!fb){
         char *err = "FB Driver load error";
@@ -37,33 +65,43 @@ void drivers_init(void){
     }
 
     fb->malloc_ptr = kmalloc;
-    fb->free_ptr   = kfree;
+    fb->free_ptr = kfree;
+    fb->font = (const uint8_t (*)[8])font_data;
+    //fb->active_locale = locale_get_active();
+    fb->get_active_locale_ptr = kernel_get_active_locale;
+    fb->font_lookup_ptr = (const void *(*)(const void *, uint32_t))font_lookup;
 
     m = &boot_info->modules[1];
-    fs_apis[0].api = (fs_driver_api_t *)load_driver_elf_mem(m->start,m->size,boot_info);
-    fs_apis[0].type = FS_FAT12;
-    fs_apis[0].api->floppy_irq_fired_ptr = &floppy_irq_fired;
-    fs_apis[0].api->schedule_lock_ptr = &kernel_schedule_lock;
-    fs_apis[0].api->malloc_ptr = kmalloc;
-    fs_apis[0].api->free_ptr   = kfree;
+    fb_descr = (description_driver_api_t *)load_driver_elf_mem(m->start,m->size,boot_info);
+    if(fb_descr && fb_descr->type == DESCR_FILESYSTEM_DRIVER){
+        //fs_apis[0].api = (fs_driver_api_t *)load_driver_elf_mem(m->start,m->size,boot_info);
+        fs_apis[0].api = (fs_driver_api_t *)fb_descr->struct_ptr;
+        fs_apis[0].type = FS_FAT12;
+        fs_apis[0].api->floppy_irq_fired_ptr = &floppy_irq_fired;
+        fs_apis[0].api->schedule_lock_ptr = &kernel_schedule_lock;
+        fs_apis[0].api->malloc_ptr = kmalloc;
+        fs_apis[0].api->free_ptr   = kfree;
 
-    if(!fs_apis[0].api){
-        char *err = "FAT12 drv load error";
-        draw_string(10, 30, err);
+        if(!fs_apis[0].api){
+            char *err = "FAT12 drv load error";
+            draw_string(10, 30, err);
+        }
     }
+
     m = &boot_info->modules[2];
-    fs_apis[1].api = (fs_driver_api_t *)load_driver_elf_mem(m->start,m->size,boot_info);
-    fs_apis[1].type = FS_EXT2;
-    fs_apis[1].api->floppy_irq_fired_ptr = &floppy_irq_fired;
-    fs_apis[1].api->schedule_lock_ptr = &kernel_schedule_lock;
-    fs_apis[1].api->malloc_ptr = kmalloc;
-    fs_apis[1].api->free_ptr   = kfree;
-
-    if(!fs_apis[1].api){
-        char *err = "EXT2 drv load error";
-        draw_string(10, 230, err);
+    fb_descr = (description_driver_api_t *)load_driver_elf_mem(m->start,m->size,boot_info);
+    if(fb_descr && fb_descr->type == DESCR_FILESYSTEM_DRIVER){
+        fs_apis[1].api = (fs_driver_api_t *)fb_descr->struct_ptr; //load_driver_elf_mem(m->start,m->size,boot_info);
+        fs_apis[1].type = FS_EXT2;
+        fs_apis[1].api->floppy_irq_fired_ptr = &floppy_irq_fired;
+        fs_apis[1].api->schedule_lock_ptr = &kernel_schedule_lock;
+        fs_apis[1].api->malloc_ptr = kmalloc;
+        fs_apis[1].api->free_ptr   = kfree;
+        if(!fs_apis[1].api){
+            char *err = "EXT2 drv load error";
+            draw_string(10, 230, err);
+        }
     }
-
 }
 
 
@@ -85,13 +123,13 @@ int load_additional_drivers(cfg_file_t *cfg){
     //Выделяем временные буферы под маршалинг строк в куче Ring 0
     char *section_name = (char *)kmalloc(64);
     char *drv_name = (char *)kmalloc(64);
-    char *drv_type = (char *)kmalloc(32);
+    //char *drv_type = (char *)kmalloc(32);
     char *full_drv_path = (char *)kmalloc(128);
 
-    if (!section_name || !drv_name || !drv_type || !full_drv_path) {
+    if (!section_name || !drv_name || /* !drv_type ||*/ !full_drv_path) {
         if (section_name) kfree(section_name);
         if (drv_name) kfree(drv_name);
-        if (drv_type) kfree(drv_type);
+        //if (drv_type) kfree(drv_type);
         if (full_drv_path) kfree(full_drv_path);
         //cfg_close(cfg);
         return DRV_STATUS_LOAD_ERROR;
@@ -107,14 +145,14 @@ int load_additional_drivers(cfg_file_t *cfg){
         strcat(section_name, num_buf);
 
         memset(drv_name, 0, 64);
-        memset(drv_type, 0, 32);
+        //memset(drv_type, 0, 32);
         memset(full_drv_path, 0, 128);
 
         cfg_read_string(cfg, section_name, "name", "", drv_name, 64);
-        cfg_read_string(cfg, section_name, "type", "", drv_type, 32);
+        //cfg_read_string(cfg, section_name, "type", "", drv_type, 32);
 
         //Если параметры в секции отсутствуют или повреждены — пропускаем слот
-        if (drv_name[0] == '\0' || drv_type[0] == '\0') {
+        if (drv_name[0] == '\0' /* || drv_type[0] == '\0'*/) {
             kprintf("Slot [%s] parsing failed or empty\n", section_name);
             continue;
         }
@@ -126,6 +164,31 @@ int load_additional_drivers(cfg_file_t *cfg){
         strcat(full_drv_path, drv_name);
 
         //Диспетчеризация по системному типу устройства
+        description_driver_api_t *fb_descr = (description_driver_api_t *)load_driver_elf_from_disk(full_drv_path, boot_info);
+        if(fb_descr && fb_descr->type > 0 && fb_descr->struct_ptr){
+            switch(fb_descr->type){
+                case DESCR_KEYBOARD_DRIVER:{  //Драйвер клавиатуры
+                    kbd_driver_api = (kbd_driver_api_t *)fb_descr->struct_ptr;
+                    if (!kbd_driver_api){
+                        res = DRV_STATUS_LOAD_ERROR;
+                        draw_string(10, 30, "KBD Driver load error");
+                    } else {
+                        //Пришиваем ядерный рантайм к интерфейсу подгруженного ELF-модуля
+                        kbd_driver_api->malloc_ptr = kmalloc;
+                        kbd_driver_api->free_ptr   = kfree;
+                        kbd_driver_api->yield_ptr  = sys_yield;
+                        kprintf("Driver %s loaded and registered successfully\n", drv_name);
+                    }
+                    break;
+                }
+
+                default:
+                    kprintf("Driver %s skipped (type %d not supported yet)\n", drv_name, fb_descr->type);
+                    break;
+            }
+        }
+
+        /*
         if (strcmp(drv_type, "kbd_main") == 0) {
             kbd_driver_api = (kbd_driver_api_t *)load_driver_elf_from_disk(full_drv_path, boot_info);
 
@@ -142,11 +205,12 @@ int load_additional_drivers(cfg_file_t *cfg){
         } else {
             kprintf("Driver %s skipped (type %s not supported yet)\n", drv_name, drv_type);
         }
+        */
     }
 
     kfree(section_name);
     kfree(drv_name);
-    kfree(drv_type);
+    //kfree(drv_type);
     kfree(full_drv_path);
 
     //cfg_close(cfg);

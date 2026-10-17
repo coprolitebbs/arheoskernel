@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <stdint.h>
 #include "include-kernel/vfs.h"
 #include "include-kernel/lib.h"
@@ -21,6 +38,22 @@ vfs_file_t vfs_file_table[VFS_MAX_OPEN_FILES];
 uint8_t vfs_path_buffer[VFS_PATH_MAX] __attribute__((aligned(4)));
 
 //Внутренние функции
+
+static void vfs_get_relative_path_safe(const char *path, uint32_t match_len, char *out_buf) {
+    if (match_len == 1) {
+        strncpy(out_buf, path, VFS_PATH_MAX - 1);
+    } else {
+        const char *cut_path = path + match_len;
+        if (cut_path[0] == '\0') {
+            out_buf[0] = '/';
+            out_buf[1] = '\0';
+        } else {
+            strncpy(out_buf, cut_path, VFS_PATH_MAX - 1);
+        }
+    }
+    out_buf[VFS_PATH_MAX - 1] = '\0';
+}
+
 
 //Помощник диспетчера, ищет лучшую точку монтирования для заданного пути
 static int vfs_find_mount_slot(const char *path, uint32_t *out_match_len){
@@ -158,38 +191,46 @@ int vfs_unmount(uint32_t drive_id){
 }
 
 
-int vfs_open(const char *path, uint32_t flags){
+int vfs_open(const char *path, uint32_t flags) {
     if (!path || path[0] != '/') return VFS_STATUS_IO_ERROR;
 
-    //Ищем свободный глобальный дескриптор в таблице ядра
+    if (!(flags & (FS_OPEN_READ | FS_OPEN_WRITE))) return FS_INVALID_PATH;
+
     int vfs_fd = -1;
-    for (int i = 3; i < VFS_MAX_OPEN_FILES; i++){
+    for (int i = 3; i < VFS_MAX_OPEN_FILES; i++) {
         if (!vfs_file_table[i].used) { vfs_fd = i; break; }
     }
     if (vfs_fd == -1) return VFS_STATUS_TOO_MANY;
 
-    //Ищем точку монтирования (Longest Match)
     uint32_t match_len = 0;
     int slot = vfs_find_mount_slot(path, &match_len);
     if (slot == -1) return VFS_STATUS_IO_ERROR;
 
     vfs_mount_t *mnt = &vfs_mount_table[slot];
 
-    //Извлекаем относительный путь через безопасную глобальную память 4КБ
-    const char *relative_path = vfs_get_relative_path(path, match_len);
+    char local_rel_path[VFS_PATH_MAX];
+    memset(local_rel_path, 0, VFS_PATH_MAX);
+    vfs_get_relative_path_safe(path, match_len, local_rel_path);
 
-    //Связываем дескрипторы через вызов open конкретного драйвера ФС
-    int driver_fd = mnt->driver->open(mnt->volume, relative_path, flags);
+    //uint32_t safe_flags = flags;
+    //if (safe_flags & 0x0004) {
+        //safe_flags &= ~0x0001;
+    //}
+
+    //int driver_fd = mnt->driver->open(mnt->volume, local_rel_path, safe_flags);
+    int driver_fd = mnt->driver->open(mnt->volume, local_rel_path, flags);
     if (driver_fd < 0) return driver_fd;
 
-    //Фиксируем взаимосвязь дескрипторов в глобальной ядерной таблице
     vfs_file_table[vfs_fd].used = true;
     vfs_file_table[vfs_fd].mount = mnt;
     vfs_file_table[vfs_fd].driver_fd = driver_fd;
+    //vfs_file_table[vfs_fd].flags = safe_flags;
     vfs_file_table[vfs_fd].flags = flags;
 
     return vfs_fd;
 }
+
+
 
 
 int vfs_close(int vfs_fd){
@@ -303,23 +344,19 @@ int vfs_rmdir(const char *path){
 }
 
 
-int vfs_stat(const char *path, fs_stat_t *st){
-    int res = VFS_STATUS_IO_ERROR;
+int vfs_stat(const char *path, fs_stat_t *st) {
     if (!path || path[0] != '/' || !st) return VFS_STATUS_IO_ERROR;
 
     uint32_t match_len = 0;
-
     int slot = vfs_find_mount_slot(path, &match_len);
     if (slot == -1) return VFS_STATUS_IO_ERROR;
-    //kprintf("her\n");
+
     vfs_mount_t *mnt = &vfs_mount_table[slot];
-    //const char *relative_path = vfs_get_relative_path(path, match_len);
+
     char local_rel_path[VFS_PATH_MAX];
     memset(local_rel_path, 0, VFS_PATH_MAX);
-    const char *rel = vfs_get_relative_path(path, match_len);
-    strcpy(local_rel_path, rel);
+    vfs_get_relative_path_safe(path, match_len, local_rel_path);
 
-    //return mnt->driver->stat(mnt->volume, relative_path, st);
     return mnt->driver->stat(mnt->volume, local_rel_path, st);
 }
 
@@ -327,6 +364,7 @@ int vfs_stat(const char *path, fs_stat_t *st){
 
 
 int vfs_init_system(void){
+    kprintf("VFS init...");
     memset(vfs_mount_table, 0, sizeof(vfs_mount_table));
 
     uint8_t fs_ind = 255;
@@ -351,7 +389,7 @@ int vfs_init_system(void){
     vfs_file_table[0].driver_fd = VFS_DRIVER_SIG; //Маркер устройства ввода
     vfs_file_table[0].flags = FS_OPEN_READ;
     vfs_file_table[0].mount = &vfs_mount_table[0];
-
+    kprintf("ok\n");
     return res;
 }
 

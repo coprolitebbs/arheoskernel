@@ -1,11 +1,30 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include/fb_driver.h"
 #include "../../include-kernel/bootinfo.h"
 #include "../../include-kernel/lib.h"
-#include "../include_drivers/font_data_driver.h"
+#include "../../include-kernel/font.h"
+#include "../../include-kernel/locale_types.h"
+//#include "../include_drivers/font_data_driver.h"
 
 
-uint32_t current_foreground_color = 0x00FFFFFF; //Белый по умолчанию
-uint32_t current_background_color = 0x00FF0000; //Красный фон
+uint32_t current_foreground_color = 0x00FFFFFF; //Р‘РµР»С‹Р№ РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ
+uint32_t current_background_color = 0x00FF0000; //РљСЂР°СЃРЅС‹Р№ С„РѕРЅ
 
 
 uint8_t *framebuffer;
@@ -26,11 +45,12 @@ bool fb_wallpaper_present = false;
 fb_driver_api_t api;
 fb_driver_api_t *api_ptr;
 
+description_driver_api_t descr_api;
 
-//  ----- внутренние функции  -----
 
-// RGB888 -> RGB565
+//  ----- РІРЅСѓС‚СЂРµРЅРЅРёРµ С„СѓРЅРєС†РёРё  -----
 
+//RGB888 -> RGB565
 static uint16_t rgb565(uint32_t color){
     uint8_t r = (color >> 16) & 0xFF;
     uint8_t g = (color >> 8) & 0xFF;
@@ -38,92 +58,82 @@ static uint16_t rgb565(uint32_t color){
     return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
 }
 
-// pixel
-/*static void put_pixel(uint32_t x, uint32_t y, uint32_t color){
-    if(x >= width || y >= height) return;
-    uint8_t *p = framebuffer + y * pitch + x * bytes_pp;
-    if(bytes_pp == 4){
-        *(uint32_t*)p = color;
-    }
-    else if(bytes_pp == 3){
-        p[0] = color & 0xff;
-        p[1] = (color >> 8) & 0xff;
-        p[2] = (color >> 16) & 0xff;
-    }
-    else if(bytes_pp == 2){
-        *(uint16_t*)p = rgb565(color);
-    }
-    else if(bytes_pp == 1){
-        *p = (uint8_t)(color & 0xFF); // Поддержка 8-бит
-    }
-}*/
 
-//char 8x8
-void font_draw_char(uint32_t x, uint32_t y, unsigned char c, uint32_t color){
+
+//Р’РѕР·РІСЂР°С‰Р°РµС‚ codepoint Рё С‡РёСЃР»Рѕ СЃСЉРµРґРµРЅРЅС‹С… Р±Р°Р№С‚
+static uint32_t utf8_decode(const char *s, int *out_len){
+    const uint8_t *p = (const uint8_t *)s;
+
+    if (p[0] < 0x80){ *out_len = 1; return p[0]; }
+    if ((p[0] & 0xE0) == 0xC0){
+        *out_len = 2;
+        if (!p[1]) return 0xFFFD;
+        return ((uint32_t)(p[0] & 0x1F) << 6) | (p[1] & 0x3F);
+    }
+    if ((p[0] & 0xF0) == 0xE0){
+        *out_len = 3;
+        if (!p[1] || !p[2]) return 0xFFFD;
+        return ((uint32_t)(p[0] & 0x0F) << 12)
+             | ((uint32_t)(p[1] & 0x3F) << 6)
+             |  (uint32_t)(p[2] & 0x3F);
+    }
+    if ((p[0] & 0xF8) == 0xF0){
+        *out_len = 4;
+        if (!p[1] || !p[2] || !p[3]) return 0xFFFD;
+        return ((uint32_t)(p[0] & 0x07) << 18)
+             | ((uint32_t)(p[1] & 0x3F) << 12)
+             | ((uint32_t)(p[2] & 0x3F) << 6)
+             |  (uint32_t)(p[3] & 0x3F);
+    }
+    *out_len = 1;
+    return 0xFFFD;   //Р±РёС‚С‹Р№ Р±Р°Р№С‚
+}
+
+
+
+// string
+void font_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t color){
     if (!framebuffer) return;
-    if (x + 8 > width || y + 8 > height) return;
-    //Сжимаем цвет один раз для всего глифа
-    uint32_t target_color = color;
-    if (bytes_pp == 2){
-        target_color = rgb565(color);
+    while (*str){
+        int consumed;
+        uint32_t cp = utf8_decode(str, &consumed);
+        font_draw_codepoint(x, y, cp, color);
+        x += 8;             //РјРѕРЅРѕС€РёСЂРёРЅРЅС‹Р№ С€Р°Рі; РїРѕС‚РѕРј РІРѕР·СЊРјС‘Рј РёР· cell_width
+        str += consumed;
     }
-    const unsigned char *glyph = font_data_driver[c];
-    for(uint32_t row = 0; row < 8; row++){
-        //Вычисляем точный базовый адрес начала строки символа на экране
-        uint8_t *line_ptr = framebuffer + ((y + row) * pitch) + (x * bytes_pp);
-        unsigned char bits = glyph[row];
+}
 
-        for(uint32_t col = 0; col < 8; col++){
-            if(bits & 0x80){
-                if(bytes_pp == 4){
-                    *(uint32_t*)line_ptr = target_color;
-                }
-                else if(bytes_pp == 3){
-                    line_ptr[0] = target_color & 0xff;
-                    line_ptr[1] = (target_color >> 8) & 0xff;
-                    line_ptr[2] = (target_color >> 16) & 0xff;
-                }
-                else if(bytes_pp == 2){
-                    *(uint16_t*)line_ptr = (uint16_t)target_color;
-                }
-                else if(bytes_pp == 1){
-                    *line_ptr = (uint8_t)(target_color & 0xFF);
-                }
-            }
-            line_ptr += bytes_pp; // Линейный сдвиг указателя вправо
-            bits <<= 1;
+
+
+
+
+//Р’РЅСѓС‚СЂРµРЅРЅРёР№ helper - РїРѕСЃС‚СЂРѕС‡РЅРѕРµ РєРѕРїРёСЂРѕРІР°РЅРёРµ РїСЂСЏРјРѕСѓРіРѕР»СЊРЅРёРєР° РІРЅСѓС‚СЂРё РІРёРґРµРѕРїР°РјСЏС‚Рё
+//РЈС‡РёС‚С‹РІР°РµС‚ pitch (РєРѕС‚РѕСЂС‹Р№ РјРѕР¶РµС‚ Р±С‹С‚СЊ Р±РѕР»СЊС€Рµ w * bytes_pp), РѕР±СЂР°Р±Р°С‚С‹РІР°РµС‚
+//РїРµСЂРµРєСЂС‹С‚РёРµ РёСЃС‚РѕС‡РЅРёРєР° Рё РїСЂРёС‘РјРЅРёРєР° РІС‹Р±РѕСЂРѕРј РЅР°РїСЂР°РІР»РµРЅРёСЏ РѕР±С…РѕРґР°
+static void fb_copy_rect_rows(int dst_y, int src_y, int x, int w, int h){
+    if (!framebuffer || w <= 0 || h <= 0) return;
+    if (dst_y == src_y) return;
+    uint32_t row_bytes = (uint32_t)w * bytes_pp;
+    uint8_t *base = framebuffer;
+    if (dst_y < src_y){
+        //РСЃС‚РѕС‡РЅРёРє РЅРёР¶Рµ РїСЂРёС‘РјРЅРёРєР° вЂ” РёРґС‘Рј СЃРІРµСЂС…Сѓ РІРЅРёР·
+        for (int i = 0; i < h; i++){
+            uint8_t *dst = base + (uint32_t)(dst_y + i) * pitch + (uint32_t)x * bytes_pp;
+            uint8_t *src = base + (uint32_t)(src_y + i) * pitch + (uint32_t)x * bytes_pp;
+            memmove(dst, src, row_bytes);
+        }
+    } else {
+        // РСЃС‚РѕС‡РЅРёРє РІС‹С€Рµ РїСЂРёС‘РјРЅРёРєР° вЂ” РёРґС‘Рј СЃРЅРёР·Сѓ РІРІРµСЂС…, С‡С‚РѕР±С‹ РЅРµ Р·Р°С‚РµСЂРµС‚СЊ
+        for (int i = h - 1; i >= 0; i--){
+            uint8_t *dst = base + (uint32_t)(dst_y + i) * pitch + (uint32_t)x * bytes_pp;
+            uint8_t *src = base + (uint32_t)(src_y + i) * pitch + (uint32_t)x * bytes_pp;
+            memmove(dst, src, row_bytes);
         }
     }
 }
 
-// string
-void font_draw_string(uint32_t x,uint32_t y,const char *str,uint32_t color){
-    while(*str){
-        font_draw_char(x, y,(unsigned char)*str,color);
-        x += 8;
-        str++;
-    }
-}
 
-void font_draw_hex_byte(unsigned char byte, int x, int y){
-    unsigned char high = (byte >> 4) & 0x0F;
-    unsigned char low = byte & 0x0F;
-    font_draw_char(x, y, (high < 10) ? ('0' + high) : ('A' + high - 10), 0x00FFFFFF);
-    font_draw_char(x + 8, y, (low < 10) ? ('0' + low) : ('A' + low - 10), 0x00FFFFFF);
-}
-
-void font_draw_hex_word(uint16_t word, int x, int y){
-    font_draw_hex_byte((unsigned char)(word >> 8), x, y);
-    font_draw_hex_byte((unsigned char)(word & 0xFF), x + 16, y);
-}
-
-void font_draw_hex(uint32_t dword, int x, int y){
-    font_draw_hex_word((uint16_t)(dword >> 16), x, y);
-    font_draw_hex_word((uint16_t)(dword & 0xFFFF), x + 32, y);
-}
-
-
-//  -----  внешние функции  -----
+//  -----  РІРЅРµС€РЅРёРµ С„СѓРЅРєС†РёРё  -----
 
 
 void fb_put_pixel(int x, int y, uint32_t color){
@@ -195,11 +205,11 @@ void fb_fill_rect(int x, int y, int w, int h, uint32_t color){
 
 
 void fb_clear(uint32_t color){
-    //Вычисляем точный размер экрана в байтах на базе pitch
+    //Р’С‹С‡РёСЃР»СЏРµРј С‚РѕС‡РЅС‹Р№ СЂР°Р·РјРµСЂ СЌРєСЂР°РЅР° РІ Р±Р°Р№С‚Р°С… РЅР° Р±Р°Р·Рµ pitch
     uint32_t screen_bytes = height * pitch;
     //font_draw_char(400,310,'A',0x00FFFFFF);
     if (fb_wallpaper_present && fb_wallpaper_raw != NULL && framebuffer != NULL){
-        //Убеждаемся, что размер выделенной памяти ядра соответствует размеру экрана
+        //РЈР±РµР¶РґР°РµРјСЃСЏ, С‡С‚Рѕ СЂР°Р·РјРµСЂ РІС‹РґРµР»РµРЅРЅРѕР№ РїР°РјСЏС‚Рё СЏРґСЂР° СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓРµС‚ СЂР°Р·РјРµСЂСѓ СЌРєСЂР°РЅР°
         if (fb_wallpaper_allocated_size >= screen_bytes){
             //font_draw_char_in_wp(400,300,'A',0x00FFFFFF);
             memcpy(framebuffer, fb_wallpaper_raw, screen_bytes);
@@ -212,20 +222,20 @@ void fb_clear(uint32_t color){
 
 void fb_upload_wallpaper(const void *src_user_buffer, uint32_t size){
     if (!src_user_buffer || size == 0) return;
-    //Предотвращаем аллокацию мусорных размеров (лимит 4 МБ под экраны высокого разрешения)
+    //РџСЂРµРґРѕС‚РІСЂР°С‰Р°РµРј Р°Р»Р»РѕРєР°С†РёСЋ РјСѓСЃРѕСЂРЅС‹С… СЂР°Р·РјРµСЂРѕРІ (Р»РёРјРёС‚ 4 РњР‘ РїРѕРґ СЌРєСЂР°РЅС‹ РІС‹СЃРѕРєРѕРіРѕ СЂР°Р·СЂРµС€РµРЅРёСЏ)
     if (size > (4 * 1024 * 1024)) return;
-    //Если буфер уже существовал — освобождаем старый блок
+    //Р•СЃР»Рё Р±СѓС„РµСЂ СѓР¶Рµ СЃСѓС‰РµСЃС‚РІРѕРІР°Р» вЂ” РѕСЃРІРѕР±РѕР¶РґР°РµРј СЃС‚Р°СЂС‹Р№ Р±Р»РѕРє
     if (fb_wallpaper_raw != NULL) {
-        //Так как free_ptr указывает на kfree, вызываем только для валидного указателя
+        //РўР°Рє РєР°Рє free_ptr СѓРєР°Р·С‹РІР°РµС‚ РЅР° kfree, РІС‹Р·С‹РІР°РµРј С‚РѕР»СЊРєРѕ РґР»СЏ РІР°Р»РёРґРЅРѕРіРѕ СѓРєР°Р·Р°С‚РµР»СЏ
         api_ptr->free_ptr(fb_wallpaper_raw);
-        fb_wallpaper_raw = NULL; //Защита от Double Free
+        fb_wallpaper_raw = NULL; //Р—Р°С‰РёС‚Р° РѕС‚ Double Free
     }
-    //Вызываем ядерный kmalloc
+    //Р’С‹Р·С‹РІР°РµРј СЏРґРµСЂРЅС‹Р№ kmalloc
     if (api_ptr->malloc_ptr != NULL){
         fb_wallpaper_raw = (uint8_t *)api_ptr->malloc_ptr(size);
         //font_draw_char(400,310,'B',0x00FFFFFF);
-        if (!fb_wallpaper_raw) return; // У ядра кончилась куча Ring 0
-        //Переносим пиксели из пространства пользователя напрямую в кучу ядра
+        if (!fb_wallpaper_raw) return; // РЈ СЏРґСЂР° РєРѕРЅС‡РёР»Р°СЃСЊ РєСѓС‡Р° Ring 0
+        //РџРµСЂРµРЅРѕСЃРёРј РїРёРєСЃРµР»Рё РёР· РїСЂРѕСЃС‚СЂР°РЅСЃС‚РІР° РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РЅР°РїСЂСЏРјСѓСЋ РІ РєСѓС‡Сѓ СЏРґСЂР°
         memcpy(fb_wallpaper_raw, src_user_buffer, size);
         fb_wallpaper_allocated_size = size;
         fb_wallpaper_present = true;
@@ -241,36 +251,99 @@ uint32_t fb_get_bg_color(void){ return current_background_color; }
 void fb_scroll_up(uint32_t start_y, uint32_t end_y, uint32_t line_height){
     if (!framebuffer) return;
     if (start_y + line_height >= end_y || end_y > height) return;
-    //Построчно копируем пиксели видеопамяти снизу вверх
+    //РџРѕСЃС‚СЂРѕС‡РЅРѕ РєРѕРїРёСЂСѓРµРј РїРёРєСЃРµР»Рё РІРёРґРµРѕРїР°РјСЏС‚Рё СЃРЅРёР·Сѓ РІРІРµСЂС…
     for (uint32_t y = start_y; y < end_y - line_height; y++){
         uint8_t *dst_line = framebuffer + (y * pitch);
         uint8_t *src_line = framebuffer + ((y + line_height) * pitch);
         memcpy(dst_line, src_line, width * bytes_pp);
     }
-    //Освободившуюся нижнюю строчку терминала чисто заливаем цветом текущего фона
+    //РћСЃРІРѕР±РѕРґРёРІС€СѓСЋСЃСЏ РЅРёР¶РЅСЋСЋ СЃС‚СЂРѕС‡РєСѓ С‚РµСЂРјРёРЅР°Р»Р° С‡РёСЃС‚Рѕ Р·Р°Р»РёРІР°РµРј С†РІРµС‚РѕРј С‚РµРєСѓС‰РµРіРѕ С„РѕРЅР°
     fb_fill_rect(0, end_y - line_height, width, line_height, current_background_color);
 }
 
 void fb_clear_tile(int x, int y, uint32_t fallback_color){
     if (!framebuffer) return;
-    // Защита от выхода за границы экрана для тайла 8x8
+    // Р—Р°С‰РёС‚Р° РѕС‚ РІС‹С…РѕРґР° Р·Р° РіСЂР°РЅРёС†С‹ СЌРєСЂР°РЅР° РґР»СЏ С‚Р°Р№Р»Р° 8x8
     if (x < 0 || y < 0 || (uint32_t)x + 8 > width || (uint32_t)y + 8 > height) return;
-    // Вычисляем размер экрана/строки для копирования
+    // Р’С‹С‡РёСЃР»СЏРµРј СЂР°Р·РјРµСЂ СЌРєСЂР°РЅР°/СЃС‚СЂРѕРєРё РґР»СЏ РєРѕРїРёСЂРѕРІР°РЅРёСЏ
     uint32_t screen_bytes = height * pitch;
-    // Если обои загружены и валидны — восстанавливаем пиксели из них
+    // Р•СЃР»Рё РѕР±РѕРё Р·Р°РіСЂСѓР¶РµРЅС‹ Рё РІР°Р»РёРґРЅС‹ вЂ” РІРѕСЃСЃС‚Р°РЅР°РІР»РёРІР°РµРј РїРёРєСЃРµР»Рё РёР· РЅРёС…
     if (fb_wallpaper_present && fb_wallpaper_raw != NULL && fb_wallpaper_allocated_size >= screen_bytes) {
         for (int yy = 0; yy < 8; yy++){
-            //Смещение конкретной строки тайла в общем буфере обоев и во фреймбуфере
+            //РЎРјРµС‰РµРЅРёРµ РєРѕРЅРєСЂРµС‚РЅРѕР№ СЃС‚СЂРѕРєРё С‚Р°Р№Р»Р° РІ РѕР±С‰РµРј Р±СѓС„РµСЂРµ РѕР±РѕРµРІ Рё РІРѕ С„СЂРµР№РјР±СѓС„РµСЂРµ
             uint32_t offset = (y + yy) * pitch + (x * bytes_pp);
             uint8_t *dst = framebuffer + offset;
             uint8_t *src = fb_wallpaper_raw + offset;
-            //Копируем ровно 8 пикселей с учетом глубины цвета
+            //РљРѕРїРёСЂСѓРµРј СЂРѕРІРЅРѕ 8 РїРёРєСЃРµР»РµР№ СЃ СѓС‡РµС‚РѕРј РіР»СѓР±РёРЅС‹ С†РІРµС‚Р°
             memcpy(dst, src, 8 * bytes_pp);
         }
     } else {
-        //Обоев нет — просто рисуем сплошной квадрат цвета фона консоли
+        //РћР±РѕРµРІ РЅРµС‚ вЂ” РїСЂРѕСЃС‚Рѕ СЂРёСЃСѓРµРј СЃРїР»РѕС€РЅРѕР№ РєРІР°РґСЂР°С‚ С†РІРµС‚Р° С„РѕРЅР° РєРѕРЅСЃРѕР»Рё
         fb_fill_rect(x, y, 8, 8, fallback_color);
     }
+}
+
+
+
+
+void font_draw_codepoint(uint32_t x, uint32_t y, uint32_t cp, uint32_t color){
+    if (!framebuffer) return;
+    if (!api_ptr || !api_ptr->get_active_locale_ptr || !api_ptr->font_lookup_ptr) return;
+
+    const locale_t *loc = (const locale_t *)api_ptr->get_active_locale_ptr();
+    if (!loc || !loc->font) return;
+
+    const font_glyph_t *g =
+        (const font_glyph_t *)api_ptr->font_lookup_ptr(loc->font, cp);
+    if (!g) return;
+
+    uint8_t bytes_per_row = (g->width + 7) / 8;
+    for (uint8_t row = 0; row < g->height; row++){
+        const uint8_t *src = g->rows + row * bytes_per_row;
+        uint8_t *line_ptr = framebuffer + ((y + row) * pitch) + (x * bytes_pp);
+
+        for (uint8_t col = 0; col < g->width; col++){
+            uint8_t byte = src[col >> 3];
+            uint8_t bit  = 0x80 >> (col & 7);
+            if (byte & bit){
+                /* РўРѕС‚ Р¶Рµ РєРѕРґ Р·Р°РїРёСЃРё РїРёРєСЃРµР»СЏ, С‡С‚Рѕ РІ СЃС‚Р°СЂРѕРј font_draw_char */
+                uint32_t target = color;
+                if (bytes_pp == 2) target = rgb565(color);
+                if (bytes_pp == 4) *(uint32_t*)line_ptr = target;
+                else if (bytes_pp == 3){
+                    line_ptr[0] = target & 0xff;
+                    line_ptr[1] = (target >> 8) & 0xff;
+                    line_ptr[2] = (target >> 16) & 0xff;
+                }
+                else if (bytes_pp == 2) *(uint16_t*)line_ptr = (uint16_t)target;
+                else if (bytes_pp == 1) *line_ptr = (uint8_t)(target & 0xFF);
+            }
+            line_ptr += bytes_pp;
+        }
+    }
+}
+
+
+void font_draw_char(uint32_t x, uint32_t y, unsigned char c, uint32_t color){
+    font_draw_codepoint(x, y, (uint32_t)c, color);
+}
+
+
+void font_draw_hex_byte(unsigned char byte, int x, int y){
+    unsigned char high = (byte >> 4) & 0x0F;
+    unsigned char low = byte & 0x0F;
+    font_draw_char(x, y, (high < 10) ? ('0' + high) : ('A' + high - 10), 0x00FFFFFF);
+    font_draw_char(x + 8, y, (low < 10) ? ('0' + low) : ('A' + low - 10), 0x00FFFFFF);
+}
+
+void font_draw_hex_word(uint16_t word, int x, int y){
+    font_draw_hex_byte((unsigned char)(word >> 8), x, y);
+    font_draw_hex_byte((unsigned char)(word & 0xFF), x + 16, y);
+}
+
+void font_draw_hex(uint32_t dword, int x, int y){
+    font_draw_hex_word((uint16_t)(dword >> 16), x, y);
+    font_draw_hex_word((uint16_t)(dword & 0xFFFF), x + 32, y);
 }
 
 
@@ -286,9 +359,64 @@ void fb_init(struct boot_info *boot){
 }
 
 
+//РЎРґРІРёРі РїСЂСЏРјРѕСѓРіРѕР»СЊРЅРѕР№ РѕР±Р»Р°СЃС‚Рё С„СЂРµР№РјР±СѓС„РµСЂР° РїРѕ РІРµСЂС‚РёРєР°Р»Рё
+//dy > 0 вЂ” СЃРѕРґРµСЂР¶РёРјРѕРµ РµРґРµС‚ РІРІРµСЂС…, СЃРЅРёР·Сѓ РїРѕСЏРІР»СЏРµС‚СЃСЏ РїРѕР»РѕСЃР° С†РІРµС‚Р° fill
+//dy < 0 вЂ” СЃРѕРґРµСЂР¶РёРјРѕРµ РµРґРµС‚ РІРЅРёР·, СЃРІРµСЂС…Сѓ РїРѕСЏРІР»СЏРµС‚СЃСЏ РїРѕР»РѕСЃР° С†РІРµС‚Р° fill
+//|dy| >= h вЂ” РІСЃСЏ РѕР±Р»Р°СЃС‚СЊ Р·Р°Р»РёРІР°РµС‚СЃСЏ С†РІРµС‚РѕРј fill
+int fb_scroll_rect(int x, int y, int w, int h, int dy, uint32_t fill){
+    if (!framebuffer) return -1;
+    if (x < 0 || y < 0 || w <= 0 || h <= 0) return -1;
+    if (x + w > (int)width || y + h > (int)height) return -1;
+    if (dy == 0) return 0;
+    //РџРѕР»РЅРѕСЃС‚СЊСЋ РІС‹С€Р»Рё Р·Р° РіСЂР°РЅРёС†С‹ РїСЂСЏРјРѕСѓРіРѕР»СЊРЅРёРєР° вЂ” РїСЂРѕСЃС‚Рѕ Р·Р°С‚РёСЂР°РµРј
+    if (dy >= h || dy <= -h){
+        fb_fill_rect(x, y, w, h, fill);
+        return 0;
+    }
+    if (dy > 0){
+        //РЎРґРІРёРі РІРІРµСЂС…: [y+dy .. y+h) -> [y .. y+h-dy)
+        int move_h = h - dy;
+        fb_copy_rect_rows(y, y + dy, x, w, move_h);
+        //РќРёР¶РЅСЏСЏ РїРѕР»РѕСЃР° [y+move_h .. y+h) вЂ” СЃРІРµР¶Р°СЏ
+        fb_fill_rect(x, y + move_h, w, dy, fill);
+    } else {
+        int ady = -dy;
+        //РЎРґРІРёРі РІРЅРёР·: [y .. y+h-ady) -> [y+ady .. y+h)
+        int move_h = h - ady;
+        fb_copy_rect_rows(y + ady, y, x, w, move_h);
+        //Р’РµСЂС…РЅСЏСЏ РїРѕР»РѕСЃР° [y .. y+ady) вЂ” СЃРІРµР¶Р°СЏ
+        fb_fill_rect(x, y, w, ady, fill);
+    }
+    return 0;
+}
+
+
+//Р‘С‹СЃС‚СЂР°СЏ РєРѕРїРёСЏ РїСЂСЏРјРѕСѓРіРѕР»СЊРЅРёРєР° РїРёРєСЃРµР»РµР№ РёР· Р±СѓС„РµСЂР° РІС‹Р·С‹РІР°СЋС‰РµРіРѕ РІ С„СЂРµР№РјР±СѓС„РµСЂ
+//src вЂ” СѓРїР°РєРѕРІР°РЅРЅС‹Рµ РїРёРєСЃРµР»Рё РІ С„РѕСЂРјР°С‚Рµ С‚РµРєСѓС‰РµРіРѕ bpp (bytes_pp Р±Р°Р№С‚ РЅР° РїРёРєСЃРµР»СЊ),
+//СѓРїР°РєРѕРІР°РЅС‹ РїРѕСЃС‚СЂРѕС‡РЅРѕ Р±РµР· РїСЂРѕРјРµР¶СѓС‚РѕС‡РЅРѕРіРѕ padding'Р° (w * bytes_pp Р±Р°Р№С‚ РЅР° СЃС‚СЂРѕРєСѓ)
+int fb_blit(int x, int y, int w, int h, const void *src){
+    if (!framebuffer || !src) return -1;
+    if (x < 0 || y < 0 || w <= 0 || h <= 0) return -1;
+    if (x + w > (int)width || y + h > (int)height) return -1;
+    const uint8_t *s = (const uint8_t *)src;
+    uint32_t row_bytes = (uint32_t)w * bytes_pp;
+    for (int i = 0; i < h; i++){
+        uint8_t *dst = framebuffer + (uint32_t)(y + i) * pitch + (uint32_t)x * bytes_pp;
+        memcpy(dst, s + (uint32_t)i * row_bytes, row_bytes);
+    }
+    return 0;
+}
+
+
+
+
 void driver_main(struct boot_info *boot){
 
     fb_init(boot);
+
+    description_driver_api_t *descr_api_ptr = &descr_api;
+    descr_api_ptr->type = DESCR_FRAMEBUFFER_DRIVER;
+
 
     api_ptr = &api;
 
@@ -298,6 +426,7 @@ void driver_main(struct boot_info *boot){
     api_ptr->draw_char = font_draw_char;
     api_ptr->draw_string = font_draw_string;
     api_ptr->draw_hex = font_draw_hex;
+    api_ptr->draw_codepoint = font_draw_codepoint;
 
     api_ptr->set_fg = fb_set_fg_color;
     api_ptr->set_bg = fb_set_bg_color;
@@ -307,10 +436,17 @@ void driver_main(struct boot_info *boot){
 
     api_ptr->set_wallpaper = fb_upload_wallpaper;
     api_ptr->clear_tile = fb_clear_tile;
+
+    api_ptr->scroll_rect = fb_scroll_rect;
+    api_ptr->blit = fb_blit;
+
+    descr_api_ptr->struct_ptr = (void *)&api;
+
 }
 
-fb_driver_api_t *driver_get_api(void){
-    return &api;
+
+description_driver_api_t *driver_get_api(void){
+    return &descr_api;
 }
 
 

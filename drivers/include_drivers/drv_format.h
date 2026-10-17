@@ -1,62 +1,56 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #ifndef DRV_FORMAT_H
 #define DRV_FORMAT_H
 
 #include <stdint.h>
 #include "../../include-kernel/bootinfo.h"
+#include "../../userspace/include/fileattrs.h"
 
 #define DRV_MAGIC "DRV1"
 
 #define DRV_RELOC_ABS32 1
 #define DRV_RELOC_PC32  2
 
-
 //Общий ABI драйверов файловых систем
 
 #define FS_DRIVER_ABI_VERSION 1
 
-//ошибки
-
-#define FS_OK                 0
-#define FS_NOT_FOUND         -1
-#define FS_ALREADY_EXISTS    -2
-#define FS_NO_SPACE          -3
-#define FS_INVALID_PATH      -4
-#define FS_ACCESS_DENIED     -5
-#define FS_IO_ERROR          -6
-#define FS_CORRUPTED         -7
-#define FS_NOT_SUPPORTED     -8
-#define FS_INVALID_HANDLE    -9
-#define FS_EOF              -10
-#define FS_TOO_MANY         -11
-#define FS_DEBUG_CATCH        1
-
-//Флаги открытия
-
-#define FS_OPEN_READ      0x0001
-#define FS_OPEN_WRITE     0x0002
-#define FS_OPEN_CREATE    0x0004
-#define FS_OPEN_APPEND    0x0008
-#define FS_OPEN_TRUNCATE  0x0010
-
-//Файловые атрибуты
-
-#define FS_ATTR_REGULAR   0x0000
-#define FS_ATTR_DIRECTORY 0x0001
-#define FS_ATTR_READONLY  0x0002
-#define FS_ATTR_HIDDEN    0x0004
-#define FS_ATTR_SYSTEM    0x0008
-#define FS_ATTR_ARCHIVE   0x0010
-
 #define KBD_DRIVER_NOT_READY   -2
 
-typedef struct
-{
+#define DESCR_FRAMEBUFFER_DRIVER   1
+#define DESCR_FILESYSTEM_DRIVER    2
+#define DESCR_KEYBOARD_DRIVER      3
+
+typedef struct {
+    uint8_t type;
+    void *struct_ptr;
+} description_driver_api_t;
+
+
+typedef struct{
     void (*put_pixel)(int,int,uint32_t);
     void (*fill_rect)(int,int,int,int,uint32_t);
     void (*clear)(uint32_t);
     void (*draw_char)(uint32_t,uint32_t,unsigned char,uint32_t);
     void (*draw_string)(uint32_t,uint32_t,const char*,uint32_t);
     void (*draw_hex)(uint32_t,int,int);
+    void (*draw_codepoint)(uint32_t x, uint32_t y, uint32_t codepoint, uint32_t color);
 
     void* (*malloc_ptr)(uint32_t size);
     void  (*free_ptr)(void *ptr);
@@ -69,6 +63,14 @@ typedef struct
 
     void (*set_wallpaper)(const void *src_user_buffer, uint32_t size);
     void (*clear_tile)(int x, int y, uint32_t fallback_color);
+
+    int (*scroll_rect)(int x, int y, int w, int h, int dy, uint32_t fill);
+    int (*blit)(int x, int y, int w, int h, const void *src);
+
+    const uint8_t (*font)[8];
+    //const void *active_locale;
+    const void *(*get_active_locale_ptr)(void);
+    const void *(*font_lookup_ptr)(const void *font, uint32_t cp);
 
 } fb_driver_api_t;
 

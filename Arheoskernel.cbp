@@ -72,12 +72,8 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="drivers/fb_driver/fb_start.asm" />
-		<Unit filename="drivers/fb_driver/font_data_driver.c">
-			<Option compilerVar="CC" />
-		</Unit>
 		<Unit filename="drivers/fb_driver/include/fb_driver.h" />
 		<Unit filename="drivers/include_drivers/drv_format.h" />
-		<Unit filename="drivers/include_drivers/font_data_driver.h" />
 		<Unit filename="drivers/kbd_driver/include/kbd_driver.h" />
 		<Unit filename="drivers/kbd_driver/include/kbd_internal.h" />
 		<Unit filename="drivers/kbd_driver/kbd_driver.c">
@@ -86,7 +82,13 @@
 		<Unit filename="drivers/kbd_driver/kbd_start.asm" />
 		<Unit filename="drivers/userspace_driver.ld" />
 		<Unit filename="f12ld.asm" />
+		<Unit filename="font.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="font_data.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="font_vga.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="gdt.c">
@@ -103,14 +105,19 @@
 		<Unit filename="include-kernel/draw.h" />
 		<Unit filename="include-kernel/driver_elf.h" />
 		<Unit filename="include-kernel/elf32.h" />
+		<Unit filename="include-kernel/font.h" />
 		<Unit filename="include-kernel/font_data.h" />
+		<Unit filename="include-kernel/font_vga.h" />
 		<Unit filename="include-kernel/gdt.h" />
 		<Unit filename="include-kernel/hardware.h" />
 		<Unit filename="include-kernel/isr.h" />
+		<Unit filename="include-kernel/kbd_translate.h" />
 		<Unit filename="include-kernel/kconsole.h" />
 		<Unit filename="include-kernel/kernel.h" />
 		<Unit filename="include-kernel/kernel_heap.h" />
 		<Unit filename="include-kernel/lib.h" />
+		<Unit filename="include-kernel/locale.h" />
+		<Unit filename="include-kernel/locale_types.h" />
 		<Unit filename="include-kernel/pmm.h" />
 		<Unit filename="include-kernel/ports_io.h" />
 		<Unit filename="include-kernel/spinlock.h" />
@@ -143,6 +150,9 @@
 		<Unit filename="isr.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="kbd_translate.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="kconsole.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -153,6 +163,9 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="lib.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="locale.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="pmm.c">
@@ -185,12 +198,16 @@
 		<Unit filename="userspace/examples/kb_check/kb_check.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="userspace/examples/scanf_check/scanf_check.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="userspace/examples/vfs_test/vfs_test.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/filesystem/config/boot/boot.cfg" />
 		<Unit filename="userspace/filesystem/config/sekhmet/config.cfg" />
 		<Unit filename="userspace/filesystem/config/sekhmet/sekhmet.hlp" />
+		<Unit filename="userspace/include/fileattrs.h" />
 		<Unit filename="userspace/include/syscall.h" />
 		<Unit filename="userspace/include/uconfig.h" />
 		<Unit filename="userspace/include/uimage.h" />
@@ -212,13 +229,13 @@
 		<Unit filename="userspace/system procs/cat/cat.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="userspace/system procs/chorus/chorus.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="userspace/system procs/free/free.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/halt/halt.c">
-			<Option compilerVar="CC" />
-		</Unit>
-		<Unit filename="userspace/system procs/horus/horus.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/ls/ls.c">
@@ -237,6 +254,9 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/setbg/setbg.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/thoth/thoth.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/touch/touch.c">

@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include-kernel/lib.h"
 
 void *memset(void *s, int c, size_t n){
@@ -26,6 +43,23 @@ int memcmp(const void *str1, const void *src2, uint32_t n){
         n--;
     }
     return 0;
+}
+
+
+void *memmove(void *dest, const void *src, size_t n){
+    unsigned char *d = (unsigned char*)dest;
+    const unsigned char *s = (const unsigned char*)src;
+    if (d == s || n == 0) return dest;
+    if (d < s){
+        //Приёмник ниже источника — копируем слева направо
+        while (n--) *d++ = *s++;
+    } else {
+        //Приёмник выше источника — копируем справа налево
+        d += n;
+        s += n;
+        while (n--) *--d = *--s;
+    }
+    return dest;
 }
 
 

@@ -1,30 +1,47 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "../../include/ustd.h"
 #include "../../../include-kernel/lib.h"
 
 // Алгоритм разбора Unix Timestamp в человеческую дату для консоли ARHeos
-static void print_datetime(uint32_t timestamp) {
-    if (timestamp == 0) {
+static void print_datetime(uint32_t timestamp){
+    if (timestamp == 0){
         printf("00-00-0000 00:00  ");
         return;
     }
 
-    // Базовые константы времени
+    //Базовые константы времени
     uint32_t seconds = timestamp % 60;
     uint32_t minutes = (timestamp / 60) % 60;
     uint32_t hours   = (timestamp / 3600) % 24;
     uint32_t days    = timestamp / 86400;
 
-    // Сдвиг по умолчанию для московского часового пояса (MSK = UTC+3)
+    //Сдвиг по умолчанию для московского часового пояса (MSK = UTC+3)
     hours = (hours + 3) % 24;
     if (hours < 3) days++;
 
-    // Расчет года (начиная с эпохи 1970)
+    //Расчет года (начиная с эпохи 1970)
     uint32_t year = 1970;
-    while (1) {
+    while (1){
         bool is_leap = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
         uint32_t days_in_year = is_leap ? 366 : 365;
 
-        if (days >= days_in_year) {
+        if (days >= days_in_year){
             days -= days_in_year;
             year++;
         } else {
@@ -32,14 +49,14 @@ static void print_datetime(uint32_t timestamp) {
         }
     }
 
-    // Расчет месяца и числа внутри найденного года
+    //Расчет месяца и числа внутри найденного года
     uint8_t month_lengths[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    if (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) {
+    if (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)){
         month_lengths[1] = 29;
     }
 
     uint32_t month = 0;
-    while (days >= month_lengths[month]) {
+    while (days >= month_lengths[month]){
         days -= month_lengths[month];
         month++;
     }
@@ -56,34 +73,35 @@ static void print_datetime(uint32_t timestamp) {
     );
 }
 
-static void print_flags(uint32_t attr, uint32_t type) {
-    if (type == 0x02 || (attr & FS_ATTR_DIRECTORY)) {
+static void print_flags(uint32_t attr, uint32_t type){
+    (void)type;   //параметр больше не нужен
+    if (attr & FS_ATTR_DIRECTORY){
         printf("d");
-    } else if (attr & FS_ATTR_SYSTEM) {
+    } else if (attr & FS_ATTR_SYSTEM){
         printf("s");
     } else {
         printf("-");
     }
 
-    if (attr & FS_ATTR_READONLY) {
+    if (attr & FS_ATTR_READONLY){
         printf("r- ");
     } else {
         printf("rw ");
     }
 
-    if (attr & FS_ATTR_HIDDEN) {
+    if (attr & FS_ATTR_HIDDEN){
         printf("h ");
     } else {
         printf("- ");
     }
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[]){
     const char *target_dir = "";
     bool long_format = false;
 
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-l") == 0) {
+    for (int i = 1; i < argc; i++){
+        if (strcmp(argv[i], "-l") == 0){
             long_format = true;
         } else {
             target_dir = argv[i];
@@ -91,7 +109,7 @@ int main(int argc, char *argv[]) {
     }
 
     int dir_fd = open(target_dir, 1);
-    if (dir_fd < 0) {
+    if (dir_fd < 0){
         printf("ls: cannot open directory '%s'\n", target_dir[0] == '\0' ? "./" : target_dir);
         return -1;
     }
@@ -99,48 +117,45 @@ int main(int argc, char *argv[]) {
     u_dirent_t entry;
     int files_count = 0;
 
-    while (u_readdir(dir_fd, &entry) == 0) {
+    while (u_readdir(dir_fd, &entry) == 0){
         if (entry.name[0] == '\0') {
             continue;
         }
 
-        if (long_format) {
+        if (long_format){
             u_stat_t st;
             st.size = 0;
             st.attributes = entry.attributes;
             st.create_time = 0;
             st.modify_time = 0;
 
-            // Запрашиваем у VFS динамические метаданные (размер и время изменения)
+            //Запрашиваем у VFS динамические метаданные (размер и время изменения)
             stat(entry.name, &st);
 
-            // Флаги и типы берем из объединенного состояния st и entry
+            //Флаги и типы берем из объединенного состояния st и entry
             print_flags(st.attributes, entry.type);
 
-            // Выводим номер Инода (из entry) и точный размер файла (из st)
+            //Выводим номер Инода (из entry) и точный размер файла (из st)
             printf("ino: %d  size: %d B  ", (uint32_t)entry.inode, (uint32_t)st.size);
 
-            // Выводим человеческую дату последней модификации из ext2
+            //Выводим человеческую дату последней модификации из ext2
             print_datetime(st.modify_time);
 
-            // Печатаем имя файла
-            printf("%s", entry.name);
+            //Печатаем имя файла
+            bool is_dir = (entry.attributes & FS_ATTR_DIRECTORY) ||
+                  (entry.type == FS_ATTR_DIRECTORY) ||
+                  (st.attributes & FS_ATTR_DIRECTORY);
 
-            if (entry.type == 0x02 || (st.attributes & FS_ATTR_DIRECTORY)) {
-                printf("/");
-            }
+            printf("%s", entry.name);
+            if (is_dir) printf("/");
             printf("\n");
         } else {
-            if (entry.type == 0x02 || (entry.attributes & FS_ATTR_DIRECTORY)) {
-                printf("%s/  ", entry.name);
-            } else {
-                printf("%s  ", entry.name);
-            }
+            printf("%s  ", entry.name);
         }
         files_count++;
     }
 
-    if (files_count > 0 && !long_format) {
+    if (files_count > 0 && !long_format){
         printf("\n");
     }
 

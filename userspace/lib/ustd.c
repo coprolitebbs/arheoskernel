@@ -1,6 +1,24 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "../include/ustd.h"
 #include <stdbool.h>
 #include "../include/syscall.h"
+#include "../../include-kernel/locale_types.h"
 
 
 //Общая функция запуска пользовательского приложения с корректным завершением и очисткой ресурсов
@@ -36,6 +54,15 @@ void u_draw_char(uint32_t x, uint32_t y, char c, uint32_t color){
     __asm__ __volatile__("int $0x80"::"a"(SYS_DRAW_CHAR),"b"(x),"c"(y),"d"(c),"S"(color):"memory");
 }
 
+void u_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t color){
+    __asm__ __volatile__(
+        "int $0x80"
+        :
+        : "a"(SYS_DRAW_STRING), "b"(x), "c"(y), "d"(str), "S"(color)
+        : "memory"
+    );
+}
+
 void u_exit(void){
     __asm__ __volatile__("int $0x80"::"a"(SYS_EXIT):"memory");
     for(;;);
@@ -45,7 +72,7 @@ void yield(void){
     __asm__ __volatile__("int $0x80"::"a"(SYS_YIELD):"memory");
 }
 
-//Самодельный printf, пишущий на экран по координатам X и Y
+//Самодельный printf, пишущий на экран по координатам X и Y с поддержкой UTF-8 строк
 void u_printf(int x, int y, uint32_t color, const char *format, ...) {
     if (!format) return;
 
@@ -59,27 +86,34 @@ void u_printf(int x, int y, uint32_t color, const char *format, ...) {
         if (*ptr == '%') {
             ptr++;
             if (*ptr == 'c') {
-                // Нативное извлечение символа
                 char char_val = (char)__builtin_va_arg(args, int);
+                // Для одиночных ASCII символов оставляем старый побайтовый вывод
                 u_draw_char(current_x, y, char_val, color);
-                current_x += 10;
+                current_x += 8; // Шаг шрифта 8 пикселей
             }
             else if (*ptr == 's') {
-                // Нативное извлечение строки
                 const char *str_val = __builtin_va_arg(args, const char *);
                 if (str_val) {
-                    while (*str_val != '\0') {
-                        u_draw_char(current_x, y, *str_val, color);
-                        current_x += 10;
-                        str_val++;
+                    // ВАЖНО: Выводим всю строку целиком через новый системный вызов!
+                    u_draw_string(current_x, y, str_val, color);
+
+                    // Вычисляем правильный сдвиг X по экрану.
+                    // В UTF-8 русская буква занимает 2 байта, но на экране это ОДИН глиф (8 пикселей).
+                    // Считаем только реальные символы, а не байты:
+                    int visible_chars = 0;
+                    const char *s = str_val;
+                    while (*s) {
+                        if (((*s) & 0xC0) != 0x80) { // Пропускаем продолжения UTF-8 байт (0x80-0xBF)
+                            visible_chars++;
+                        }
+                        s++;
                     }
+                    current_x += (visible_chars * 8);
                 }
             }
             else if (*ptr == 'd' || *ptr == 'x') {
-                // Нативное извлечение чисел без смещения кадров стека
                 uint32_t num_val = __builtin_va_arg(args, uint32_t);
                 char buf[32];
-
                 int i = 0;
                 uint32_t temp = num_val;
                 int base = (*ptr == 'x') ? 16 : 10;
@@ -90,20 +124,40 @@ void u_printf(int x, int y, uint32_t color, const char *format, ...) {
                     buf[i++] = (r < 10) ? (r + '0') : (r - 10 + 'A');
                     temp /= base;
                 }
+                buf[i] = '\0';
 
+                // Разворачиваем буфер числа
+                char rev_buf[32];
+                int r_idx = 0;
                 for (int j = i - 1; j >= 0; j--) {
-                    u_draw_char(current_x, y, buf[j], color);
-                    current_x += 10;
+                    rev_buf[r_idx++] = buf[j];
                 }
+                rev_buf[r_idx] = '\0';
+
+                // Числа всегда состоят из ASCII-символов, выводим их через u_draw_string
+                u_draw_string(current_x, y, rev_buf, color);
+                current_x += (r_idx * 8);
             }
         } else {
-            u_draw_char(current_x, y, *ptr, color);
-            current_x += 10;
+            // Если в самом формате printf попался русский текст (например, u_printf(x,y,c, "Привет: %s", name))
+            // Нам нужно выкусить этот символ или строку до следующего управляющего флага.
+            // Для простоты, выводим текущий символ. Но так как формат может содержать многобайтовый UTF-8,
+            // одиночный u_draw_char(current_x, y, *ptr, color) нарисует мусор.
+            // Поэтому выводим этот символ как микро-строку из двух байт:
+            char temp_utf8[3] = {0, 0, 0};
+            int step = 1;
+            temp_utf8[0] = *ptr;
+            if (((*ptr) & 0xE0) == 0xC0) { // 2-байтовый UTF-8
+                temp_utf8[1] = *(ptr + 1);
+                step = 2;
+            }
+            u_draw_string(current_x, y, temp_utf8, color);
+            current_x += 8;
+            ptr += (step - 1);
         }
         ptr++;
     }
-
-    __builtin_va_end(args); // Закрываем фрейм vararg
+    __builtin_va_end(args);
 }
 
 
@@ -114,27 +168,25 @@ int open(const char *path, uint32_t flags){
     return ret;
 }
 
-//Сложная вычитка с проверкой
-int u_read(int fd, void *buf, uint32_t count){
+int u_kbhit(void){
     int ret;
-    if(fd == STDIN){  //Обычный клавиатурный STDIN
-        while (1){
-            uint32_t local_fd = fd;
-            void *local_buf = buf;
-            uint32_t local_count = count;
-
-            __asm__ __volatile__("int $0x80":"=a"(ret):"a"(SYS_READ),"b"(local_fd),"c"(local_buf),"d"(local_count):"memory","cc");
-
-            if (ret == KBD_DRIVER_NOT_READY) {
-                yield(); // yield() может портить регистры, но на следующем витке local_count их восстановит
-                continue;
-            }
-            break;
-        }
-    } else  //Обычное чтение с файла
-        __asm__ __volatile__("int $0x80":"=a"(ret):"a"(SYS_READ),"b"(fd),"c"(buf),"d"(count):"cc","memory");
-
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_KBD_HIT) : "memory");
     return ret;
+}
+
+uint32_t u_read_scancode(void){
+    uint32_t packed_event = 0;
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(SYS_READ), "b"(STDIN), "c"(&packed_event), "d"(4)
+        : "memory"
+    );
+    if (ret > 0){
+        return packed_event;
+    }
+    return 0;
 }
 
 
@@ -178,6 +230,14 @@ void clear_screen(void){
     __asm__ __volatile__("int $0x80" : : "a"(SYS_CLEAR_SCREEN) : "memory");
 }
 
+void u_clear_tile(uint32_t x, uint32_t y, uint32_t color){
+    __asm__ __volatile__(
+        "int $0x80"
+        :
+        : "a"(SYS_CLEAR_TILE), "b"(x), "c"(y), "d"(color)
+        : "memory"
+    );
+}
 
 int u_spawn(const char *path, const char *cmdline){
     int ret;
@@ -212,6 +272,12 @@ int u_wait_deity(int pid){
         break;
     }
     return ret;
+}
+
+uint32_t get_ticks(void){
+    uint32_t t;
+    __asm__ __volatile__("int $0x80" : "=a"(t) : "a"(SYS_GET_TICKS) : "memory");
+    return t;
 }
 
 
@@ -256,37 +322,80 @@ int set_wallpaper(const void *buffer, uint32_t size){
     return ret;
 }
 
+
+int dup2(int oldfd, int newfd){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_DUP2), "b"(oldfd), "c"(newfd) : "memory");
+    return ret;
+}
+
+int u_isatty(int fd){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_ISATTY), "b"(fd) : "memory");
+    return ret;
+}
+
+
+void u_get_console_geometry(uint32_t *cols, uint32_t *rows,uint32_t *cell_w, uint32_t *cell_h){
+    uint32_t c = 0, rr = 0, cw = 0, ch = 0;
+    __asm__ __volatile__("int $0x80" : "=a"(c), "=b"(rr), "=c"(cw), "=d"(ch) : "a"(SYS_GET_CONSOLE_GEOMETRY) : "memory");
+    if (cols)   *cols   = c;
+    if (rows)   *rows   = rr;
+    if (cell_w) *cell_w = cw;
+    if (cell_h) *cell_h = ch;
+}
+
+int u_scroll_rect(int x, int y, int w, int h, int dy){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_SCROLL_RECT), "b"(x), "c"(y), "d"(w), "S"(h), "D"(dy)
+        : "memory");
+    return ret;
+}
+
+int u_fb_blit(int x, int y, int w, int h, const void *src){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_FB_BLIT), "b"(x), "c"(y), "d"(w), "S"(h), "D"(src) : "memory");
+    return ret;
+}
+
+
 static void n_put_str(const char *str){
     if (!str) return;
     uint32_t len = 0;
     while (str[len] != '\0') {
         len++;
     }
-    if (len > 0) {
-        u_write(1, str, len); //Пишем строго в стандартный поток вывода процессов!
+    if (len > 0){
+        u_write(STDOUT, str, len); //Пишем в стандартный поток вывода процессов
     }
 }
 
 
-//Канонический потоковый printf с нативной защитой стека GCC через __builtin_va
+//Канонический потоковый
 void printf(const char *format, ...){
     if (!format) return;
     __builtin_va_list args;
     __builtin_va_start(args, format);
     const char *ptr = format;
-    char char_buf[2] = {0, 0};
-
+    const char *start_chunk = format; //Указатель на начало блока чистого текста
     while (*ptr != '\0'){
         if (*ptr == '%'){
-            ptr++;
+            //Перед тем как обработать спецификатор, выплёвываем в STDOUT
+            //весь накопленный кусок статического текста до знака '%' за jlby вызов
+            uint32_t chunk_len = ptr - start_chunk;
+            if (chunk_len > 0){
+                u_write(STDOUT, start_chunk, chunk_len);
+            }
+            ptr++; //Сдвигаемся на символ спецификатора
             if (*ptr == 'c'){
                 char char_val = (char)__builtin_va_arg(args, int);
+                char char_buf[1];
                 char_buf[0] = char_val;
-                n_put_str(char_buf);
+                u_write(STDOUT, char_buf, 1);
             }
             else if (*ptr == 's'){
                 const char *str_val = __builtin_va_arg(args, const char *);
-                if (str_val) {
+                if (str_val){
                     n_put_str(str_val);
                 } else {
                     n_put_str("(null)");
@@ -298,14 +407,12 @@ void printf(const char *format, ...){
                 int i = 0;
                 uint32_t temp = num_val;
                 int base = (*ptr == 'x') ? 16 : 10;
-
                 if (temp == 0) num_buf[i++] = '0';
                 while (temp > 0){
                     int r = temp % base;
                     num_buf[i++] = (r < 10) ? (r + '0') : (r - 10 + 'A');
                     temp /= base;
                 }
-
                 char rev_buf[12];
                 int rev_idx = 0;
                 for (int j = i - 1; j >= 0; j--){
@@ -314,15 +421,17 @@ void printf(const char *format, ...){
                 rev_buf[rev_idx] = '\0';
                 n_put_str(rev_buf);
             }
-        } else {
-            char_buf[0] = *ptr;
-            n_put_str(char_buf);
+            //Сдвигаем маркер начала следующего текстового блока за спецификатор
+            start_chunk = ptr + 1;
         }
         ptr++;
     }
-
+    //Выплёвываем финальный остаток строки, если он остался после последнего '%'
+    uint32_t final_chunk_len = ptr - start_chunk;
+    if (final_chunk_len > 0) {
+        u_write(STDOUT, start_chunk, final_chunk_len);
+    }
     __builtin_va_end(args);
-
 }
 
 
@@ -356,3 +465,206 @@ bool directoryexists(const char *path){
     //Строго проверяем флаг директории
     return ((st.attributes & FS_ATTR_DIRECTORY) == FS_ATTR_DIRECTORY);
 }
+
+
+
+int u_read(int fd, void *buf, uint32_t count){
+    int ret;
+
+    if (fd == STDIN && u_isatty(STDIN)){
+        char *dst = (char *)buf;
+        uint32_t got = 0;
+        uint32_t limit = (count > 0) ? count - 1 : 0;
+
+        while (got < limit){
+            ret = 0;
+            __asm__ __volatile__("int $0x80"
+                : "=a"(ret)
+                : "a"(SYS_READ), "b"(fd), "c"(dst + got), "d"(1)
+                : "memory");
+
+            if (ret < 0) return ret;
+            if (ret == 0){ yield(); continue; }
+
+            char ch = dst[got];
+
+            if (ch == '\n' || ch == '\r'){
+                dst[got++] = '\n';
+                break;
+            }
+            if (ch == '\b'){
+                //снимаем последний полный codepoint UTF-8 из dst[0..got)
+                if (got > 0){
+                    got--;                                              // снимаем последний байт
+                    while (got > 0 && ((uint8_t)dst[got] & 0xC0) == 0x80) got--;  // снимаем continuation
+                    if (got > 0 && ((uint8_t)dst[got] & 0xC0) == 0xC0) { /* двухбайтовый: 1 оставшийся байт это lead, снимаем его */
+                        got--;
+                    }
+                }
+                continue;
+            }
+            got++;
+        }
+
+        dst[got] = '\0';
+        return (int)got;
+    }
+
+    __asm__ __volatile__("int $0x80"
+        : "=a"(ret)
+        : "a"(SYS_READ), "b"(fd), "c"(buf), "d"(count)
+        : "memory");
+    return ret;
+}
+
+
+int u_kbd_set_mode(int mode){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_KBD_SET_MODE), "b"(mode) : "memory");
+    return ret;
+}
+
+
+uint32_t u_tty_get_flags(void){
+    uint32_t ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_TTY_GET_FLAGS) : "memory");
+    return ret;
+}
+
+void u_tty_set_flags(uint32_t new_flags, uint32_t mask){
+    __asm__ __volatile__("int $0x80" : : "a"(SYS_TTY_SET_FLAGS), "b"(new_flags), "c"(mask) : "memory");
+}
+
+
+int u_locale_get(void){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_LOCALE_GET) : "memory");
+    return ret;
+}
+
+int u_locale_get_keymap(locale_keymap_t *out){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_LOCALE_GET_KEYMAP), "b"(out) : "memory");
+    return ret;
+}
+
+int scanf(const char *format, ...){
+    if (!format) return 0;
+    char input_buf[1024];
+    for (int i = 0; i < 1024; i++) input_buf[i] = 0;
+
+    int bytes_received = u_read(STDIN, input_buf, 1023);
+    if (bytes_received <= 0) return 0;
+
+    __builtin_va_list args;
+    __builtin_va_start(args, format);
+
+    const char *fmt_ptr = format;
+    char *str_ptr = input_buf;
+    int success_matches = 0;
+
+    while (*fmt_ptr != '\0' && *str_ptr != '\0'){
+        if (*fmt_ptr == ' ' || *fmt_ptr == '\t' || *fmt_ptr == '\n' || *fmt_ptr == '\r'){
+            fmt_ptr++;
+            continue;
+        }
+
+        while (*str_ptr == ' ' || *str_ptr == '\t' || *str_ptr == '\n' || *str_ptr == '\r'){
+            str_ptr++;
+        }
+
+        if (*str_ptr == '\0') break;
+
+        if (*fmt_ptr == '%'){
+            fmt_ptr++;
+
+            if (*fmt_ptr == 'c'){
+                char *char_dst = __builtin_va_arg(args, char *);
+                if (char_dst){
+                    *char_dst = *str_ptr;
+                    success_matches++;
+                }
+                str_ptr++;
+            }
+            else if (*fmt_ptr == 's'){
+                char *str_dst = __builtin_va_arg(args, char *);
+                if (str_dst){
+                    int s_idx = 0;
+                    while (*str_ptr != '\0' && *str_ptr != ' ' && *str_ptr != '\t' && *str_ptr != '\n' && *str_ptr != '\r'){
+                        str_dst[s_idx++] = *str_ptr++;
+                    }
+                    str_dst[s_idx] = '\0';
+                    success_matches++;
+                }
+            }
+            else if (*fmt_ptr == 'd'){
+                int *int_dst = __builtin_va_arg(args, int *);
+                if (int_dst){
+                    int sign = 1;
+                    if (*str_ptr == '-'){
+                        sign = -1;
+                        str_ptr++;
+                    } else if (*str_ptr == '+'){
+                        str_ptr++;
+                    }
+
+                    int value = 0;
+                    int numeric_chars = 0;
+                    while (*str_ptr >= '0' && *str_ptr <= '9'){
+                        value = value * 10 + (*str_ptr - '0');
+                        str_ptr++;
+                        numeric_chars++;
+                    }
+
+                    if (numeric_chars > 0){
+                        *int_dst = value * sign;
+                        success_matches++;
+                    }
+                }
+            }
+            else if (*fmt_ptr == 'x'){
+                uint32_t *hex_dst = __builtin_va_arg(args, uint32_t *);
+                if (hex_dst){
+                    if (str_ptr[0] == '0' && (str_ptr[1] == 'x' || str_ptr[1] == 'X')){
+                        str_ptr += 2;
+                    }
+
+                    uint32_t value = 0;
+                    int hex_chars = 0;
+                    while (1){
+                        char h = *str_ptr;
+                        if (h >= '0' && h <= '9'){
+                            value = value * 16 + (h - '0');
+                        } else if (h >= 'a' && h <= 'f'){
+                            value = value * 16 + (h - 'a' + 10);
+                        } else if (h >= 'A' && h <= 'F'){
+                            value = value * 16 + (h - 'A' + 10);
+                        } else {
+                            break;
+                        }
+                        str_ptr++;
+                        hex_chars++;
+                    }
+
+                    if (hex_chars > 0){
+                        *hex_dst = value;
+                        success_matches++;
+                    }
+                }
+            }
+            fmt_ptr++;
+        } else {
+            if (*fmt_ptr == *str_ptr){
+                fmt_ptr++;
+                str_ptr++;
+            } else {
+                break;
+            }
+        }
+    }
+
+    __builtin_va_end(args);
+    return success_matches;
+}
+
+

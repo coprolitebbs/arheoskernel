@@ -1,3 +1,20 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include/ext2_driver.h"
 #include "include/ext2_internal.h"
 #include "include/ext2_disk.h"
@@ -19,6 +36,8 @@ uint8_t *ext2_path_buffer_ptr;
 
 fs_driver_api_t api;
 fs_driver_api_t *api_ptr;
+
+description_driver_api_t descr_api;
 
 //  ----- внутренние функции  -----
 
@@ -490,7 +509,34 @@ int ext2_open(void *vol_ptr, const char *name, uint32_t flags){
         r = ext2_lookup_in_dir(vol, parent_inode_no, child_name, &found_inode, &found_inode_no);
     }
 
-    if (r != FS_OK) return r; // Возвращаем код ошибки (например, FS_NOT_FOUND), если файл не существует
+    if (r != FS_OK) return r; //Возвращаем код ошибки (например, FS_NOT_FOUND), если файл не существует
+
+    //uint16_t ftype = found_inode.i_mode & 0xF000;
+    //bool is_dir = (ftype == 0x4000);
+    bool is_dir = (found_inode.i_mode & 0xF000) == 0x4000;
+    if (flags & FS_OPEN_WRITE){
+        //Каталог на запись не открываем
+        if (is_dir){
+            return FS_ACCESS_DENIED;
+        }
+        //Бит owner-write в i_mode — тот же, что ext2_stat выставляет как FS_ATTR_READONLY
+        if ((found_inode.i_mode & 0x0080) == 0){
+            return FS_ACCESS_DENIED;
+        }
+    }
+
+    if ((flags & FS_OPEN_TRUNCATE) && !(flags & FS_OPEN_WRITE)) {
+        return FS_ACCESS_DENIED;
+    }
+
+    if (flags & FS_OPEN_TRUNCATE){
+        if (is_dir){
+            //TRUNCATE на каталоге — молча игнорируем
+        } else {
+            int tr = ext2_truncate_inode(vol, found_inode_no, &found_inode);
+            if (tr != FS_OK) return tr;
+        }
+    }
 
     //Ищем свободное место в глобальной таблице открытых файлов EXT2
     for (int fd = 0; fd < EXT2_MAX_OPEN_FILES; fd++) {
@@ -615,25 +661,36 @@ int ext2_readdir(int dir, fs_dirent_t *entry){
             entry->name[0] = '.';
             entry->name[1] = '\0';
             entry->type = FS_ATTR_DIRECTORY;
+            entry->attributes = FS_ATTR_DIRECTORY;
+            entry->size = 0;
         }
         else if (real_name_len == 2 && dir_buf[name_start_offset] == '.' && dir_buf[name_start_offset + 1] == '.') {
             entry->name[0] = '.';
             entry->name[1] = '.';
             entry->name[2] = '\0';
             entry->type = FS_ATTR_DIRECTORY;
+            entry->attributes = FS_ATTR_DIRECTORY;
+            entry->size = 0;
         }
         else {
+            uint32_t attrs = 0;
+            uint32_t size_val = 0;
+
             uint8_t ext2_type = (ext2_entry->name_len >> 8) & 0xFF;
             if (ext2_type == 2) {
-                entry->type = FS_ATTR_DIRECTORY;
+                attrs |= FS_ATTR_DIRECTORY;
             } else {
                 ext2_inode_t temp_inode;
                 if (ext2_read_inode(file->vol, ext2_entry->inode, &temp_inode) == FS_OK) {
-                    if ((temp_inode.i_mode & 0xF000) == 0x4000) {
-                        entry->type = FS_ATTR_DIRECTORY;
+                    if ((temp_inode.i_mode & 0xF000) == 0x4000){
+                        attrs |= FS_ATTR_DIRECTORY;
                     }
+                    size_val = temp_inode.i_size;
                 }
             }
+            entry->attributes = attrs;
+            entry->type       = attrs ? FS_ATTR_DIRECTORY : 0;
+            entry->size       = size_val;
         }
 
         api_ptr->free_ptr(dir_buf);
@@ -843,6 +900,7 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
     if (file->used == 0 || !buffer || size == 0) return 0;
 
     if ((file->attributes & 0xF000) == 0x4000) return FS_ACCESS_DENIED;
+    if ((file->inode.i_mode & 0x0080) == 0) return FS_ACCESS_DENIED;
 
     uint32_t block_size = file->vol->block_size;
     const uint8_t *src = (const uint8_t *)buffer;
@@ -1154,6 +1212,7 @@ int ext2_unlink(void *vol_ptr, const char *path){
     uint8_t *bg_desc_bytes = vol->bg_desc_table + (0 * 32);
     uint32_t block_bitmap_no = *(uint32_t *)(bg_desc_bytes + 0);
 
+    /*
     if (block_bitmap_no != 0) {
         r = ext2_read_block(vol, block_bitmap_no, bitmap_buf);
         if (r == FS_OK) {
@@ -1181,6 +1240,15 @@ int ext2_unlink(void *vol_ptr, const char *path){
             }
         }
     }
+    */
+    for (int b = 0; b < 12; b++){
+        if (file_inode.i_block[b] == 0) continue;
+        int r_free = ext2_free_single_block(vol, file_inode.i_block[b]);
+        if (r_free < 0) break;
+    }
+    if (file_inode.i_block[12]) ext2_free_block_tree(vol, file_inode.i_block[12], 1);
+    if (file_inode.i_block[13]) ext2_free_block_tree(vol, file_inode.i_block[13], 2);
+    if (file_inode.i_block[14]) ext2_free_block_tree(vol, file_inode.i_block[14], 3);
 
     uint32_t inode_bitmap_no = *(uint32_t *)(bg_desc_bytes + 4);
     if (inode_bitmap_no != 0) {
@@ -1309,7 +1377,7 @@ int ext2_rmdir(void *vol_ptr, const char *path) {
 
     uint32_t dir_phys_block = dir_inode.i_block[0];
 
-    if (dir_phys_block != 0) {
+    /*if (dir_phys_block != 0) {
         r = ext2_read_block(vol, dir_phys_block, block_buf);
         if (r != FS_OK) { api_ptr->free_ptr(block_buf); return r; }
 
@@ -1331,6 +1399,10 @@ int ext2_rmdir(void *vol_ptr, const char *path) {
             }
             offset += entry->rec_len;
         }
+    }*/
+    if (dir_phys_block != 0){
+        r = ext2_free_single_block(vol, dir_phys_block);
+        if (r < 0) { api_ptr->free_ptr(block_buf); return r; }
     }
 
     uint8_t *bg_desc_bytes = vol->bg_desc_table + (0 * 32);
@@ -1454,6 +1526,9 @@ void driver_main(struct boot_info *boot){
 
     fs_init(boot);
 
+    description_driver_api_t *descr_api_ptr = &descr_api;
+    descr_api_ptr->type = DESCR_FILESYSTEM_DRIVER;
+
     api_ptr = &api;
 
 
@@ -1486,11 +1561,13 @@ void driver_main(struct boot_info *boot){
     api_ptr->rmdir = ext2_rmdir;
     api_ptr->unlink = ext2_unlink;
 
+    descr_api_ptr->struct_ptr = (void *)&api;
+
 }
 
 
-fs_driver_api_t *driver_get_api(void){
-    return &api;
+description_driver_api_t *driver_get_api(void){
+    return &descr_api;
 }
 
 

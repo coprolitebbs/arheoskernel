@@ -1,9 +1,28 @@
+/*
+ * Copyright (C) 2026 ARHeOS by Dmitry H
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "include-kernel/kernel.h"
 #include "include-kernel/gdt.h"
 #include "include-kernel/bootinfo.h"
 #include "include-kernel/lib.h"
 #include "include-kernel/draw.h"
 #include "include-kernel/font_data.h"
+#include "include-kernel/font.h"
+#include "include-kernel/locale.h"
 #include "include-kernel/task.h"
 #include "include-kernel/pmm.h"
 #include "include-kernel/vmm.h"
@@ -17,27 +36,57 @@
 #include "drivers/include_drivers/drv_format.h"
 #include "drivers/fat12_driver/include/fat12_internal.h"
 #include "drivers/ext2_driver/include/ext2_internal.h"
+#include "include-kernel/font.h"
+#include "include-kernel/locale.h"
+#include "include-kernel/font_vga.h"
 
 
 void _start(void){
     //Получаем параметры VBE
-	boot_info_t *info;
+	boot_info_t *info = (boot_info_t*)0x0;
 
     asm volatile("movl %%ebx,%0" : "=r"(info));
 
-com_init();
-com_puts("[KERNEL] Starting...\n");
+    //uint32_t local_ebx;
+    //asm volatile("movl %%ebx, %0" : "=r"(local_ebx));
+
+    //char *bss = bss_start;
+    //while (bss < kernel_end) {
+        //*bss++ = 0;
+    //}
+
+    //debug_kernel_dump_bootinfo((void*)local_ebx);
+
+    //boot_info = (boot_info_t*)local_ebx;
+    //outb(0xE9, 'A');
+    com_init();
+    com_puts("[KERNEL] Starting...\n");
+
+
 
     bootinfo_init(info);
+
 
 	if(boot_info){
         lfb_addr = boot_info->framebuffer;
         pitch    = boot_info->pitch;
         bytes_pp = boot_info->bpp / 8;
+        //for(;;);
     }
 
-	asm volatile("cli");
+    font_vga_init();
+/*
+    com_puts("[FONT] glyph_count=");  com_puthex(g_vga_font.glyph_count);
+    com_puts(" g[128].cp=");          com_puthex(g_vga_glyphs[128].codepoint);
+    com_puts(" g[128].rows=");        com_puthex((uint32_t)g_vga_glyphs[128].rows);
+    com_puts(" fallback=");           com_puthex((uint32_t)g_vga_font.fallback);
+    com_puts("\n");
+*/
+    //draw_hex_dword((uint32_t)boot_info, 20, 100);
+    //draw_hex_dump_spaced(0x5200,64,0,150);
 
+	asm volatile("cli");
+    //for(;;);
 
 
 	//fill_screen(0xFF, 0x1, 0x1);
@@ -72,6 +121,7 @@ com_puts("[KERNEL] Starting...\n");
 	//draw_hex_dump_spaced(0x5200,64,0,150);
     //draw_hex_dump_spaced((uint32_t)boot_info->modules,64,0,450);
 
+    syscalls_table_init();
 
 	gdt_init();
 
@@ -99,6 +149,7 @@ com_puts("[KERNEL] Starting...\n");
     has_lfb = (boot_info->graphics_flags & 1);  // Загрузчик stage2 должен определить наличие еще при установке VBE и передать сюда бит
     //Попробуем определить адрес начала фреймбуффера
     graphics_init_uma_address(total_mem, has_lfb, lfb_addr);
+
     //Попробуем принудительно поискать карту S3 Trio64, если мы вдруг оказались в 86box и офигели от отсутствия линейного фреймбуффера
     find_and_prepare_s3_trio64();
 
@@ -348,3 +399,6 @@ void kernel_halt_all(void){
                 "jmp 1b"
     );
 }
+
+
+

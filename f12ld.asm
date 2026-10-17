@@ -1,7 +1,24 @@
+ ; Copyright (C) 2026 ARHeOS by Dmitry H
+ ;
+ ; This program is free software: you can redistribute it and/or modify
+ ; it under the terms of the GNU General Public License as published by
+ ; the Free Software Foundation, either version 3 of the License, or
+ ; (at your option) any later version.
+ ;
+ ; This program is distributed in the hope that it will be useful,
+ ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+ ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ ; GNU General Public License for more details.
+ ;
+ ; You should have received a copy of the GNU General Public License
+ ; along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+; f12ld.asm — Загрузчик Stage 2 ядра операционной системы для файловой системы FAT12
 BITS 16
 ORG 0x7E00
 
 start:
+    ;аппаратная фиксация стека реального режима
     cli
     xor ax, ax
     mov ds, ax
@@ -10,68 +27,23 @@ start:
     mov sp, 0x9C00
     sti
 
-    mov ax, cs
-    mov ds, ax
-
     mov [cs:drive], dl
-    ;Инициализация диска
-    mov ah, 0x00
-    int 0x13
+
+    ;Инициализация A20
+    call a20_init
+    call a20_enable
+
+    ;Инициализация контроллера диска
+    call disk_reset
     jc error
 
+    ;Чтение и разбор BPB загрузочного сектора
     pusha
-	;Чтение и разбор BPB
-
-	call disk_reset
-
     call bpb_init
     jc error
-	popa
+    popa
 
-	pusha
-	;Отладка: вывод значений
-    mov dx, 0xE9
-    mov si, msg_bpb
-    call print_debug
-    mov ax, [cs:bps]
-    call debug_hex_word
-    mov si, msg_delimiter
-    call print_debug
-    mov al, [cs:spc]
-	mov ah, 0
-    call debug_hex_word
-    mov si, msg_delimiter
-    call print_debug
-    mov ax, [cs:rsvd]
-    call debug_hex_word
-    mov si, msg_delimiter
-    call print_debug
-    mov al, [cs:nfats]
-	mov ah, 0
-    call debug_hex_word
-    mov si, msg_delimiter
-    call print_debug
-    mov ax, [cs:root_ent]
-    call debug_hex_word
-    mov si, msg_delimiter
-    call print_debug
-    mov ax, [cs:fatsz]
-    call debug_hex_word
-    mov si, msg_delimiter
-    call print_debug
-    mov ax, [cs:spt]
-    call debug_hex_word
-	mov si, msg_delimiter
-    call print_debug
-    mov ax, [cs:heads]
-    call debug_hex_word
-    mov al, 13
-    out dx, al
-    mov al, 10
-    out dx, al
-	popa
-
-    ;Чтение FAT
+    ;Чтение таблицы FAT (в буфер 0x9000:0x0000)
     push es
     mov ax, [cs:rsvd]
     mov cx, [cs:fatsz]
@@ -82,9 +54,9 @@ start:
     pop es
     jc error
 
-
     call disk_reset
-    ;Чтение корневого каталога
+
+    ;Чтение корневого каталога (в буфер 0x8000:0x0000)
     push es
     mov ax, [cs:root_start]
     mov cx, [cs:root_size]
@@ -95,241 +67,139 @@ start:
     pop es
     jc error
 
-    ;call dump_of_catalogue
     call disk_reset
-    ;Поиск KERNEL
-    ;push si
-    ;push di
 
+    ;Загрузка драйверов
     push es
 
+    ;Загрузка Framebuffer драйвера
+    mov si, fb_driver_name
+    mov ax, 0x3000
+    mov es, ax
+    xor bx, bx
+    call fat12_load_file
+    jc error
+    mov eax, [cs:current_file_size]
+    mov [cs:fb_driver_size], eax
+
+    call disk_reset
+
+    ;Загрузка драйвера FAT12
+    mov si, fat12_driver_name
+    mov ax, 0x4000
+    mov es, ax
+    xor bx, bx
+    call fat12_load_file
+    jc error
+    mov eax, [cs:current_file_size]
+    mov [cs:fat12_driver_size], eax
+
+    call disk_reset
+
+    ;Загрузка драйвера EXT2
+    mov si, ext2_driver_name
+    mov ax, 0x5000
+    mov es, ax
+    xor bx, bx
+    call fat12_load_file
+    jc error
+    mov eax, [cs:current_file_size]
+    mov [cs:ext2_driver_size], eax
+
+    pop es
+    call disk_reset
+
+    ;Получение карты памяти через E820
+    push es
+    push di
+    xor ax, ax
+    mov es, ax
+    mov di, 0x6002
+    call e820_detect
+    mov word [0x6000], cx
+    pop di
+    pop es
+
+    ;Поиск ядра в корневом каталоге
+    push es
     mov bx, 0x8000
     mov es, bx
     xor bx, bx
     mov cx, [cs:root_ent]
 
-search:
-    push cx
-    push bx
+.search_loop:
+    test cx, cx
+    jz .nf
     mov al, [es:bx]
-    cmp al, 0
-    je not_found
+    test al, al
+    jz .nf
     cmp al, 0xE5
-    je skip_entry
+    jz .next
+
+    push cx
+    push si
+    push di
     mov si, kernel_name
     mov di, bx
     mov cx, 11
     cld
     repe cmpsb
-    pop bx
+    pop di
+    pop si
     pop cx
-    je found
-skip_entry:
-    pop bx
-    pop cx
-maybe_jump:
+    jz .found
+
+.next:
     add bx, 32
-    loop search
-    pop es
+    dec cx
+    jmp .search_loop
+
+.nf:
     jmp not_found
-found:
 
-    pop es
-
-    ;Читаем кластер и размер
+.found:
     mov ax, [es:bx + 26]
     mov [cs:cluster], ax
-    mov ax, [es:bx + 28]
-    mov [cs:file_size], ax
-    call cluster_size_debug
-
-    ;LBA = DATA_START + (cluster-2)*SECTORS_PER_CLUSTER
-    mov ax, [cs:cluster]
-    sub ax, 2
-    mov bx, [cs:spc]
-    mul bx
-    add ax, [cs:data_start]
-    mov [cs:sector], ax
-
-    push es
-
-    push cs
-    pop ds
-
-    ;Загрузка KERNEL в 0x20000
-    mov si,kernel_name
-    mov ax,0x2000
-    mov es,ax
-    xor bx,bx
-    call fat12_load_file
-    jc error
-
-    ;call dump_kernel_16bytes
-
-    call disk_reset
-    ;Загрузка framebuffer драйвера
-    mov si,fb_driver_name
-    mov ax,0x3000
-    mov es,ax
-    xor bx,bx
-    call fat12_load_file
-    jc error
-
-    mov eax,[cs:current_file_size]
-    mov [cs:fb_driver_size],eax
-
-    call disk_reset
-
-    push cs
-    pop ds
-    ;Загрузка драйвера fat12
-    mov si,fat12_driver_name
-    mov ax,0x4000
-    mov es,ax
-    xor bx,bx
-    call fat12_load_file
-    jc error
-
-    mov eax,[cs:current_file_size]
-    mov [cs:fat12_driver_size],eax
-
-    call disk_reset
-
-    push cs
-    pop ds
-    ;Загрузка драйвера ext2
-    mov si,ext2_driver_name
-    mov ax,0x5000
-    mov es,ax
-    xor bx,bx
-    call fat12_load_file
-    jc error
-
-    mov eax,[cs:current_file_size]
-    mov [cs:ext2_driver_size],eax
-
-    ;call dump_fat12
-    ;jmp halt
-
+    mov eax, [es:bx + 28]
+    mov [cs:kernel_size_pm], eax
     pop es
 
-    ;Инициализация VBE
+    ;Загрузка ядра прямо в 0x100000
+    call fat12_load_kernel_high
+    jc error
+
     call vbe_init
 
-    ;cli
-
-	;Получение карты памяти через E820
-    push es
-    push di
+    ;Восстанавливаем дефолтные сегменты для сборщиков метаданных
     xor ax, ax
+    mov ds, ax
     mov es, ax
-    mov di, 0x6002       ;буфер для записей (начинается с 0x6002)
-    call e820_detect
-    mov word [0x6000], cx ;сохраняем количество записей по адресу 0x6000
-    ;если ошибка, количество записей будет 0
-    pop di
-    pop es
 
-	;Формирование структур
-	call build_fs_info
-	call build_modules_info
-	call build_boot_info
+    ;Формирование структур для ядра (пишут по адресу 0x9000)
+    call build_fs_info
+    call build_modules_info
+    call build_boot_info
+;call dump_kernel
 
-    ;дамп modules_info
-	;mov esi,0x5200
-    ;mov ecx,64
 
-;.dump_pm:
-    ;mov al,[esi]
-    ;call debug_hex_byte
-    ;inc esi
-    ;loop .dump_pm
 
-    ;xor eax,eax
-    ;mov eax, [cs:file_size]
-    ;mov edi, eax
-    ;mov ebx, eax
-    xor ebx,ebx
-    movzx ebx, word [cs:file_size]
-
-    ;cli
-    ;xor ax, ax
-    ;mov ds, ax
-    ;mov es, ax
-    ;mov fs, ax
-    ;mov gs, ax
-
+    ;Переход в protected mode
     cli
-    xor ax, ax
-    mov ss, ax
-    mov sp, 0x9C00      ;Тот же адрес, что и в начале start:
-    sti
 
-    call a20_enable
+    ;Корректируем линейный базовый адрес GDT в структуре gdtr
+    mov eax, [cs:gdtr+2]
+    cmp eax, 0x7E00
+    jae .final_gdt_ok
+    add eax, 0x7E00
+    mov [cs:gdtr+2], eax
+.final_gdt_ok:
 
-    ;Переход в защищённый режим
     lgdt [cs:gdtr]
     mov eax, cr0
     or eax, 1
     mov cr0, eax
     jmp 0x08:pm_entry
-BITS 32
-pm_entry:
-    ;Отладка через видеопамять
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-    mov ss, ax
-    mov esp, 0x90000
 
-    ;cli
-
-
-
-    ;Копирование ядра в 100000
-    push esi
-    push edi
-    push ecx
-
-    ;cld
-
-
-    mov esi, 0x20000
-    mov edi, 0x100000
-    mov ecx, ebx
-    cld
-    ;mov ecx, [file_size]
-    rep movsb
-    pop ecx
-    pop edi
-    pop esi
-
-    cli
-
-	mov ebx,BOOTINFO_ADDR
-
-;halt_33:
-	;jmp halt_33
-
-    jmp 0x08:0x100000
-
-    jmp halt32
-
-
-halt32:
-    cli
-    hlt
-    jmp halt32
-
-
-BITS 16
-
-
-;bpb_init - читает загрузочный сектор (LBA0) во временный буфер
-;0x0000:0x0600 и заполняет переменные геометрии FAT12
-;из его BPB. На выходе CF=1 при ошибке чтения диска
 bpb_init:
     push es
     push bx
@@ -407,25 +277,99 @@ bpb_init:
     pop es
     ret
 
-;Обработчики ошибок
 not_found:
     pop es
-    pop si
     mov si, msg_not_found
     call print_string
     jmp halt
+
 error:
     mov si, msg_error
     call print_string
     jmp halt
-halt:
-    ;cli
-    hlt
+
+.fatal_halt:
+    mov al, '!'
+    call debug_char
     jmp halt
 
-BITS 16
+BITS 32
+pm_entry:
+    ;Инициализация 32-битных сегментов данных flat-модели
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, 0x90000            ;Стек ядра
 
-;Инклюды
+    cli
+
+    ;Аргумент для ядра в EBX
+    mov ebx, BOOTINFO_ADDR
+
+    ;Передаем управление ядру операционной системы
+    jmp 0x08:0x100000
+
+halt32:
+    cli
+    hlt
+    jmp halt32
+
+BITS 16
+halt:
+    cli
+.loop:
+    hlt
+    jmp .loop
+
+global bps, spc, rsvd, nfats, root_ent, fatsz, spt, heads
+global root_start, root_size, data_start, drive, cluster
+
+;Переменные загрузчика
+kernel_size_pm       dd 0       ;32-битный размер файла ядра
+kernel_inode         dw 0
+fb_inode             dw 0
+fat12_inode          dw 0
+ext2_inode           dw 0
+drive                db 0
+cluster              dw 0
+sector               dw 0
+file_size            dw 0       ;Сохранено для совместимости
+
+;Имена файлов
+kernel_name           db "KERNEL     "
+loader_name           db "F12.LD",0
+fb_driver_name        db "FB_DR   DRV"
+fb_driver_filename    db "FB_DR.DRV",0
+fat12_driver_name     db "F12_DR  DRV"
+fat12_driver_filename db "F12_DR.DRV",0
+ext2_driver_name      db "EXT2_DR DRV"
+ext2_driver_filename  db "EXT2_DR.DRV",0
+
+;Геометрия диска BPB
+bps         dw 512
+spc         dw 2
+rsvd        dw 1
+nfats       dw 2
+root_ent    dw 224
+fatsz       dw 3
+spt         dw 9
+heads       dw 2
+
+root_start  dw 0
+root_size   dw 0
+data_start  dw 0
+
+;Сообщения отладки
+msg_not_found   db "KERNEL not found", 0
+msg_error       db "Disk error", 0
+msg_found_name  db "Found: ", 0
+msg_kcp         db "Kernel copied", 0
+msg_bpb         db "BPB: ", 0
+msg_delimiter   db " : ", 0
+
 %include "include/bootinfo_builder.inc"
 %include "include/debug.inc"
 %include "include/fat12_stage2.inc"
@@ -438,50 +382,5 @@ BITS 16
 %include "include/fat12_bootinfo.inc"
 %include "include/bootinfo.inc"
 
-BITS 16
-;Данные
-;File names to load
-kernel_name        db "KERNEL     "
-
-drive       db 0
-;filename    db "KERNEL     "
-cluster     dw 0
-sector      dw 0
-file_size   dw 0
-
-
-;Параметры, полученные из BPB (заполняются в bpb_init)
-;Начальные значения - заглушки для 720K, используются только
-;для самого первого чтения LBA0 в bpb_init (см. комментарий там).
-bps         dw 512      ;байт на сектор           (BPB_BytsPerSec)
-spc         dw 2        ;секторов на кластер       (BPB_SecPerClus)
-rsvd        dw 1        ;зарезервированных секторов(BPB_RsvdSecCnt)
-nfats       dw 2        ;число FAT                 (BPB_NumFATs)
-root_ent    dw 224      ;записей в корневом каталоге(BPB_RootEntCnt)
-fatsz       dw 3        ;секторов на одну FAT       (BPB_FATSz16)
-spt         dw 9        ;секторов на дорожку (CHS)  (BPB_SecPerTrk)
-heads       dw 2        ;число головок (CHS)        (BPB_NumHeads)
-
-; ---- Производные величины (вычисляются в bpb_init)
-root_start  dw 0        ;первый сектор корневого каталога
-root_size   dw 0        ;размер корневого каталога в секторах
-data_start  dw 0        ;первый сектор области данных (кластер 2)
-
-msg_not_found   db "KERNEL not found", 0
-msg_error       db "Disk error", 0
-
-msg_found_name  db "Found: ", 0
-msg_kcp db "Kernel copied", 0
-msg_bpb         db "BPB: ", 0
-msg_delimiter   db " : ", 0
-loader_name db "F12.LD",0
-
-fb_driver_name         db "FB_DR   DRV"
-fb_driver_filename     db "FB_DR.DRV",0
-fat12_driver_name      db "F12_DR  DRV"
-fat12_driver_filename  db "F12_DR.DRV",0
-ext2_driver_name       db "EXT2_DR DRV"
-ext2_driver_filename   db "EXT2_DR.DRV",0
-
-;Заполнение до 8192
+;Выравнивание и заполнение до фиксированного размера Stage 2 (8192 байт)
 times 8192-($-$$) db 0
