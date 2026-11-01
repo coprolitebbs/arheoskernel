@@ -27,7 +27,7 @@ void usb_disable_smm(void)
 {
     uint32_t pm_cfg = pci_read32(0, 31, 0, 0x40);
     uint16_t pmbase = pm_cfg & 0xFF80;
-    if (pmbase)
+    if (pmbase >= 0x1000 && pmbase != 0xFFF8)
     {
         uint32_t en = inl(pmbase + 0x30);
         en &= ~((1u<<5) | (1u<<6) | (1u<<7));
@@ -43,64 +43,74 @@ void probe_all_uhci_controllers(void)
 {
     uhci_reset_host_list();
 
-    /* ICH6 (и совместимые PIIX4-подобные чипсеты Intel):
-       - dev 29 funcs 0..2 — UHCI #1..#3 (порты 0-5)
-       - dev 23 func 1     — UHCI #4 "companion" (порты 6-7)
-       - dev 29 func 7     — EHCI (мы его изолируем выше)
-       Сканируем обе точки, а не только dev 29: на CF-18 флешка может сидеть
-       на портах, принадлежащих companion-контроллеру. */
-    static const struct { uint8_t dev; uint8_t func; } slots[] = {
-        {29, 0}, {29, 1}, {29, 2}, {29, 3}, {23, 1}
-    };
-
-    for (unsigned s = 0; s < sizeof(slots)/sizeof(slots[0]); s++)
+    /* Полный PCI-скан шины 0 (32 dev × 8 func). Прежний «список слотов ICH6»
+       {29,x},{23,1} не находил НИЧЕГО в QEMU с -device piix3-usb-uhci: там
+       контроллер сидит на dev 1 func 1, VID 0x8086 DID 0x7123 (PIIX4 UHCI).
+       Фильтр — по класс-code, как pci_scan_bus в Linux. */
+    for (uint32_t bus = 0; bus < 1; bus++)
+    for (uint32_t dev = 0; dev < 32; dev++)
+    for (uint32_t func = 0; func < 8; func++)
     {
-        uint8_t dev = slots[s].dev, func = slots[s].func;
-        uint32_t id = pci_read32(0, dev, func, 0x00);
+        uint32_t id = pci_read32((uint8_t)bus, (uint8_t)dev, (uint8_t)func, 0x00);
         if ((id & 0xFFFF) == 0xFFFF || id == 0) continue;
 
-        uint32_t cls = pci_read32(0, dev, func, 0x08);
-        if (((cls >> 24) & 0xFF) != 0x0C || ((cls >> 16) & 0xFF) != 0x03 || ((cls >> 8) & 0xFF) != 0x00) continue;
+        uint32_t cls = pci_read32((uint8_t)bus, (uint8_t)dev, (uint8_t)func, 0x08);
+        uint8_t cclass = (cls >> 24) & 0xFF;
+        uint8_t csub   = (cls >> 16) & 0xFF;
+        uint8_t cprog  = (cls >>  8) & 0xFF;
+        if (cclass != PCI_CLASS_SERIAL_BUS || csub != PCI_SUBCLASS_USB) continue;
+        if (cprog != PCI_PROGIF_UHCI)      continue;   /* OHCI/EHCI пропускаем */
 
-        uint32_t bar4 = pci_read32(0, dev, func, 0x20);
+        uint32_t bar4 = pci_read32((uint8_t)bus, (uint8_t)dev, (uint8_t)func, 0x20);
         if (!(bar4 & 0x01)) continue;
-        uint16_t io = bar4 & 0xFFF0;   // IO BAR: младшие 4 бита — флаги типа
-        if (io == 0) continue;
+        uint16_t io = bar4 & 0xFFF0;
+        if (io == 0 || io == 0xFFF0) continue;
 
-        uint32_t cmd = pci_read32(0, dev, func, 0x04);
-        pci_write32(0, dev, func, 0x04, (cmd & ~0x7u) | 0x07u);
+        uint32_t cmd = pci_read32((uint8_t)bus, (uint8_t)dev, (uint8_t)func, 0x04);
+        pci_write32((uint8_t)bus, (uint8_t)dev, (uint8_t)func, 0x04, (cmd & ~0x7u) | 0x07u);
 
-        uhci_add_host(io, 0, dev, func);
-        api_ptr->load_screen_add_string("PCI UHCI d=%d f=%d mapped at IO %x", dev, func, io);
+        uhci_add_host(io, (uint8_t)bus, (uint8_t)dev, (uint8_t)func);
+        api_ptr->load_screen_add_string("PCI UHCI b%d d%d f%d %x:%x at IO %x",
+                                        bus, dev, func,
+                                        (id >> 16) & 0xFFFF, id & 0xFFFF, io);
     }
 }
 
+
 int ehci_release_to_uhci(void) {
-    /* Находим маршевый контроллер EHCI: Bus 0, Dev 29, Func 7 */
-    uint32_t id = pci_read32(0, 29, 7, 0x00);
-    if ((id & 0xFFFF) == 0xFFFF) return -1;
+    /* EHCI ищем по РЕАЛЬНОМУ class-code (0x0C/0x03/prog-if 0x20), а не по
+       жёстко зашитому слоту dev 29 func 7: в QEMU такого слота нет вообще. */
+    int found = 0;
+    for (uint32_t dev = 0; dev < 32; dev++)
+    for (uint32_t func = 0; func < 8; func++)
+    {
+        uint32_t id = pci_read32(0, (uint8_t)dev, (uint8_t)func, 0x00);
+        if ((id & 0xFFFF) == 0xFFFF || id == 0) continue;
+        uint32_t cls = pci_read32(0, (uint8_t)dev, (uint8_t)func, 0x08);
+        if (((cls >> 24) & 0xFF) != PCI_CLASS_SERIAL_BUS) continue;
+        if (((cls >> 16) & 0xFF) != PCI_SUBCLASS_USB) continue;
+        if (((cls >>  8) & 0xFF) != PCI_PROGIF_EHCI) continue;
 
-    // ШАГ 1: Полностью выжигаем BIOS-овские SMI прерывания, чтобы они не перехватывали порты
-    pci_write32(0, 29, 7, 0x60, 0x00000000u);
-    pci_write32(0, 29, 7, 0x6C, 0x00000000u);
-    for (volatile int i = 0; i < 10000; i++);
+        found = 1;
+        api_ptr->load_screen_add_string("EHCI found b0 d%d f%d %x:%x",
+                                        dev, func, (id >> 16) & 0xFFFF, id & 0xFFFF);
 
-    // Освобождаем BIOS-семафор (смещение 0x68)
-    uint32_t leg = pci_read32(0, 29, 7, 0x68);
-    pci_write32(0, 29, 7, 0x68, (leg | (1u << 24)) & ~(1u << 16));
-    for (volatile int i = 0; i < 20000; i++);
+        pci_write32(0, (uint8_t)dev, (uint8_t)func, 0x60, 0x00000000u);
+        pci_write32(0, (uint8_t)dev, (uint8_t)func, 0x6C, 0x00000000u);
+        for (volatile int i = 0; i < 10000; i++);
 
-    // ШАГ 2 (LINUX PCI QUIRK): Полностью обнуляем командный регистр PCI контроллера EHCI (смещение 0x04)!
-    // Запись нуля отключает Bus Master, Memory Space и I/O space для EHCI.
-    // Физический кремний Intel ICH6 при отключении PCI-устройства EHCI автоматически
-    // и бесконфликтно перенаправляет абсолютно все физические порты на Companion UHCI,
-    // полностью исключая закорачивание линий и падение в fin=91!
-    pci_write32(0, 29, 7, 0x04, 0x00000000u);
-    pci_read32(0, 29, 7, 0x04); // PCI Flush
+        uint32_t leg = pci_read32(0, (uint8_t)dev, (uint8_t)func, 0x68);
+        pci_write32(0, (uint8_t)dev, (uint8_t)func, 0x68, (leg | (1u << 24)) & ~(1u << 16));
+        for (volatile int i = 0; i < 20000; i++);
 
-    // Выдерживаем паузу для стабилизации электрических потенциалов на разъемах флешки
-    uhci_mdelay(300);   // честные 300 мс по TSC (раньше this цикл давал десятки мс)
-    return 0;
+        pci_write32(0, (uint8_t)dev, (uint8_t)func, 0x04, 0x00000000u);
+        pci_read32(0, (uint8_t)dev, (uint8_t)func, 0x04); // PCI Flush
+    }
+    if (!found)
+        api_ptr->load_screen_add_string("EHCI not present (pure UHCI host?)");
+
+    uhci_mdelay(300);
+    return found ? 0 : -1;
 }
 
 

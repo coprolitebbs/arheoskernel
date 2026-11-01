@@ -25,7 +25,7 @@
 #define PCI_CONFIG_DATA 0xCFC
 
 /* Сколько UHCI-контроллеров поддерживаем (ICH6: dev 29 funcs 0..2 + dev 23 companion) */
-#define UHCI_MAX_HCS 4
+#define UHCI_MAX_HCS 8
 
 #define PCI_CLASS_SERIAL_BUS 0x0C
 #define PCI_SUBCLASS_USB     0x03
@@ -131,6 +131,13 @@
 #define TD_TOKEN_TOGGLE     (1u << 19)
 #define TD_TOKEN_LEN_SHIFT  20        // было 21 — на один бит левее, чем надо!
 #define TD_TOKEN_LEN_MASK   (0x7FFu << TD_TOKEN_LEN_SHIFT)
+
+#define TD_CTRL_C_ERR_1     (1u << 26)
+#define TD_CTRL_C_ERR_2     (2u << 26)
+/* Считанные из TD статус-слова ошибки (биты 17..22): все кроме STALLED —
+   временные (NAK-подобные), их надо ретраить программно; STALLED — фатальная. */
+#define TD_ERR_ANY          (TD_CTRL_STALLED | TD_CTRL_DBUFERR | TD_CTRL_BABBLE | \
+                             TD_CTRL_CRCTIMEO | TD_CTRL_BITSTUFF)
 
 #define PID_SETUP   0x2D
 #define PID_IN      0x69

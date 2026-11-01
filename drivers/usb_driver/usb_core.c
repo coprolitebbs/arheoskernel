@@ -339,3 +339,40 @@ int usb_clear_ep_halt(usb_hcd_t *hcd, uint8_t addr, uint8_t ep)
     };
     return usb_hcd_control_transfer(hcd, addr, setup, NULL, 0, 0, 8);
 }
+
+/*
+int usb_control_msg(usb_device_t *dev, uint8_t request_type, uint8_t request,
+                    uint16_t value, uint16_t index, void *data, uint16_t len, int data_in)
+{
+    uint8_t setup[8];
+    setup[0] = request_type;
+    setup[1] = request;
+    setup[2] = (uint8_t)(value & 0xFF);
+    setup[3] = (uint8_t)(value >> 8);
+    setup[4] = (uint8_t)(index & 0xFF);
+    setup[5] = (uint8_t)(index >> 8);
+    setup[6] = (uint8_t)(len & 0xFF);
+    setup[7] = (uint8_t)(len >> 8);
+
+    int ret = -1;
+    for (int retry = 0; retry < 5; retry++)
+    {
+        ret = uhci_control_transfer((uhci_hc_t *)dev->hc_private, dev->address, setup,
+                                    data, len, data_in, dev->ep0_max_pkt);
+        if (ret >= 0)
+            return ret;
+
+        api_ptr->load_screen_add_string("CTRL(%x/%x) r=%d try %d", request, request_type, ret, retry + 1);
+
+        if (retry < 4)
+        {
+            uhci_mdelay(20 + 30 * retry);
+            if (retry >= 2 && dev->hc_private) {
+                uhci_hc_t *hcx = (uhci_hc_t *)dev->hc_private;
+                uhci_reset_port(hcx, dev->port_num);
+                uhci_mdelay(20);
+            }
+        }
+    }
+    return ret;
+}*/

@@ -124,4 +124,11 @@ int usb_probe_device_at_addr(usb_hcd_t *hcd, int port, uint8_t addr,
 
 int usb_clear_ep_halt(usb_hcd_t *hcd, uint8_t addr, uint8_t ep);
 
+
+/*int usb_control_msg(usb_hcd_t *hcd, uint8_t addr, uint16_t ep0_max_pkt,
+                    uint8_t request_type, uint8_t request,
+                    uint16_t value, uint16_t index, void *data,
+                    uint16_t len, int data_in);
+*/
+
 #endif

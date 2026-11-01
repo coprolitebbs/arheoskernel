@@ -380,6 +380,43 @@ static uint32_t uhci_tsc_hz(void)
     return g_tsc_hz;
 }
 
+/* ==================== Over-current latch fix (ICH6/CF-18) ====================
+   В логе fin=288 взведён OCIC (бит7): ICH6 аппаратно БЛОКИРУЕТ сброс и
+   включение порта, пока висит over-current — отсюда "PR auto-clear=0 after
+   0 us" и никогда не поднимающийся PED. BIOS при загрузке с флешки мог
+   оставить ложный latched OC. Единственный способ снять его — power-cycle
+   порта: записать все R/W-биты в 0 (PED=0), выдержать паузу, W1C-очистить
+   change-биты, включить порт заново и дождаться CCS+PED. */
+static int uhci_clear_overcurrent(uhci_hc_t *hc, int port)
+{
+    uint16_t reg = portsc_reg(port);
+    uint16_t ps = inw(hc->io_base + reg);
+    if (!(ps & (PORTSC_OCI | PORTSC_OCIC))) return 0;   /* чисто */
+
+    api_ptr->load_screen_add_string("OC[%d] detected ps=%x -> power-cycle", port, ps);
+
+    /* 1) Полное выключение порта (PED=0, PR=0, SUSP=0) */
+    uhci_write_port(hc, port, 0, 0);
+    uhci_mdelay(100);
+    /* 2) W1C всех change-битов (в т.ч. OCIC) без изменения R/W */
+    uhci_clear_changes(hc, port);
+    uhci_mdelay(50);
+    /* 3) Снова включаем питание порта */
+    uhci_write_port(hc, port, PORTSC_PED, 0);
+    int ok = 0;
+    for (uint32_t i = 0; i < 150 && !ok; i++) {          /* до 300 мс */
+        uint16_t st = inw(hc->io_base + reg);
+        if ((st & (PORTSC_CCS | PORTSC_PED)) == (PORTSC_CCS | PORTSC_PED)) ok = 1;
+        uhci_mdelay(2);
+    }
+    uint16_t fin = inw(hc->io_base + reg);
+    api_ptr->load_screen_add_string("OC[%d] cycle done oci=%d ccs=%d ped=%d fin=%x %s",
+                                    port, !!(fin & PORTSC_OCI), !!(fin & PORTSC_CCS),
+                                    !!(fin & PORTSC_PED), fin,
+                                    ok ? "OK" : "REAL short circuit or OC# line stuck!");
+    return ok;
+}
+
 /* ТОЧНАЯ задержка в миллисекундах по TSC. Прежняя версия на «250 портовом
    I/O цикле» давала ~100 микросекунд вместо заявленных миллисекунд: сброс
    порта держался ~2 мс вместо требуемых 10+ мс, поэтому контроллер так и
@@ -417,13 +454,15 @@ void uhci_udelay(uint32_t us)
 
    ВАЖНО про читаемость с экрана: раньше использовались похожие латинские
    буквы ('o'/'O', 'c'/'e'), которые при ручном переписывании лога неотличимы
-   (регистр теряется). Теперь каждый флаг — РАЗНОРЕГИСТРНАЯ пара «буква+знак»:
-     C! = CCS (device connected)      c. = CSC  (connect change, W1C)
-     E! = PED (port enabled)          e. = PEDC (enable change, W1C)
-     X! = OCI (over-current!)         x. = OCIC (OC change, W1C)
-     L! = LSDA (low-speed)            R! = PR   (reset)
-     S! = SUSP (suspend)
-   Строка "P2[x.O.R-]" читается однозначно независимо от регистра букв. */
+   (регистр теряется). Теперь строка флагов имеет ФИКСИРОВАННЫЕ позиции и
+   шаблон-ключ в начале: каждая буква на своей позиции всегда означает одно
+   и то же, независимо от регистра, в котором вы её перерисовали:
+     позиция 0 C = CCS (device connected)     позиция 4 O = OCI (over-current!)
+     позиция 1 c = CSC  (connect change)      позиция 5 o = OCIC (OC change)
+     позиция 2 E = PED (port enabled)         позиция 6 L = LSDA (low-speed)
+     позиция 3 e = PEDC (enable change)       позиция 7 R = PR (reset)
+                                               позиция 8 S = SUSP (suspend)
+   "!"/"." означает флаг взведён, "-" — нет. */
 void uhci_dump_ports(uhci_hc_t *hc, const char *tag)
 {
     if (!hc || !api_ptr || !api_ptr->load_screen_add_string) return;
@@ -434,15 +473,15 @@ void uhci_dump_ports(uhci_hc_t *hc, const char *tag)
     uint16_t fr  = inw(hc->io_base + UHCI_FRNUM);
     api_ptr->load_screen_add_string("DUMP %s CMD=%x STS=%x P1=%x P2=%x FR=%x",
                                     tag, cmd, sts, p1, p2, fr);
-    api_ptr->load_screen_add_string("  P1[%s%s%s%s%s%s%s%s%s] P2[%s%s%s%s%s%s%s%s%s]",
+    api_ptr->load_screen_add_string("flags: CcEeOoLRS | P1[%s%s%s%s%s%s%s%s%s] P2[%s%s%s%s%s%s%s%s%s]",
         (p1 & PORTSC_CCS)     ? "C!":"--", (p1 & PORTSC_CSC)    ? "c.":"..",
         (p1 & PORTSC_PED)     ? "E!":"--", (p1 & PORTSC_PEDC)   ? "e.":"..",
-        (p1 & PORTSC_OCI)     ? "X!":"--", (p1 & PORTSC_OCIC)   ? "x.":"..",
+        (p1 & PORTSC_OCI)     ? "O!":"--", (p1 & PORTSC_OCIC)   ? "o.":"..",
         (p1 & PORTSC_LSDA)    ? "L!":"--", (p1 & PORTSC_PR)     ? "R!":"--",
         (p1 & PORTSC_SUSPEND) ? "S!":"--",
         (p2 & PORTSC_CCS)     ? "C!":"--", (p2 & PORTSC_CSC)    ? "c.":"..",
         (p2 & PORTSC_PED)     ? "E!":"--", (p2 & PORTSC_PEDC)   ? "e.":"..",
-        (p2 & PORTSC_OCI)     ? "X!":"--", (p2 & PORTSC_OCIC)   ? "x.":"..",
+        (p2 & PORTSC_OCI)     ? "O!":"--", (p2 & PORTSC_OCIC)   ? "o.":"..",
         (p2 & PORTSC_LSDA)    ? "L!":"--", (p2 & PORTSC_PR)     ? "R!":"--",
         (p2 & PORTSC_SUSPEND) ? "S!":"--");
     /* Живость планировщика: FRNUM обязан меняться при RS=1. Если не меняется
@@ -561,6 +600,10 @@ int uhci_init(uhci_hc_t *hc)
     outl(hc->io_base + UHCI_FLBASEADD, fl_phys);
     outw(hc->io_base + UHCI_SOFMOD, 64);
 
+    // 4a) Снять возможный latched over-current от BIOS ДО включения портов
+    for (int port = 0; port < 2; port++)
+        uhci_clear_overcurrent(hc, port);
+
     // 4) ПОСЛЕДОВАТЕЛЬНОЕ включение портов (как root_hub_init_ports в Linux
     //    uhci-hcd): PED=1 -> ждать CCS+PED -> только потом чистить W1C.
     //    Раньше здесь были два бага: (а) ps|=0x0001 писал RO-бит CCS;
@@ -633,23 +676,14 @@ int uhci_port_connected(uhci_hc_t *hc, int port)
     return (uhci_port_status(hc, port) & PORTSC_CCS) ? 1 : 0;
 }
 
-/* КОРРЕКТНЫЙ сброс порта по UHCI Universal Host Controller Interface spec
-   (UHCI Rev 1.1, §3.6 "Reset Resume" + Linux drivers/usb/host/uhci-hcd.c
-   uhci_port_reset):
-     1) Сбрасываем change-биты (W1C: CSC/PEDC)
-     2) Устанавливаем PR (Port Reset) = 1 и держим НЕ МЕНЕЕ 10 мс
-     3) Снимаем PR = 0
-     4) Ждём, пока хост-контроллер сам выставит PED=1 (до ~250 мс; если за
-        это время PED так и не поднялся — устройство не отвечает / его нет)
-   Возвращает 0 при успехе (PED=1), -1/-2 при проблемах. */
+
 /* Одна попытка сброса порта. Возвращает 0 при PED=1, -2 в противном случае.
    ВАЖНО (UHCI Rev1.1 §4.1, Linux uhci-hcd root_hub_init_ports):
    в UHCI бит PR автосбрасывается САМИМ контроллером по окончании 10-мс
    сброса. Программная запись PR=0 раньше срока ОБРЫВАЕТ сброс на середине
    — устройство остаётся в неопределённом состоянии и PED так и не
-   поднимается (прежний лог: "done ccs=1 ped=0 fin=93", код -2). Поэтому
-   здесь PR только устанавливается, а затем ждём, пока железо само его
-   снимет, после чего ожидаем восстановления PED. */
+   поднимается. Поэтому здесь PR только устанавливается, а затем ждём, пока
+   железо само его снимет, после чего ожидаем восстановления PED. */
 static int uhci_reset_port_once(uhci_hc_t *hc, int port)
 {
     if (!hc) return -1;
@@ -662,9 +696,22 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
         api_ptr->load_screen_add_string("RESET[%d] resumed from suspend/smi", port);
     }
 
+    // 0b) KRITICHNO vtoroe: latched over-current (OCIC=1 в fin=288)
+    //     АППАРАТНО блокирует reset и enable порта на ICH6: HC сам гасит PR
+    //     через кадр ("PR auto-clear=0 after 0 us") и не поднимает PED.
+    //     Снимаем OC power-cycle'ом ДО попытки сброса.
+    {
+        uint16_t pre = inw(hc->io_base + reg);
+        if (pre & (PORTSC_OCI | PORTSC_OCIC)) {
+            if (!uhci_clear_overcurrent(hc, port)) {
+                api_ptr->load_screen_add_string("RESET[%d] over-current NOT cleared", port);
+                return -6;   /* distinct code: OC latch alive */
+            }
+        }
+    }
+
     // 1) Порт ДОЛЖЕН быть включён (PED=1) перед сбросом. Записываем полное
-    //    слово явно (helper больше НЕ наследует R/W-биты от чтения — раньше
-    //    именно из-за этого PED молча писался 0 и порт выключался: fin=288).
+    //    слово явно (helper пишет R/W-биты ЯВНО, RO-биты зануляет).
     uint16_t ps = inw(hc->io_base + reg);
     api_ptr->load_screen_add_string("RESET[%d] pre=%x", port, ps);
     uhci_write_port(hc, port, PORTSC_PED, 0);      /* PED=1, SUSP=0, PR=0 */
@@ -684,15 +731,6 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
     // 2) Assert reset: PR=1 (с PED=1!). UHCI Rev1.1 §4.1: бит PR автосбрасывается
     //    САМ контроллер через ~10 мс. Софт НЕ должен трогать PR после установки.
     uhci_write_port(hc, port, PORTSC_PED | PORTSC_PR, 0);
-    /* ВАЖНО про диагностику ниже: чтение PORTSC в UHCI имеет ПОБОЧНЫЙ
-       ЭФФЕКТ — оно не «подглядывает», а участвует в состоянии порта; кроме
-       того запись PR на части ICH видна как 0 уже через 100 мкс из-за
-       очень быстрого авто-снятия при коротких сбросах. Прежняя проверка
-       "asserted bit readback" давала ложное "PR IGNORED" (fin=288/93 и
-       "-5 write ignored by HW"). Теперь факт сброса проверяется КОМБИНАЦИЕЙ
-       двух независимых признаков: (а) взведённый USBSTS.RESET (Host Reset
-       Occurred, W1C) — его HC выставляет сам факт завершения 10-мс сброса;
-       (б) последующее авто-снятие PR в polling-цикле шагом 200 мкс. */
     uhci_udelay(100);
     uint16_t ps_asserted   = inw(hc->io_base + reg);
     uint16_t sts_asserted  = inw(hc->io_base + UHCI_USBSTS);
@@ -700,15 +738,12 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
                                     port, ps_asserted, !!(ps_asserted & PORTSC_PR),
                                     sts_asserted);
     if (!(ps_asserted & PORTSC_PR) && !(sts_asserted & USBSTS_RESET)) {
-        /* Железо ПРОИГНОРИРОВАЛО запись PR. Дифференциальная диагностика
-           (это ключевой вопрос «UHCI ли вообще / жив ли HC»):
+        /* Железо ПРОИГНОРИРОВАЛО запись PR. Дифференциальная диагностика:
            (а) FRNUM не двигается -> PCI I/O до хоста не доходит или HC
-               остановлен (HCH) — возможно BAR0 назначен неверно либо это
-               не UHCI-регистры;
-           (б) LEGSUP bit15=1 -> firmware держит ownership (SMM-quirk
-               CF-18/ICH6: legacy-сброс игнорирует HCSEL без SMM API). */
+               остановлен (HCH);
+           (б) LEGSUP bit15=1 -> firmware держит ownership (SMM-quirk). */
         uint16_t f0 = inw(hc->io_base + UHCI_FRNUM);
-        uhci_udelay(3000);                        /* >1 кадра (1.0004 мс*3) */
+        uhci_udelay(3000);                        /* >1 кадра */
         uint16_t f1 = inw(hc->io_base + UHCI_FRNUM);
         uint32_t lg = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
         api_ptr->load_screen_add_string(
@@ -727,14 +762,15 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
         uint16_t st = inw(hc->io_base + reg);
         if (!(st & PORTSC_PR)) { pr_clear = 1; pr_us = i * 200u; break; }
         if (!(st & PORTSC_CCS)) { pr_us = i * 200u; break; }  /* device пропал */
+        /* Если в процессе ожидания вспыхнул OC — сброс блокирован, выходим */
+        if (st & (PORTSC_OCI | PORTSC_OCIC)) { pr_us = i * 200u; break; }
         uhci_udelay(200);
     }
     api_ptr->load_screen_add_string("RESET[%d] PR auto-clear=%d after %d us",
                                     port, pr_clear, pr_us);
 
-    /* W1C снимаем Host-Reset Occurred, чтобы следующий вход в эту функцию
-       честно видел "сброса ещё не было" (иначе USBSTS.RESET будет обманывать
-       диагностику assert-readback). */
+    /* W1C снимаем Host-Reset Occurred, чтобы следующий вход честно видел
+       "сброса ещё не было". */
     {
         uint16_t sts2 = inw(hc->io_base + UHCI_USBSTS);
         if (sts2 & USBSTS_RESET) outw(hc->io_base + UHCI_USBSTS, sts2 & USBSTS_RESET);
@@ -769,23 +805,29 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
     return 0;
 }
 
-/* Публичная обёртка: до 4 попыток сброса. По USB spec hub/HC после deassert
-   даёт устройству 10 мс «recovery», и часть флешек активируются только со
-   второго-третьего reset'а (особенно если BIOS уже общался с ними и они
-   остались в подвешенном состоянии).
+/* Публичная обёртка: до 4 попыток сброса. Часть флешек активируются только
+   со второго-третьего reset'а (особенно если BIOS уже общался с ними).
    Лестница эскалации (по образцу Linux hub_port_init/hub_reset_port и
    Haiku USBAbsolutHostController::ResetPort):
      1) мягкий повтор сброса;
-     2) power-cycle порта: disable (PED=0) -> пауза -> enable (PED=1) ->
-        ожидание CCS/PED — это единственный способ "оживить" зависший
-        трансивер ICH без сброса всего HC.
+     2) power-cycle порта + принудительная очистка OC-latch;
      3) полный HCRESET контроллера (uhci_init), как uhci_restart() в Linux. */
 int uhci_reset_port(uhci_hc_t *hc, int port)
 {
     if (!hc) return -1;
     for (int attempt = 0; attempt < 4; attempt++) {
-        if (uhci_reset_port_once(hc, port) == 0)
+        /* КРИТИЧНО для QEMU и реальных флешек: сразу после Port Reset
+           трансивер устройства находится в состоянии «reset recovery» и
+           ОТВЕЧАЕТ NAK на все пакеты ep0. Если начать enumeration раньше,
+           SETUP уходит в NAK, HC исчерпывает C_ERR=3 ретрая и выставляет
+           ложный STALLED ("td0=c400000" = Active=0 NAK=1 STALL=1). Linux в
+           hub_port_init ждёт ДО 50 мс после сброса перед первым GET_DESCRIPTOR.
+           Пауза ставится ПОСЛЕ успешного PED, а не до — иначе мы бы снова
+           "проспали" авто-снятие PR. */
+        if (uhci_reset_port_once(hc, port) == 0) {
+            uhci_mdelay(50);   /* reset recovery: даём устройству отпустить шину */
             return 0;
+        }
         api_ptr->load_screen_add_string("RESET[%d]: attempt %d failed, escalation %d",
                                         port, attempt + 1, attempt);
         uhci_mdelay(100);
@@ -795,32 +837,29 @@ int uhci_reset_port(uhci_hc_t *hc, int port)
             continue;
         }
         if (attempt == 1) {
-            /* Power-cycle порта: PED=0 глушит порт, PED=1 включает. Между
-               записями — tPSCTORSTRIP (USB IF ECN: >=10 мс). Change-биты
-               чистим отдельной безопасной записью. */
-            uhci_write_port(hc, port, 0, 0);           /* disable (PED=0) */
-            uhci_mdelay(50);                           /* запас поверх spec */
-            uhci_write_port(hc, port, PORTSC_PED, 0);  /* enable (PED=1) */
-            uhci_clear_changes(hc, port);
-            for (uint32_t i = 0; i < 100; i++) {       /* ждём CCS+PED до 200 мс */
-                uint16_t st = inw(hc->io_base + portsc_reg(port));
-                if ((st & (PORTSC_CCS | PORTSC_PED)) == (PORTSC_CCS | PORTSC_PED)) break;
-                uhci_mdelay(2);
+            /* Power-cycle порта + гарантированная чистка OC-latch. */
+            if (!uhci_clear_overcurrent(hc, port)) {
+                uhci_write_port(hc, port, 0, 0);           /* disable (PED=0) */
+                uhci_mdelay(50);                           /* запас поверх spec */
+                uhci_write_port(hc, port, PORTSC_PED, 0);  /* enable (PED=1) */
+                uhci_clear_changes(hc, port);
+                for (uint32_t i = 0; i < 100; i++) {       /* ждём CCS+PED до 200 мс */
+                    uint16_t st = inw(hc->io_base + portsc_reg(port));
+                    if ((st & (PORTSC_CCS | PORTSC_PED)) == (PORTSC_CCS | PORTSC_PED)) break;
+                    uhci_mdelay(2);
+                }
             }
             uhci_dump_ports(hc, "pcyc");
             continue;
         }
         /* attempt >= 2: полный ре-инит контроллера (HCRESET+RS+порты) */
         if (uhci_init(hc) != 0) return -4;
-        uhci_mdelay(100);   /* CCS должен вернуться сам: pull-up устройства никуда делся не мог */
+        uhci_mdelay(100);   /* CCS должен вернуться сам: pull-up устройства никуда деться не мог */
         if (!(uhci_port_status(hc, port) & PORTSC_CCS))
             api_ptr->load_screen_add_string("RESET[%d]: CCS lost after reinit", port);
     }
     return -2;
 }
-
-
-
 
 
 
@@ -847,18 +886,13 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     uhci_select_host(hc);
 
     /* CF-18/ICH6: BIOS или SMI могут оставить HC в Global Suspend / порт в
-       suspend между транзактами. На "спящей" линии D+ любой SETUP уходит в
-       CRC/Time-out даже при ped=1. Перед КАЖДОЙ цепочкой TD проверяем
-       USBSTS.RESUME и бит SUSPEND порта и при необходимости будим root-hub
-       (снятие EGSM, deassert SUSPEND, resume >=20 мс, W1C RESUME). */
+       suspend между транзактами. Перед КАЖДОЙ цепочкой TD будим root-hub. */
     {
         uint16_t regp = portsc_reg(0), regp2 = portsc_reg(1);
         uint16_t psx  = inw(hc->io_base + regp) | inw(hc->io_base + regp2);
         uint16_t stsx = inw(hc->io_base + UHCI_USBSTS);
         uint16_t cmdx = inw(hc->io_base + UHCI_USBCMD);
         if ((stsx & USBSTS_RESUME) || (psx & PORTSC_SUSPEND) || (cmdx & USBCMD_EGSM)) {
-            /* Определяем suspend-порт для точечного resume; если непонятно —
-               будим оба (resume-посылка на свободном порту безвредна). */
             int woke = 0;
             if (inw(hc->io_base + regp)  & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 0);
             if (inw(hc->io_base + regp2) & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 1);
@@ -877,11 +911,8 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
         if (num_data > MAX_CONTROL_TDS - 2) num_data = MAX_CONTROL_TDS - 2;
     }
 
-    /* Готовим ВСЮ цепочку TD до того, как контроллер увидит TD0:
-       глушим IOC на промежуточных TD и чистим статусы от ошибок прошлого
-       транзакта. В прошлой версии у "мусорных" TD оставался старый status
-       без Active-бита — HC обрывал цепочку, а STATUS-TD вообще не участвовал
-       в цикле ожидания (в логе печатался stale 0x1a800000). */
+    /* Готовим ВСЮ цепочку TD до того, как контроллер увидит TD0: глушим IOC
+       на промежуточных TD и чистим статусы от ошибок прошлого транзакта. */
     for (uint32_t i = 0; i < MAX_CONTROL_TDS; i++) control_tds[i].status = 0;
 
     // Копируем setup-пакет строго в выровненный flat-буфер
@@ -896,14 +927,9 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     uint32_t ls_flag = hc->current_device_low_speed ? TD_CTRL_LS : 0u;
 
     // --- TD0: SETUP Stage ---
-    // VF (bit2) в link — корректный depth-first обход цепочки TD внутри QH.
     control_tds[0].link   = (td1_phys & ~0x0Fu) | TD_LINK_VF;
     control_tds[0].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK; // C_ERR=11: 3 попытки HC сам
     if (ls_flag) control_tds[0].status |= ls_flag;
-    /* ТОКЕН SETUP: PID(8b) | ADDR(7b, биты 8-14) | ENDP=0 (биты 15-18) | DATA0 | LEN=7 (биты 20-30).
-       ЭНДПОИНТ В TOKEN ОБЯЗАТЕЛЕН! Без него поле len=7 сдвигалось на бит левее
-       и "засоряло" старший байт токена (setup=0x00085007 вместо 0x002D0007):
-       контроллер отправлял на шину мусор, устройство молчало -> CRC/Time-out. */
     control_tds[0].token  = (PID_SETUP << TD_TOKEN_PID_SHIFT) | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) | (0u << TD_TOKEN_EP_SHIFT) | (7u << TD_TOKEN_LEN_SHIFT);
     control_tds[0].buffer = setup_phys;
     hc->dbg_td0_token = control_tds[0].token;
@@ -920,7 +946,12 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
         uint32_t next_td_phys = usb_virt_to_phys((uint32_t)&control_tds[next_idx]);
 
         control_tds[idx].link = (next_td_phys & ~0x0Fu) | TD_LINK_VF;
-        control_tds[idx].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK | ls_flag;
+        /* ВАЖНО (фикс ложного STALL в QEMU): у ПРОМЕЖУТОЧНЫХ TD тоже ставим
+           IOC. В реальном железе это безвредно (прерывания маскированы), но
+           эмуляция piix3-usb-uhci в QEMU при отсутствии IOC на DATA-TD
+           некорректно «схлопывала» цепочку и выставляла STALLED на TD0 —
+           получался вечный r=-4. Теперь все TD помечены на completion. */
+        control_tds[idx].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_MASK | ls_flag;
         control_tds[idx].token = ((data_in ? PID_IN : PID_OUT) << TD_TOKEN_PID_SHIFT) |
                                  ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
                                  (0u << TD_TOKEN_EP_SHIFT) |
@@ -957,25 +988,20 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     g_control_queue.qh.element = td0_phys & ~0x0Fu;
     __asm__ __volatile__("" ::: "memory");
 
-    uint32_t timeout = 5000000;   // ~несколько секунд даже на медленном CPU
-    uint32_t spins = 0;
-    int result = -3;
-
     /* КРИТИЧЕСКАЯ СЕКЦИЯ: блокируем планировщик задач ядра на время всей
-       транзакции (аналог того, как ext2_disk.c оборачивает DMA-операции).
-       Контекст по таймеру (IRQ 0/32) может увести выполнение в другую задачу
-       посреди polling-цикла TD; само по себе это не ломает HC (DMA асинхронен),
-       но удваивает латентность обработки и мешает честному замеру spins. */
+       транзакции (аналог того, как ext2_disk.c оборачивает DMA-операции). */
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
 
     volatile uint32_t *status_slot = (volatile uint32_t *)&control_tds[sidx].status;
 
+    uint32_t timeout = 5000000;   // ~несколько секунд даже на медленном CPU
+    uint32_t spins = 0;
+    int result = -3;
+
     while (timeout--)
     {
         spins++;
-        /* Ждём ЗАВЕРШЕНИЯ ВСЕЙ транзакции: последний TD цепочки (STATUS stage).
-           Раньше цикл смотрел только на TD0 — при ошибке SETUP он выходил раньше,
-           чем HC успевал пометить ошибкой хвостовой TD. */
+        /* Ждём ЗАВЕРШЕНИЯ ВСЕЙ транзакции: последний TD цепочки (STATUS stage). */
         uint32_t st_tail = *status_slot;
         if (!(st_tail & TD_CTRL_ACTIVE))
         {
@@ -990,8 +1016,6 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
             result = ec ? ec : (int)data_len; // УСПЕХ!
             break;
         }
-        /* Если TD0 уже упал с ошибкой, а хвост всё ещё Active — HC оборвал
-           цепочку: дождись сброса Active на TD0 или выходи по общему таймауту. */
     }
 
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
@@ -1001,34 +1025,15 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     hc->dbg_last_frame = inw(hc->io_base + UHCI_FRNUM);
     hc->dbg_sts        = inw(hc->io_base + UHCI_USBSTS);
     hc->dbg_portsc     = inw(hc->io_base + UHCI_PORTSC1);
-    api_ptr->load_screen_add_string("XFER done spins=%d sts=%x p1=%x p2=%x td0=%x tdt=%x",
-                                    spins, hc->dbg_sts,
-                                    inw(hc->io_base + UHCI_PORTSC1),
-                                    inw(hc->io_base + UHCI_PORTSC2),
-                                    control_tds[0].status, control_tds[sidx].status);
     __asm__ __volatile__("" ::: "memory");
     hc->dbg_td0_status = control_tds[0].status;
 
     /* Если хвостовой TD так и остался ACTIVE, а TD0 завершён с ошибкой —
-       HC оборвал цепочку на SETUP. Подтягиваем код ошибки с TD0, чтобы
-       upper-слой получил честный результат (-4 STALL / -7 CRC/TO и т.д.). */
+       HC оборвал цепочку на SETUP. Подтягиваем честный код ошибки. */
     if (result == -3)
     {
         int ec0 = uhci_td_error_code(control_tds[0].status);
         if (!(control_tds[0].status & TD_CTRL_ACTIVE) && ec0) result = ec0;
-    }
-
-    // Если TD0 так и остался ACTIVE — движок не тронул очередь вообще
-    // (HC остановлен / FLBASEADD неверен / нет питания порта).
-    if (result == -3 && (hc->dbg_td0_status & TD_CTRL_ACTIVE)) {
-        api_ptr->load_screen_add_string("UHCI DEAD? RS=%x STS=%x FR=%x",
-                                        inw(hc->io_base + UHCI_USBCMD) & 1,
-                                        hc->dbg_sts, hc->dbg_last_frame);
-        // Глубокая реанимация: полный HCRESET + перезапуск движка
-        outw(hc->io_base + UHCI_USBCMD, USBCMD_HCRESET);
-        for (uint32_t i = 0; i < 100000 && (inw(hc->io_base + UHCI_USBCMD) & USBCMD_HCRESET); i++);
-        outw(hc->io_base + UHCI_USBSTS, 0x003F);
-        outw(hc->io_base + UHCI_USBCMD, USBCMD_RS);
     }
 
     // Восстанавливаем исходный пустой элемент очереди QH
@@ -1112,53 +1117,81 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
     uint32_t dummy_td_phys      = usb_virt_to_phys((uint32_t)&g_bulk_queue.dummy_td);
     if (!first_bulk_td_phys || !dummy_td_phys) return -1;
 
-    bulk_tds[num_tds - 1].link = (dummy_td_phys & ~0x0Fu) | TD_LINK_VF;
+        bulk_tds[num_tds - 1].link = (dummy_td_phys & ~0x0Fu) | TD_LINK_VF;
 
-    usb_dma_sync_before();
-    if (uhci_force_wbinvd) __asm__ __volatile__("wbinvd" ::: "memory");
-
-    g_bulk_queue.tail_td->link = (first_bulk_td_phys & ~0x0Fu) | TD_LINK_VF;
-    g_bulk_queue.tail_td = &bulk_tds[num_tds - 1];
-
-    uint32_t timeout = 5000000;
+    /* Цикл попыток, аналогично control: MSC-устройство NAK'ует bulk-IN при
+       подготовке сектора. При временной ошибке — W1C USBSTS, рестарт RS,
+       повтор всей цепочки. STALL отдаём upper-слою сразу. */
     int result = -3;
+    const int max_attempts = 40;
+    uint8_t start_toggle = *toggle;           /* для отката при ретраях */
 
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
 
-    while (timeout--)
+    for (int attempt = 0; attempt < max_attempts; attempt++)
     {
-        __asm__ __volatile__("" ::: "memory");
-        uint32_t st = bulk_tds[num_tds - 1].status;
-        if (!(st & TD_CTRL_ACTIVE))
+        cur_toggle = start_toggle;
+        for (uint32_t i = 0; i < num_tds; i++)
         {
-            int ec = 0;
-            for (uint32_t k = 0; k < num_tds; k++)
-            {
-                ec = uhci_td_error_code(bulk_tds[k].status);
-                if (ec) break;
-            }
-            if (!ec)
-            {
-                *toggle = cur_toggle;
-                result = (int)len;
-            }
-            else
-            {
-                result = ec;
-            }
-            break;
+            bulk_tds[i].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK | ls_flag |
+                                 (i == num_tds - 1 ? TD_CTRL_IOC : 0u);
+            uint32_t toggle_bit = cur_toggle ? TD_TOKEN_TOGGLE : 0u;
+            bulk_tds[i].token = (bulk_tds[i].token & ~TD_TOKEN_TOGGLE) | toggle_bit;
+            cur_toggle ^= 1;
         }
-    }
+        usb_dma_sync_before();
+        if (uhci_force_wbinvd) __asm__ __volatile__("wbinvd" ::: "memory");
 
+        g_bulk_queue.tail_td = &g_bulk_queue.dummy_td;
+        g_bulk_queue.tail_td->link = (first_bulk_td_phys & ~0x0Fu) | TD_LINK_VF;
+        g_bulk_queue.tail_td = &bulk_tds[num_tds - 1];
+        __asm__ __volatile__("" ::: "memory");
+
+        {
+            uint16_t cmd_ = inw(hc->io_base + UHCI_USBCMD);
+            if (!(cmd_ & USBCMD_RS))
+                outw(hc->io_base + UHCI_USBCMD, cmd_ | USBCMD_RS);
+        }
+
+        uint32_t timeout = 1000000;   /* крупным bulk-чтениям нужно больше бюджета */
+        int done = 0;
+        while (timeout--)
+        {
+            __asm__ __volatile__("" ::: "memory");
+            uint32_t st = bulk_tds[num_tds - 1].status;
+            if (!(st & TD_CTRL_ACTIVE))
+            {
+                int ec = 0;
+                for (uint32_t k = 0; k < num_tds; k++)
+                {
+                    ec = uhci_td_error_code(bulk_tds[k].status);
+                    if (ec) break;
+                }
+                if (!ec)      { *toggle = cur_toggle; result = (int)len; done = 1; }
+                else if (ec == -4) { result = ec; done = 1; }
+                else               { result = ec; }   /* ретрай */
+                break;
+            }
+        }
+        if (done) break;
+
+        {
+            uint16_t sts_ = inw(hc->io_base + UHCI_USBSTS);
+            outw(hc->io_base + UHCI_USBSTS, sts_ & 0x003F);
+            uint16_t cmd_ = inw(hc->io_base + UHCI_USBCMD);
+            outw(hc->io_base + UHCI_USBCMD, cmd_ | USBCMD_RS);
+            g_bulk_queue.tail_td = &g_bulk_queue.dummy_td;
+        }
+        uhci_mdelay(attempt < 5 ? 10 : 50);
+        if (attempt == 0 || attempt == 9 || attempt == 29)
+            api_ptr->load_screen_add_string("BULK retry %d r=%d td0=%x",
+                                            attempt, result, bulk_tds[0].status);
+    }
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
-
     if (result == -3) {
-        hc->dbg_swstamp = timeout;
         hc->dbg_sts = inw(hc->io_base + UHCI_USBSTS);
-        api_ptr->load_screen_add_string("BULK TIMEOUT sts=%x td0=%x",
-                                        hc->dbg_sts, bulk_tds[0].status);
+        api_ptr->load_screen_add_string("BULK DEAD sts=%x td0=%x", hc->dbg_sts, bulk_tds[0].status);
     }
-
     usb_dma_sync_after();
     if (uhci_force_wbinvd) __asm__ __volatile__("wbinvd" ::: "memory");
     return result;
