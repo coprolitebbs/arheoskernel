@@ -211,11 +211,11 @@ int usb_enumerate(usb_hcd_t *hcd, int port, uint8_t new_addr,
     // --- 1) GET_DESCRIPTOR(8) на адресе 0 ---
     if (usb_get_device_desc(hcd, 0, (void *)dma_buffer, 8, 8) != 0) {
         api_ptr->debug4 = usb_hcd_port_status(hcd, port);
-        api_ptr->debug5 = usb_hcd_port_status(hcd, 0);
+        //api_ptr->debug5 = usb_hcd_port_status(hcd, 0);
         //api_ptr->debug6 = hcd->type;
         api_ptr->load_screen_add_string("GET_DESC(8) r=%d setup=%x data=%x stat=%x",
                                 (int)api_ptr->debug7,
-                                api_ptr->debug8, api_ptr->debug6, api_ptr->debug9);
+                                api_ptr->debug8, ((uhci_hc_t*)hcd->priv)->dbg_td0_token, api_ptr->debug9);
         return -12;
     }
 
