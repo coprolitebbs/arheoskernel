@@ -43,17 +43,19 @@
 #define UHCI_PORTSC1    0x10
 #define UHCI_PORTSC2    0x12
 
+/* USBSTS bits (UHCI Rev1.1 §5.2) */
+#define USBSTS_USBINT   (1 << 0)
+#define USBSTS_ERROR    (1 << 1)
+#define USBSTS_RESET    (1 << 2)
+#define USBSTS_RESUME   (1 << 3)   /* Resume Detected — порт висит в suspend */
+#define USBSTS_HCH      (1 << 5)   /* HC Halted */
+
 /* USBCMD */
 #define USBCMD_RS       (1 << 0)
 #define USBCMD_HCRESET  (1 << 1)
 #define USBCMD_GRESET   (1 << 2)
+#define USBCMD_EGSM     (1 << 3)   /* Enter Global Suspend Mode */
 #define USBCMD_CF       (1 << 6)
-
-/* USBSTS */
-#define USBSTS_USBINT   (1 << 0)
-#define USBSTS_ERROR    (1 << 1)
-#define USBSTS_RESET    (1 << 2)
-#define USBSTS_HCH      (1 << 5)   /* HC Halted */
 
 /* PORTSC */
 #define PORTSC_CCS      (1 << 0)   /* Current Connect Status */
