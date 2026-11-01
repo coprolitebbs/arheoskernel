@@ -80,10 +80,10 @@ uint16_t usb_hcd_port_status(usb_hcd_t *hcd, int port){
 }
 
 void usb_hcd_delay_2ms(usb_hcd_t *hcd){
-    if (hcd && hcd->type == HCD_UHCI){
-        uhci_hc_t *hc = (uhci_hc_t *)hcd->priv;
-        for (volatile int i = 0; i < 20000; i++) inw(hc->io_base);
-    } else {
-        for (volatile int i = 0; i < 4000; i++) inb(0x80);   // ~2 мс на любом железе
-    }
+    /* Все задержки — через TSC-откалиброванный uhci_mdelay.
+       Старый цикл «inw(hc->io_base) 20000 раз» на Pentium M давал ~10 мкс,
+       а не 2 мс: реальные тайминги reset-recovery/SET_ADDRESS (USB spec:
+       10 мс после deassert, до 2 мс SETUP->address) не выдерживались. */
+    (void)hcd;
+    uhci_mdelay(2);
 }

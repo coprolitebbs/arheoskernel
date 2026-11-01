@@ -122,12 +122,56 @@ static inline void uhci_io_wait(void)
     inb(0x43);
 }
 
-/* Приблизительная задержка в миллисекундах (busy-wait).
-   ~250 циклов on CF-18 (Pentium M 1.2–1.7 ГГц) ≈ 1 мкс/цикл. */
+static inline uint64_t uhci_rdtsc(void)
+{
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* Оценка TSC в герцах через PIT-канал 2 (режим one-shot, gate уже поднят
+   BIOS'ом). Однократно ~50 мс. Если PIT не отвечает — правдоподобная
+   оценка для Pentium M CF-18 (~1.2 ГГц). */
+static uint32_t g_tsc_hz = 0;
+
+static uint32_t uhci_tsc_hz(void)
+{
+    if (g_tsc_hz) return g_tsc_hz;
+
+    uint64_t t0 = uhci_rdtsc();
+
+    outb(0x43, 0xB2);            /* ch2, latch select, binary, one-shot */
+    outb(0x42, 0xFF);            /* count = 0xFFFF -> ~54.6 мс */
+    outb(0x42, 0xFF);
+
+    uint32_t guard = 0;
+    while (!(inb(0x61) & 0x20))  /* бит TIMEOUT.OUT ждёт до переполнения */
+        if (++guard > 30000000u) break;
+
+    uint64_t t1 = uhci_rdtsc();
+
+    if (guard >= 30000000u || t1 <= t0) {
+        g_tsc_hz = 1200000000u;  /* fallback: типичная частота CF-18 */
+    } else {
+        uint64_t delta = t1 - t0;
+        uint64_t hz = delta * 1193182u / 65535u;
+        if (hz < 100000000ull) hz = 100000000ull;   /* sanity: <100 МГц */
+        if (hz > 4000000000ull) hz = 4000000000ull; /* sanity: >4 ГГц */
+        g_tsc_hz = (uint32_t)hz;
+    }
+    return g_tsc_hz;
+}
+
+/* ТОЧНАЯ задержка в миллисекундах по TSC. Прежняя версия на «250 портовом
+   I/O цикле» давала ~100 микросекунд вместо заявленных миллисекунд: сброс
+   порта держался ~2 мс вместо требуемых 10+ мс, поэтому контроллер так и
+   не выставлял PED (порт оставался disabled, fin=0x93). */
 void uhci_mdelay(uint32_t ms)
 {
-    for (uint32_t m = 0; m < ms; m++) {
-        for (volatile int i = 0; i < 250; i++) uhci_io_wait();
+    uint64_t cycles = ((uint64_t)uhci_tsc_hz() / 1000ull) * ms;
+    uint64_t start  = uhci_rdtsc();
+    while (uhci_rdtsc() - start < cycles) {
+        uhci_io_wait();
     }
 }
 
@@ -266,7 +310,8 @@ int uhci_port_connected(uhci_hc_t *hc, int port)
      4) Ждём, пока хост-контроллер сам выставит PED=1 (до ~250 мс; если за
         это время PED так и не поднялся — устройство не отвечает / его нет)
    Возвращает 0 при успехе (PED=1), -1/-2 при проблемах. */
-int uhci_reset_port(uhci_hc_t *hc, int port)
+/* Одна попытка сброса порта. Возвращает 0 при PED=1, -2 в противном случае. */
+static int uhci_reset_port_once(uhci_hc_t *hc, int port)
 {
     if (!hc) return -1;
     uint16_t reg = portsc_reg(port);
@@ -280,11 +325,16 @@ int uhci_reset_port(uhci_hc_t *hc, int port)
     // 2) Assert reset: PR=1 (не менее 10 мс по USB spec)
     ps = inw(hc->io_base + reg);
     outw(hc->io_base + reg, (ps & ~PORTSC_SUSPEND) | PORTSC_PR);
-    uhci_mdelay(20);   // с запасом: 20мс > требуемых 10мс
+    uhci_mdelay(20);   // честные 20мс теперь (раньше эта задержка была ~2мс)
 
     // 3) Deassert reset: PR=0
     ps = inw(hc->io_base + reg);
     outw(hc->io_base + reg, ps & ~PORTSC_PR);
+
+    /* USB spec 7.1.7.5: после deassert hub/HC даёт устройству 10 мс
+       "reset recovery" — в это время PED может быть ещё не выставлен,
+       а любые транзакции запрещены. Ждём честно, потом опрашиваем PED. */
+    uhci_mdelay(15);
 
     // 4) Ждём PED=1 от железа (Polling до ~500 мс)
     int ped_ok = 0;
@@ -309,6 +359,24 @@ int uhci_reset_port(uhci_hc_t *hc, int port)
     // (USB-флешки ВСЕГДА full-speed на UHCI; LS означает клавиатуру/мышь.)
     hc->current_device_low_speed = (s_fin & PORTSC_LSDA) ? 1 : 0;
     return 0;
+}
+
+/* Публичная обёртка: до 3 попыток сброса. По USB spec hub/HC после deassert
+   даёт устройству 10 мс «recovery», и часть флешек активируются только со
+   второго-третьего reset'а (особенно если BIOS уже общался с ними и они
+   остались в подвешенном состоянии). */
+int uhci_reset_port(uhci_hc_t *hc, int port)
+{
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (uhci_reset_port_once(hc, port) == 0)
+            return 0;
+        api_ptr->load_screen_add_string("RESET[%d]: attempt %d failed, retry...",
+                                        port, attempt + 1);
+        uhci_mdelay(200);   // reset-recovery + время на «остыть» контроллеру
+        // Если порт совсем потерял CCS — device физически невидим, ретраи бессмысленны
+        if (!(uhci_port_status(hc, port) & PORTSC_CCS)) return -3;
+    }
+    return -2;
 }
 
 
