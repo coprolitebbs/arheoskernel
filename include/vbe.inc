@@ -34,6 +34,8 @@ vesa_pmi_seg:   dw 0        ;Сегмент данных для вызова PMI
 vesa_pmi_off:   dd 0        ;Смещение (адрес) функции PMI
 vesa_pmi_len:   dw 0        ;Длина окна (обычно 64KB)
 
+
+vbe_ctrl_info:  times 512 db 0
 mode_info:      times 256 db 0
 msg_err:        db "VBE Error!", 0
 msg_pmi_ok:     db "PMI", 0 ; Отладка
@@ -54,13 +56,14 @@ vbe_init:
     mov word [vesa_pmi_len], 0
 
     ;Отладка: Старт
-    mov al, 'V'
+    mov al, 'v'
     call debug_char
 
     ;Получение информации о контроллере
     mov ax, cs
     mov es, ax
-    mov di, mode_info
+    ;mov di, mode_info
+    mov di, vbe_ctrl_info
     mov ax, 0x4F00
     int 0x10
     cmp ax, 0x004F
@@ -186,8 +189,8 @@ vbe_init:
 
 .success_lfb:
     ;Успех с LFB
-    mov al, 'L' ; LFB OK
-    call debug_char
+    ;mov al, 'L' ; LFB OK
+    ;call debug_char
     ;Устанавливаем бит 0 в graphics_flags
     mov dword [graphics_flags], 1
     jmp .success_fill_vars
@@ -199,13 +202,14 @@ vbe_init:
 
     mov ax, cs
     mov es, ax
-    mov di, mode_info     ;Буфер для структуры PMI
+    ;mov di, mode_info     ;Буфер для структуры PMI
+    mov di, vbe_ctrl_info
     mov ax, 0x4F0A        ;Функция: Get Protected Mode Interface
     mov bl, 0x00          ;Подфункция 0: Основной интерфейс (Bank Switching)
     mov cx, 0             ;Очищаем регистр длины
     int 0x10
 
-    cmp ax, 0x004F        ;Регистр AX = 0x004F — единственный признак успеха!
+    cmp ax, 0x004F        ;Регистр AX = 0x004F — единственный признак успеха
     jne .pmi_fail
 
     mov [cs:vesa_pmi_len], cx
@@ -290,6 +294,7 @@ vbe_init:
     mov eax, [cs:mode_info + 0x28]
     mov [lfb_addr], eax
 
+    pusha
     ;Отладка - Успешно
     mov al, 'S'
     call debug_char
@@ -297,6 +302,7 @@ vbe_init:
     call debug_char
     mov al, 'K'
     call debug_char
+    popa
 
     pop ds
     pop es
@@ -309,9 +315,12 @@ vbe_init:
     jmp .vbe_fail
 
 .vbe_fail:
+    mov al, '!'
+    call debug_char
     mov si, msg_err
     mov ah, 0x0E
     mov bx, 0x0007
+
 .err_loop:
     lodsb
     test al, al

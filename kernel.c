@@ -39,9 +39,41 @@
 #include "include-kernel/font.h"
 #include "include-kernel/locale.h"
 #include "include-kernel/font_vga.h"
-
+#include "include-kernel/kload_screen.h"
 
 void _start(void){
+    /*
+    // === Экстренный debug-вывод прямо в LFB, до любой инициализации ===
+    volatile uint32_t *bi = (volatile uint32_t *)0x5000;
+    uint32_t fb    = bi[3];   // BOOT_FRAMEBUFFER = 12 = offset 12
+    uint32_t pit_  = bi[4];
+    uint32_t w     = bi[5];
+    uint32_t h     = bi[6];
+    uint32_t bpp_  = bi[7];
+
+    // Заливаем первые 100 строк красным — сигнал «ядро стартовало»
+    if (fb >= 0x1000000 && w > 0 && h > 0 && bpp_ >= 24) {
+        uint8_t *p = (uint8_t *)fb;
+        uint32_t bytes_pp = bpp_ / 8;
+        for (uint32_t y = 0; y < 100; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                uint8_t *px = p + y * pit_ + x * bytes_pp;
+                px[0] = 0; px[1] = 0; px[2] = 0xFF;   // красный
+                if (bytes_pp == 4) px[3] = 0;
+            }
+        }
+    }
+
+    // Дальше вставляйте маркеры: после каждой потенциально висящей функции
+    // меняйте цвет узкой полосы на экране — например, бирюза в строке 100,
+    // зелёный в строке 101, жёлтый в строке 102...
+    for (;;);
+    */
+
+
+    extern char _bss_start, _bss_end;
+    memset(&_bss_start, 0, &_bss_end - &_bss_start);
+
     //Получаем параметры VBE
 	boot_info_t *info = (boot_info_t*)0x0;
 
@@ -61,8 +93,6 @@ void _start(void){
     //outb(0xE9, 'A');
     com_init();
     com_puts("[KERNEL] Starting...\n");
-
-
 
     bootinfo_init(info);
 
@@ -92,34 +122,37 @@ void _start(void){
 	//fill_screen(0xFF, 0x1, 0x1);
 	//for(;;);
 
-	//draw_string(0, 232, boot_info->modules[2].name);
-	//draw_hex_dword(boot_info->bpp, 20, 50);
-    //draw_hex_dword(boot_info->pitch, 20, 60);
-    //draw_hex_dword(boot_info->framebuffer, 20, 70);
-    //draw_hex_dword(boot_info->graphics_flags, 20, 80);
+	draw_string(0, 232, boot_info->modules[2].name);
+	draw_hex_dword(boot_info->bpp, 20, 50);
+    draw_hex_dword(boot_info->pitch, 20, 60);
+    draw_hex_dword(boot_info->framebuffer, 20, 70);
+    draw_hex_dword(boot_info->graphics_flags, 20, 80);
+//for(;;);
 
-    com_puts("[KERNEL] VBE Framebuffer addr: ");
-    com_puthex(boot_info->framebuffer);
-    com_puts("\n");
+    //com_puts("[KERNEL] VBE Framebuffer addr: ");
+    //com_puthex(boot_info->framebuffer);
+    //com_puts("\n");
 
-    com_puts("[KERNEL] VBE flags: ");
-    com_puthex(boot_info->graphics_flags);
-    com_puts("\n");
+    //for(;;);
 
-    com_puts("[KERNEL] VBE Width: ");
-    com_puthex(boot_info->width);
-    com_puts("\n");
+    //com_puts("[KERNEL] VBE flags: ");
+    //com_puthex(boot_info->graphics_flags);
+    //com_puts("\n");
 
-    com_puts("[KERNEL] VBE Height: ");
-    com_puthex(boot_info->height);
-    com_puts("\n");
+    //com_puts("[KERNEL] VBE Width: ");
+    //com_puthex(boot_info->width);
+    //com_puts("\n");
 
-    com_puts("[KERNEL] VBE BPP: ");
-    com_puthex(boot_info->bpp);
-    com_puts("\n");
+    //com_puts("[KERNEL] VBE Height: ");
+    //com_puthex(boot_info->height);
+    //com_puts("\n");
 
-	//draw_hex_dump_spaced(0x5200,64,0,150);
-    //draw_hex_dump_spaced((uint32_t)boot_info->modules,64,0,450);
+    //com_puts("[KERNEL] VBE BPP: ");
+    //com_puthex(boot_info->bpp);
+    //com_puts("\n");
+
+	//draw_hex_dump_spaced((void *)0x5200,64,0,150);
+    //draw_hex_dump_spaced((void *)boot_info->modules,64,0,450);
 
     syscalls_table_init();
 
@@ -151,7 +184,7 @@ void _start(void){
     graphics_init_uma_address(total_mem, has_lfb, lfb_addr);
 
     //Попробуем принудительно поискать карту S3 Trio64, если мы вдруг оказались в 86box и офигели от отсутствия линейного фреймбуффера
-    find_and_prepare_s3_trio64();
+    //find_and_prepare_s3_trio64();
 
     uint32_t fb_phys = graphics_get_fb_phys_addr();
     uint32_t fb_size = has_lfb ? boot_info->pitch * boot_info->height : (4 * 1024 * 1024);
@@ -168,8 +201,16 @@ void _start(void){
     lfb_addr = fb_phys;
 
 
+    //draw_string(0, 232, boot_info->modules[2].name);
+	/*draw_hex_dword(boot_info->bpp, 20, 50);
+    draw_hex_dword(boot_info->pitch, 20, 60);
+    draw_hex_dword(boot_info->framebuffer, 20, 70);
+    draw_hex_dword(boot_info->graphics_flags, 20, 80);
+    */
+    //for(;;);
+
     fill_screen(0xFF, 0xF, 0xF);
-    com_puts("[KERNEL] Screen filled.\n");
+    //com_puts("[KERNEL] Screen filled.\n");
 
     //uint32_t aaaa = find_s3_trio64_lfb();
     //com_puts("[KERNEL] find_s3_trio64_lfb addr: ");
@@ -202,9 +243,11 @@ void _start(void){
     //draw_string(10,310,"Update TSS");
 	update_tss_esp0(STACK_ADDRESS);
 
+	kernel_load_animation_start();
+
+	load_screen_add_string("VBE mode: %dx%d %d bpp LFB:0x%x", boot_info->width, boot_info->height, boot_info->bpp,boot_info->framebuffer);
     //draw_string(10,320,"Init tasking");
 	init_tasking();
-
 
     //drivers_init();
 
@@ -214,18 +257,82 @@ void _start(void){
     //drivers_init();
     //int r = vfs_init_system();
 
-    extern void kernel_init_thread(void);
+    //extern void kernel_init_thread(void);
+
+//init_kernel_schedule_lock = 1;
+/*
+
+
+
+    drivers_init();
+    kconsole_init();
+
+    //__asm__ __volatile__("sti" ::: "memory");
+
+    //com_puts("[KERNEL THREAD] System Init Thread started successfully!\n");
+    //Инициализация драйверов дисковода и VFS
+    //Планировщик в этот момент работает, прерывание 32 тикает фоном
+    //Драйвер ФС сам переключает свой локальный schedule_lock на время чтения портов
+    int r = vfs_init_system();
+
+    //Выводим статус монтирования на COM-порт или дебаг-область
+    //com_puts("[KERNEL THREAD] VFS Init Status: ");
+    //com_puthex(r);
+    //com_puts("\n");
+
+    if(r == VFS_STATUS_OK){
+        //kprintf("Open boot config...");
+
+        cfg_file_t *cfg = cfg_open("/config/boot/boot.cfg", FS_OPEN_READ,true);
+
+
+        //kprintf("OK\n");
+
+        init_standard_locales();
+
+        kconsole_reconfigure(cfg);
+
+
+
+        int adddrv_status = load_additional_drivers(cfg);
+        if(adddrv_status != DRV_STATUS_OK){
+            //com_puts("[KERNEL THREAD] Additional drv load error: ");
+            //com_puthex(adddrv_status);
+            //com_puts("\n");
+        }
+        cfg_close(cfg);
+    } else {
+
+    }
+*/
+
+    //draw_hex_dword(console_bgcolor, 20, 50);
+	//for(;;);
+
+    //for(;;);
+
+
+    //draw_string(0, 242, boot_info->modules[1].name);
+ //draw_hex_dword(fb->debug1, 20, 280);
+ //draw_hex_dword(console_bgcolor, 20, 300);
+    //for(;;);
 
     //Инит потока ядра как отдельной задачи в пространстве ядра
     init_kernel_schedule_lock = 1;
     create_kernel_thread((uint32_t)kernel_init_thread);
     init_kernel_schedule_lock = 0;
-
+//for(;;);
     update_tss_esp0(STACK_ADDRESS);
+
     //kernel_schedule_lock = 1;
     //draw_hex_dword(r, 310, 650);
     //kernel_schedule_lock = 0;
     //kernel_schedule_lock = 1;
+ //kprintf("OK\n");
+
+
+
+
 
     /*
     //filesystem test
@@ -303,7 +410,6 @@ void _start(void){
 		update_tss_esp0(current_task->kernel_stack);
 
         //init_kernel_schedule_lock = 0;
-
         //asm volatile("sti");
 		switch_task(current_task->esp);
 	}

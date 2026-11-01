@@ -20,8 +20,13 @@
 #include "../include/syscall.h"
 #include "../../include-kernel/locale_types.h"
 
+#ifdef COMPILE_BIN
+//extern char _ubss_start;
+//extern char _ubss_end;
+#endif
 
 //Общая функция запуска пользовательского приложения с корректным завершением и очисткой ресурсов
+
 void __attribute__((naked)) _start(void){
     __asm__ __volatile__(
         "xor %%ebp, %%ebp\n\t"     //Обнуляем EBP по стандартам ABI (конец трассировки)
@@ -49,6 +54,61 @@ void __attribute__((naked)) _start(void){
     );
     //u_printf(400, 570, 0x00FFFFFF, "exited");
 }
+
+/*
+void __attribute__((naked)) _start(void){
+    // 1. Извлекаем аргументы (общий код для BIN и ELF)
+    __asm__ __volatile__(
+        "xor %%ebp, %%ebp\n\t"       // Обнуляем EBP по стандартам ABI
+        "movl (%%esp), %%eax\n\t"     // Считываем argc прямо с вершины стека
+        "leal 4(%%esp), %%ebx\n\t"    // Вычисляем адрес массива указателей argv[]
+        : : : "memory", "eax", "ebx"
+    );
+
+    // 2. Условный блок очистки BSS (компилируется ТОЛЬКО для flat-бинарников)
+#ifdef COMPILE_BIN
+    __asm__ __volatile__(
+        "pushl %%eax\n\t"             // Сохраняем argc
+        "pushl %%ebx\n\t"             // Сохраняем argv
+
+        "movl $_ubss_start, %%edi\n\t" // Загружаем адрес начала BSS
+        "movl $_ubss_end, %%ecx\n\t"   // Загружаем адрес конца BSS
+
+        "subl %%edi, %%ecx\n\t"       // Вычисляем размер BSS в байтах (ecx = end - start)
+        "jz .L_skip_bss_clear\n\t"    // Если размер равен 0, прыгаем дальше
+
+        "shrl $2, %%ecx\n\t"          // Переводим размер в 32-битные двойные слова
+        "xorl %%eax, %%eax\n\t"       // Очищаем EAX (записывать будем нули)
+        "cld\n\t"                     // Сбрасываем флаг направления
+        "rep stosl\n\t"               // Зануляем память
+
+    ".L_skip_bss_clear:\n\t"
+        "popl %%ebx\n\t"              // Восстанавливаем оригинальный argv
+        "popl %%eax\n\t"              // Восстанавливаем оригинальный argc
+        : : : "memory", "eax", "ebx", "ecx", "edi", "cc"
+    );
+#endif
+
+    // 3. Вызов main и системный выход (общий код для BIN и ELF)
+    __asm__ __volatile__(
+        "pushl %%ebx\n\t"             // Вторым аргументом main заталкиваем argv
+        "pushl %%eax\n\t"             // Первым аргументом main заталкиваем argc
+
+        "call main\n\t"               // Вызываем Си-функцию main!
+
+        "addl $8, %%esp\n\t"          // Очищаем стек от параметров
+
+        "movl %0, %%eax\n\t"          // Помещаем SYS_EXIT строго в регистр EAX
+        "int $0x80\n\t"              // Дёргаем прерывание ядра
+
+        "1:\n\t"
+        "jmp 1b\n\t"                 // Защитный барьер зависания
+        :
+        : "i"(SYS_EXIT)
+        : "memory", "eax", "ebx", "cc"
+    );
+}
+*/
 
 void u_draw_char(uint32_t x, uint32_t y, char c, uint32_t color){
     __asm__ __volatile__("int $0x80"::"a"(SYS_DRAW_CHAR),"b"(x),"c"(y),"d"(c),"S"(color):"memory");
@@ -220,6 +280,12 @@ int unlink(const char *path) {
     return ret;
 }
 
+int rename(const char *oldpath, const char *newpath){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_RENAME), "b"(oldpath), "c"(newpath) : "memory");
+    return ret;
+}
+
 int rmdir(const char *path) {
     int ret;
     __asm__ __volatile__("int $0x80":"=a"(ret):"a"(SYS_RMDIR),"b"(path):"memory");
@@ -242,6 +308,7 @@ void u_clear_tile(uint32_t x, uint32_t y, uint32_t color){
 int u_spawn(const char *path, const char *cmdline){
     int ret;
     __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_SPAWN), "b"(path), "c"(cmdline) : "memory");
+    //printf("here%d\n",ret);
     return ret;
 }
 
@@ -267,6 +334,7 @@ int u_wait_deity(int pid){
         //Если ядро говорит, что порожденный процесс еще активен (-2)
         if (ret == PROCESS_IS_ACTIVE){
             yield(); //Добровольно уступаем процессор, пока ребенок работает
+            //printf("here");
             continue;
         }
         break;
@@ -668,3 +736,21 @@ int scanf(const char *format, ...){
 }
 
 
+int _clipboard_call(uint32_t op, void *buf, uint32_t size){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_CLIPBOARD), "b"(op), "c"(buf), "d"(size) : "memory");
+    return ret;
+}
+
+uint32_t u_clipboard_size(void){ return (uint32_t)_clipboard_call(CLIP_OP_GET_SIZE, NULL, 0); }
+int      u_clipboard_get(void *b,uint32_t m){ return _clipboard_call(CLIP_OP_GET, b, m); }
+int      u_clipboard_set(const void *b,uint32_t s){ return _clipboard_call(CLIP_OP_SET, (void*)b, s); }
+void     u_clipboard_clear(void){ (void)_clipboard_call(CLIP_OP_CLEAR, NULL, 0); }
+
+
+void u_get_console_pos(uint32_t *x, uint32_t *y){
+    uint32_t c = 0, rr = 0;
+    __asm__ __volatile__("int $0x80" : "=a"(c), "=b"(rr): "a"(SYS_GET_CURSOR_POS) : "memory");
+    if (c)   *x   = c;
+    if (rr)   *y   = rr;
+}

@@ -25,7 +25,14 @@
 #include "../../include-kernel/ports_io.h"
 #include "../include_drivers/drv_format.h"
 
-
+static void fdc_lock_sched(void){
+    if (api_ptr && api_ptr->schedule_lock_ptr)
+        *(volatile uint8_t *)api_ptr->schedule_lock_ptr = 1;
+}
+static void fdc_unlock_sched(void){
+    if (api_ptr && api_ptr->schedule_lock_ptr)
+        *(volatile uint8_t *)api_ptr->schedule_lock_ptr = 0;
+}
 
 static void fdc_unlock_scheduler(void){
     if (api_ptr && api_ptr->schedule_lock_ptr) {
@@ -96,55 +103,55 @@ int fdc_receive_byte(uint8_t *value){
 
 //reset FDC
 int fdc_reset(void){
-    uint8_t st0;
-    uint8_t cylinder;
+    uint8_t st0, cylinder;
+    int result = FS_IO_ERROR;
 
-    if (api_ptr && api_ptr->schedule_lock_ptr){
-        *(volatile uint8_t *)api_ptr->schedule_lock_ptr = 1;
-    }
-    //RESET = 0
+    fdc_lock_sched();
+
+    /* --- 1. Reset-импульс. Держим RESET# в низком уровне >= 100 us.
+       2M nop ≈ 4–40 ms в зависимости от CPU, с запасом покрывает спеку. --- */
     outb(FDC_DOR, 0x00);
-    //Небольшая задержка Пока простой busy loop.
-    for (volatile int i = 0; i < 2000000; i++) asm volatile ("nop");
-    //RESET = 1 DMA enable drive 0
-    outb(FDC_DOR,FDC_DOR_RESET | FDC_DOR_DMA_IRQ);
+    for (volatile int i = 0; i < 2000000; i++) asm volatile("nop");
 
-    for (int i = 0; i < 4; i++){
-        // Отправляем команду
-        if (fdc_send_byte(FDC_CMD_SENSE_INTERRUPT) != FS_OK) break;
-        // Читаем первый байт (ST0)
-        if (fdc_receive_byte(&st0) != FS_OK) break;
-        // Читаем второй байт (Cylinder)
-        if (fdc_receive_byte(&cylinder) != FS_OK) break;
-    }
+    /* --- 2. Отпускаем reset, сразу включаем IRQ и мотор.
+       Мотор нужен до RECALIBRATE, иначе SEEK не выполнится. --- */
+    if (api_ptr->floppy_irq_fired_ptr)
+        *(volatile uint8_t *)api_ptr->floppy_irq_fired_ptr = 0;
     outb(FDC_DOR, FDC_DOR_RESET | FDC_DOR_DMA_IRQ | FDC_DOR_MOTOR0);
 
-    //Ждем физического раскручивания диска (около 300-500 мс)
-    //Для 86Box это критично, иначе сектор не прочитается (будет ошибка старта)
-    for (volatile int delay = 0; delay < 50000000; delay++) asm volatile("nop");
+    /* --- 3. Ждём IRQ6 о завершении reset (~100 us после release) --- */
+    if (fat12_fdc_wait_irq_async(40000000) != FS_OK) goto out;
 
-    *(volatile uint8_t *)api_ptr->floppy_irq_fired_ptr = 0;
-    //Команда RECALIBRATE (перемещение головки на трек 0)
-    fdc_send_byte(0x07); // RECALIBRATE
-    fdc_send_byte(0x00); // Drive 0
-
-    if (fat12_fdc_wait_irq_async(40000000) != FS_OK) {
-        fdc_unlock_scheduler();
-        return FS_IO_ERROR; // Если таймаут —выходим с ошибкой механики
+    /* --- 4. Чистим очередь статусов FDC (4x SENSE_INTERRUPT, как в даташите) --- */
+    for (int i = 0; i < 4; i++){
+        if (fdc_send_byte(FDC_CMD_SENSE_INTERRUPT) != FS_OK) break;
+        if (fdc_receive_byte(&st0) != FS_OK) break;
+        if (fdc_receive_byte(&cylinder) != FS_OK) break;
     }
 
-    // Ждем завершения калибровки через SENSE_INTERRUPT
-    if (fdc_send_byte(FDC_CMD_SENSE_INTERRUPT) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_receive_byte(&st0) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_receive_byte(&cylinder) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
+    /* --- 5. Спин-ап диска: 300–500 ms для 3.5". На быстрых CPU
+       (GHz-класс) 50M итераций = ~50–150 ms — этого МАЛО.
+       Используем 200M итераций: ~200–600 ms на реальном железе. --- */
+    for (volatile int delay = 0; delay < 200000000; delay++) asm volatile("nop");
 
-    if (cylinder != 0) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
+    /* --- 6. RECALIBRATE → голова на цилиндр 0 --- */
+    if (api_ptr->floppy_irq_fired_ptr)
+        *(volatile uint8_t *)api_ptr->floppy_irq_fired_ptr = 0;
+    if (fdc_send_byte(FDC_CMD_RECALIBRATE) != FS_OK) goto out;
+    if (fdc_send_byte(0x00) != FS_OK) goto out;
+    if (fat12_fdc_wait_irq_async(40000000) != FS_OK) goto out;
 
-    fdc_unlock_scheduler();
+    /* --- 7. Проверяем, что головка действительно на цилиндре 0 --- */
+    if (fdc_send_byte(FDC_CMD_SENSE_INTERRUPT) != FS_OK) goto out;
+    if (fdc_receive_byte(&st0) != FS_OK) goto out;
+    if (fdc_receive_byte(&cylinder) != FS_OK) goto out;
+    if (cylinder != 0) goto out;
 
-    return FS_OK;
+    result = FS_OK;
+out:
+    fdc_unlock_sched();
+    return result;
 }
-
 
 //motor
 static void fdc_motor_on(void){
@@ -156,31 +163,35 @@ int fdc_recalibrate(void){
     uint8_t st0;
     uint8_t cylinder;
 
+    int result = FS_IO_ERROR;
+    fdc_lock_sched();
+
     int r;
-    if (api_ptr && api_ptr->schedule_lock_ptr){
+    /*if (api_ptr && api_ptr->schedule_lock_ptr){
         *(volatile uint8_t *)api_ptr->schedule_lock_ptr = 1;
-    }
+    }*/
     if (api_ptr->floppy_irq_fired_ptr){
         *(volatile uint8_t *)api_ptr->floppy_irq_fired_ptr = 0;
     }
 
     r = fdc_send_byte(FDC_CMD_RECALIBRATE);
-    if (r != FS_OK) {fdc_unlock_scheduler(); return r;}
+    if (r != FS_OK) {result = r; goto out;}
     r = fdc_send_byte(0);
-    if (r != FS_OK) {fdc_unlock_scheduler(); return r;}
+    if (r != FS_OK) {result = r; goto out;}
 
-    if (fat12_fdc_wait_irq_async(40000000) != FS_OK){
-        fdc_unlock_scheduler();
-        return FS_IO_ERROR; // Вылет по таймауту
-    }
+    if (fat12_fdc_wait_irq_async(40000000) != FS_OK) goto out;
 
     r = fdc_sense_interrupt(&st0,&cylinder);
-    if (r != FS_OK) {fdc_unlock_scheduler(); return r;}
-    if (cylinder != 0) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
+    if (r != FS_OK) {result = r; goto out;}
+    if (cylinder != 0) {goto out;}
 
-    fdc_unlock_scheduler();
+    //fdc_unlock_scheduler();
 
-    return FS_OK;
+    result = FS_OK;
+
+out:
+    fdc_unlock_sched();
+    return result;
 }
 
 
@@ -211,6 +222,7 @@ int fdc_sense_interrupt(uint8_t *st0,uint8_t *cylinder){
 //DMA:
 //floppy -> DMA channel 2 -> FAT12_DMA_BUFFER
 //После успешного чтения данные копируются из DMA-буфера в buffer
+/*
 int fdc_read_sector(fat12_fs_t *vol,uint32_t cylinder,uint32_t head,uint32_t sector,void *buffer){
     uint8_t st0;
     uint8_t st1;
@@ -410,28 +422,119 @@ int fdc_read_sector(fat12_fs_t *vol,uint32_t cylinder,uint32_t head,uint32_t sec
 
     return FS_OK;
 }
+*/
+int fdc_read_sector(fat12_fs_t *vol, uint32_t cylinder, uint32_t head,
+                    uint32_t sector, void *buffer){
+    if (!vol || !buffer) return FS_IO_ERROR;
+    if (vol->drive != 0) return FS_NOT_SUPPORTED;
+    if (vol->bytes_per_sector != 512) return FS_NOT_SUPPORTED;
+    if (head >= vol->heads) return FS_IO_ERROR;
+    if (sector == 0 || sector > vol->sectors_per_track) return FS_IO_ERROR;
+
+    int result = FS_IO_ERROR;
+    uint8_t st0, st1, st2, c, h, r, n, seek_st0, seek_cyl;
+
+    fdc_lock_sched();
+
+    /* SEEK + WAIT IRQ + SENSE_INTERRUPT */
+    if (fdc_send_byte(FDC_CMD_SEEK) != FS_OK) goto out;
+    if (fdc_send_byte((head << 2) | 0) != FS_OK) goto out;
+    if (fdc_send_byte(cylinder) != FS_OK) goto out;
+
+    if (fat12_fdc_wait_irq_async(40000000) != FS_OK) goto out;
+
+    if (fdc_send_byte(FDC_CMD_SENSE_INTERRUPT) != FS_OK) goto out;
+    if (fdc_receive_byte(&seek_st0) != FS_OK) goto out;
+    if (fdc_receive_byte(&seek_cyl) != FS_OK) goto out;
+    if ((seek_st0 & 0xC0) != 0) goto out;
+
+    /* SPECIFY */
+    if (fdc_send_byte(FDC_CMD_SPECIFY) != FS_OK) goto out;
+    if (fdc_send_byte(0xDF) != FS_OK) goto out;
+    if (fdc_send_byte(0x02) != FS_OK) goto out;
+
+    /* MOTOR ON + небольшая стабилизация */
+    fdc_motor_on();
+    io_wait(); io_wait(); io_wait();
+    for (volatile int d = 0; d < 200000; d++) asm volatile("nop");
+
+    /* DMA setup */
+    if (fat12_dma_read((void *)FAT12_DMA_BUFFER, 512) != FS_OK) goto out;
+
+    if (api_ptr->floppy_irq_fired_ptr)
+        *(volatile uint8_t *)api_ptr->floppy_irq_fired_ptr = 0;
+
+    /* READ DATA */
+    if (fdc_send_byte(FDC_CMD_READ_DATA) != FS_OK) goto out;
+    if (fdc_send_byte((uint8_t)((head << 2) | 0)) != FS_OK) goto out;
+    c = (uint8_t)cylinder;
+    h = (uint8_t)head;
+    r = (uint8_t)sector;
+    n = 2;
+    uint8_t eot = (vol->sectors_per_track > 0) ? (uint8_t)vol->sectors_per_track : 18;
+    if (fdc_send_byte(c) != FS_OK) goto out;
+    if (fdc_send_byte(h) != FS_OK) goto out;
+    if (fdc_send_byte(r) != FS_OK) goto out;
+    if (fdc_send_byte(n) != FS_OK) goto out;
+    if (fdc_send_byte(eot) != FS_OK) goto out;
+    if (fdc_send_byte(0x1B) != FS_OK) goto out;
+    if (fdc_send_byte(0xFF) != FS_OK) goto out;
+
+    /* ЖДЁМ IRQ6 — а НЕ просто MSR result-phase */
+    if (fat12_fdc_wait_irq_async(40000000) != FS_OK) goto out;
+
+    /* Читаем 7 байт статуса */
+    if (fdc_receive_byte(&st0) != FS_OK) goto out;
+    if (fdc_receive_byte(&st1) != FS_OK) goto out;
+    if (fdc_receive_byte(&st2) != FS_OK) goto out;
+    if (fdc_receive_byte(&c) != FS_OK) goto out;
+    if (fdc_receive_byte(&h) != FS_OK) goto out;
+    if (fdc_receive_byte(&r) != FS_OK) goto out;
+    if (fdc_receive_byte(&n) != FS_OK) goto out;
+
+    if (st0 & 0xC0) goto out;
+    if (st1 != 0 || st2 != 0 || n != 2) goto out;
+
+    memcpy(buffer, (void *)FAT12_DMA_BUFFER, 512);
+    result = FS_OK;
+
+out:
+    fdc_unlock_sched();
+    return result;
+}
 
 
 int fdc_write_sector(fat12_fs_t *vol,uint32_t cylinder,uint32_t head,uint32_t sector,const void *buffer){
     uint8_t st0, st1, st2, c, h, r, n;
     uint8_t seek_st0, seek_cyl;
 
-    if (!vol || !buffer || vol->drive != 0) return FS_IO_ERROR;
+    int result = FS_IO_ERROR;
 
-    // Блокируем планировщик
+    fdc_lock_sched();
+
+    if (!vol || !buffer || vol->drive != 0) goto out;
+
+    /*// Блокируем планировщик
     if (api_ptr && api_ptr->schedule_lock_ptr) {
         *(volatile uint8_t *)api_ptr->schedule_lock_ptr = 1;
-    }
+    }*/
 
     //Позиционирование головки (SEEK)
-    if (fdc_send_byte(FDC_CMD_SEEK) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_send_byte((head << 2) | 0) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_send_byte(cylinder) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
+    if (fdc_send_byte(FDC_CMD_SEEK) != FS_OK) goto out;
+    if (fdc_send_byte((head << 2) | 0) != FS_OK) goto out;
+    if (fdc_send_byte(cylinder) != FS_OK) goto out;
 
-    if (fdc_send_byte(FDC_CMD_SENSE_INTERRUPT) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_receive_byte(&seek_st0) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_receive_byte(&seek_cyl) != FS_OK) {fdc_unlock_scheduler();return FS_IO_ERROR;}
-    if ((seek_st0 & 0xC0) != 0) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
+    if (fat12_fdc_wait_irq_async(40000000) != FS_OK) goto out;
+
+    if (fdc_send_byte(FDC_CMD_SENSE_INTERRUPT) != FS_OK) goto out;
+    if (fdc_receive_byte(&seek_st0) != FS_OK) goto out;
+    if (fdc_receive_byte(&seek_cyl) != FS_OK) goto out;
+    if ((seek_st0 & 0xC0) != 0) goto out;
+
+    /* SPECIFY — SRT/HUT/HLT, те же значения, что в fdc_read_sector */
+    if (fdc_send_byte(FDC_CMD_SPECIFY) != FS_OK) goto out;
+    if (fdc_send_byte(0xDF) != FS_OK) goto out;
+    if (fdc_send_byte(0x02) != FS_OK) goto out;
 
     for (volatile int delay = 0; delay < 200000; delay++) asm volatile("nop");
 
@@ -439,54 +542,61 @@ int fdc_write_sector(fat12_fs_t *vol,uint32_t cylinder,uint32_t head,uint32_t se
     memcpy((void *)FAT12_DMA_BUFFER, buffer, 512);
 
     //Настройка DMA на запись
-    if (fat12_dma_write((void *)FAT12_DMA_BUFFER, 512) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
+    if (fat12_dma_write((void *)FAT12_DMA_BUFFER, 512) != FS_OK) goto out;
 
     //Врубаем мотор
     fdc_motor_on();
     io_wait(); io_wait(); io_wait();
 
     //Команда WRITE DATA (0x45)
-    if (fdc_send_byte(FDC_CMD_WRITE_DATA) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_send_byte((head << 2) | 0) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
+    if (fdc_send_byte(FDC_CMD_WRITE_DATA) != FS_OK) goto out;
+    if (fdc_send_byte((head << 2) | 0) != FS_OK) goto out;
 
     c = (uint8_t)cylinder;
     h = (uint8_t)head;
     r = (uint8_t)sector;
     n = 2; // 512 байт
     uint8_t write_eot = (vol && vol->sectors_per_track > 0) ? (uint8_t)vol->sectors_per_track : 18;
-    if (fdc_send_byte(c) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_send_byte(h) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_send_byte(r) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_send_byte(n) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
-    if (fdc_send_byte(write_eot) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
+    if (fdc_send_byte(c) != FS_OK) goto out;
+    if (fdc_send_byte(h) != FS_OK) goto out;
+    if (fdc_send_byte(r) != FS_OK) goto out;
+    if (fdc_send_byte(n) != FS_OK) goto out;
+    if (fdc_send_byte(write_eot) != FS_OK) goto out;
 
-    if (fdc_send_byte(0x1B) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;} // GPL
-    if (fdc_send_byte(0xFF) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;} // DTL
+    if (fdc_send_byte(0x1B) != FS_OK) goto out; // GPL
+    if (fdc_send_byte(0xFF) != FS_OK) goto out; // DTL
 
     // Опрос завершения фазы (Polling Result)
-    uint32_t timeout = 10000000;
+    /*uint32_t timeout = 10000000;
     while (timeout--){
         uint8_t msr = inb(FDC_MSR);
         if ((msr & FDC_MSR_RQM) && (msr & FDC_MSR_DIO)) break;
     }
-    if (!timeout) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
+    if (!timeout) goto out;*/
+    if (fat12_fdc_wait_irq_async(40000000) != FS_OK) goto out;
 
     // Читаем 7 байт статуса
-    if (fdc_receive_byte(&st0) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;} io_wait();
-    if (fdc_receive_byte(&st1) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;} io_wait();
-    if (fdc_receive_byte(&st2) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;} io_wait();
-    if (fdc_receive_byte(&c) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;} io_wait();
-    if (fdc_receive_byte(&h) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;} io_wait();
-    if (fdc_receive_byte(&r) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;} io_wait();
-    if (fdc_receive_byte(&n) != FS_OK) {fdc_unlock_scheduler(); return FS_IO_ERROR;} io_wait();
+    if (fdc_receive_byte(&st0) != FS_OK) goto out; io_wait();
+    if (fdc_receive_byte(&st1) != FS_OK) goto out; io_wait();
+    if (fdc_receive_byte(&st2) != FS_OK) goto out; io_wait();
+    if (fdc_receive_byte(&c) != FS_OK) goto out; io_wait();
+    if (fdc_receive_byte(&h) != FS_OK) goto out; io_wait();
+    if (fdc_receive_byte(&r) != FS_OK) goto out; io_wait();
+    if (fdc_receive_byte(&n) != FS_OK) goto out; io_wait();
 
 
-    if (st0 & 0xC0) {fdc_unlock_scheduler(); return FS_IO_ERROR;} // Крах или защита от записи (Write Protected)
-    if (st1 != 0 || st2 != 0 || n != 2) {fdc_unlock_scheduler(); return FS_IO_ERROR;}
+    if (st0 & 0xC0) goto out; // Крах или защита от записи (Write Protected)
+    if (st1 != 0 || st2 != 0 || n != 2) goto out;
 
     //Разблокируем планировщик
-    fdc_unlock_scheduler();
+    //fdc_unlock_scheduler();
 
-    return FS_OK;
+    result = FS_OK;
+
+
+out:
+    fdc_unlock_sched();
+
+    return result;
 }
 

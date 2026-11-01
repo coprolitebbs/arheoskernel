@@ -31,6 +31,8 @@ extern uint32_t fat12_volume_count;
 
 extern fs_driver_api_t *api_ptr;
 
+extern boot_info_t *main_boot_info;
+
 void driver_main(struct boot_info *boot);
 
 description_driver_api_t *driver_get_api(void);

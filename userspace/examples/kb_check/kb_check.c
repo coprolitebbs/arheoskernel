@@ -62,6 +62,6 @@ int main(int argc, char *argv[]){
             yield();
         }
     }
-    free_pages(line_buffer,4096 * sizeof(char));
+    free(line_buffer);
     return 0;
 }

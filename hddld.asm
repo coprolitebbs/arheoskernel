@@ -33,7 +33,7 @@ _stage2_entry:
     mov sp, 0xFFF0
     sti
 
-    mov [drive], dl
+    mov [cs:drive], dl
 
     ;Инициализация VBE и A20
     call vbe_init
@@ -50,59 +50,93 @@ _stage2_entry:
     call ext2_read_group_table
     jc .fatal_halt
 
-    ;Грузим Framebuffer Driver
+        ; --- 0: Framebuffer Driver ---
     mov si, fb_driver_filename
     call ext2_find_file
     jc .fatal_halt
     mov [fb_inode], ax
-
     call ext2_inode_to_group
     call ext2_get_group_inode_table
-
-    mov ax, 0x3000
-    mov [cs:file_load_segment], ax
+    mov ax, [module_next_segment]
+    mov [fb_driver_seg], ax
+    mov [file_load_segment], ax
     mov ax, [fb_inode]
     call ext2_load_file
     jc .fatal_halt
-
     mov eax, [file_size]
     mov [fb_driver_size], eax
+    call advance_module_segment
 
-    ;Грузим Драйвер FAT12
+    ; --- 1: Block Device Driver ---
+    mov si, block_driver_filename
+    call ext2_find_file
+    jc .fatal_halt
+    mov [block_inode], ax
+    call ext2_inode_to_group
+    call ext2_get_group_inode_table
+
+    mov ax, [module_next_segment]
+    mov [block_driver_seg], ax
+    mov [file_load_segment], ax
+    mov ax, [block_inode]
+    call ext2_load_file
+    jc .fatal_halt
+    mov eax, [file_size]
+    mov [block_driver_size], eax
+    call advance_module_segment
+
+    ; --- 2: USB Device Driver ---
+    mov si, usb_driver_filename
+    call ext2_find_file
+    jc .fatal_halt
+    mov [usb_inode], ax
+    call ext2_inode_to_group
+    call ext2_get_group_inode_table
+    mov ax, [module_next_segment]
+    mov [usb_driver_seg], ax
+    mov [file_load_segment], ax
+    mov ax, [usb_inode]
+    call ext2_load_file
+    jc .fatal_halt
+    mov eax, [file_size]
+    mov [usb_driver_size], eax
+    call advance_module_segment
+
+    ; --- 3: FAT12 Driver ---
     mov si, fat12_driver_filename
     call ext2_find_file
     jc .fatal_halt
     mov [fat12_inode], ax
-
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, 0x4000
-    mov [cs:file_load_segment], ax
+    mov ax, [module_next_segment]
+    mov [fat12_driver_seg], ax
+    mov [file_load_segment], ax
     mov ax, [fat12_inode]
     call ext2_load_file
     jc .fatal_halt
-
     mov eax, [file_size]
     mov [fat12_driver_size], eax
+    call advance_module_segment
 
-    ;Грузим Драйвер EXT2
+    ; --- 4: EXT2 Driver ---
     mov si, ext2_driver_filename
     call ext2_find_file
     jc .fatal_halt
     mov [ext2_inode], ax
-
     call ext2_inode_to_group
     call ext2_get_group_inode_table
 
-    mov ax, 0x5000
-    mov [cs:file_load_segment], ax
+    mov ax, [module_next_segment]
+    mov [ext2_driver_seg], ax
+    mov [file_load_segment], ax
     mov ax, [ext2_inode]
     call ext2_load_file
     jc .fatal_halt
-
     mov eax, [file_size]
     mov [ext2_driver_size], eax
+    call advance_module_segment
 
     pop es
 
@@ -111,6 +145,7 @@ _stage2_entry:
     push di
     xor ax, ax
     mov es, ax
+    mov ds, ax
     mov di, 0x6002
     call e820_detect
     mov word [0x6000], cx
@@ -207,18 +242,52 @@ halt:
     hlt
     jmp .loop
 
+; Продвигает module_next_segment на ceil(file_size/16) + 16 параграфов
+; (16 параграфов = 256 байт padding). Проверяет, что не въехали в FSINFO.
+advance_module_segment:
+    push eax
+    mov eax, [file_size]
+    add eax, 15
+    shr eax, 4              ; paragraphs = ceil(file_size / 16)
+    add eax, 16             ; padding 256 байт
+    add [module_next_segment], eax
+
+    ; Потолок = начало EBDA/VGA (0xA0000). Оставляем 16 KB запаса
+    ; (0x9C00 сегм. = 0x9C000 phys) на случай нестандартно большой EBDA.
+    cmp word [module_next_segment], 0x9C00
+    jb .ok
+    mov al, 'S'
+    out 0xE9, al
+    jmp halt
+.ok:
+    pop eax
+    ret
+
+
 ;Переменные
 kernel_size_pm       dd 0
 kernel_inode         dw 0
 fb_inode             dw 0
+block_inode          dw 0
+usb_inode            dw 0
 fat12_inode          dw 0
 ext2_inode           dw 0
 drive                db 0
 cluster              dw 0
 
+;Динамическое размещение модулей (единица = параграф, 16 байт)
+module_next_segment  dd 0x3000       ; стартовый сегмент fb_driver (phys 0x30000)
+fb_driver_seg        dw 0
+block_driver_seg     dw 0
+usb_driver_seg       dw 0
+fat12_driver_seg     dw 0
+ext2_driver_seg      dw 0
+
 loader_name          db "ext.ld",0
 kernel_filename      db "kernel",0
 fb_driver_filename   db "fb_dr.drv",0
+block_driver_filename   db "block.drv",0
+usb_driver_filename   db "usb.drv",0
 fat12_driver_filename db "f12_dr.drv",0
 ext2_driver_filename  db "ext2_dr.drv",0
 

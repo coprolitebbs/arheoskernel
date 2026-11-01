@@ -36,6 +36,7 @@ char *strrep(char *dest, const char *src, const char *old_sub, const char *new_s
 char *strcpy(char *dest, const char *src);
 char *strncpy(char *dest, const char *src, uint32_t n);
 char *strtok(char *str, const char *delim);
+char *strtok_r(char *str, const char *delim, char **saveptr);
 char *strcat(char *dest, const char *src);
 int strcasecmp(const char *s1, const char *s2);
 void trim(char *out, const char *in);

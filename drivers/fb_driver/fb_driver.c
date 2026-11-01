@@ -31,6 +31,7 @@ uint8_t *framebuffer;
 
 uint32_t pitch = 0;
 uint32_t bytes_pp = 0;
+uint32_t bpp = 0;
 
 uint32_t width = 0;
 uint32_t height = 0;
@@ -201,10 +202,15 @@ void fb_fill_rect(int x, int y, int w, int h, uint32_t color){
             for(int xx = 0; xx < w; xx++) { line_ptr[xx] = (uint8_t)(target_color & 0xFF); }
         }
     }
+    //api_ptr->debug1 = (uint32_t)color;
 }
 
 
 void fb_clear(uint32_t color){
+    if (!(flags & GRAPHICS_FLAG_LFB)){
+        return;   // framebuffer остаётся NULL, все fb_* функции тихо ничего не рисуют
+    }
+    if ((uint32_t)framebuffer == 0 || (uint32_t)framebuffer == 0xFFFFFFFF) return;
     //Вычисляем точный размер экрана в байтах на базе pitch
     uint32_t screen_bytes = height * pitch;
     //font_draw_char(400,310,'A',0x00FFFFFF);
@@ -251,13 +257,15 @@ uint32_t fb_get_bg_color(void){ return current_background_color; }
 void fb_scroll_up(uint32_t start_y, uint32_t end_y, uint32_t line_height){
     if (!framebuffer) return;
     if (start_y + line_height >= end_y || end_y > height) return;
-    //Построчно копируем пиксели видеопамяти снизу вверх
+    if (start_y >= end_y) return;
+
     for (uint32_t y = start_y; y < end_y - line_height; y++){
         uint8_t *dst_line = framebuffer + (y * pitch);
         uint8_t *src_line = framebuffer + ((y + line_height) * pitch);
         memcpy(dst_line, src_line, width * bytes_pp);
     }
-    //Освободившуюся нижнюю строчку терминала чисто заливаем цветом текущего фона
+
+    /* Нижнюю освободившуюся строку заливаем фоном. */
     fb_fill_rect(0, end_y - line_height, width, line_height, current_background_color);
 }
 
@@ -288,6 +296,7 @@ void fb_clear_tile(int x, int y, uint32_t fallback_color){
 
 void font_draw_codepoint(uint32_t x, uint32_t y, uint32_t cp, uint32_t color){
     if (!framebuffer) return;
+    if (x >= width || y >= height) return;
     if (!api_ptr || !api_ptr->get_active_locale_ptr || !api_ptr->font_lookup_ptr) return;
 
     const locale_t *loc = (const locale_t *)api_ptr->get_active_locale_ptr();
@@ -296,6 +305,7 @@ void font_draw_codepoint(uint32_t x, uint32_t y, uint32_t cp, uint32_t color){
     const font_glyph_t *g =
         (const font_glyph_t *)api_ptr->font_lookup_ptr(loc->font, cp);
     if (!g) return;
+    if (x + g->width > width || y + g->height > height) return;
 
     uint8_t bytes_per_row = (g->width + 7) / 8;
     for (uint8_t row = 0; row < g->height; row++){
@@ -349,13 +359,51 @@ void font_draw_hex(uint32_t dword, int x, int y){
 
 
 void fb_init(struct boot_info *boot){
-    framebuffer = (uint8_t*)boot->framebuffer;
-    pitch = boot->pitch;
-    bytes_pp = boot->bpp / 8;
-    width = boot->width;
-    height = boot->height;
+    framebuffer = NULL;
+    pitch = 0;
+    bytes_pp = 0;
+    bpp = 0;
+    width = 0;
+    height = 0;
+    flags = 0;
+
+    if (!boot) return;
     flags = boot->graphics_flags;
-    //fb_wallpaper_raw = 0;
+
+    /* --- LFB check: bit 0, same as draw.c --- */
+    if (!(flags & GRAPHICS_FLAG_LFB)){
+        /* Banked mode — driver doesn't do bank switching. Bail out
+         * cleanly; kernel-side fill_screen still works via its own
+         * graphics_get_fb_virt_addr() fallback. */
+        //com_puts("[FB] No LFB, framebuffer disabled\n");
+        //return;
+    }
+
+    if (boot->framebuffer == 0 || boot->framebuffer == 0xFFFFFFFF) {
+        //com_puts("[FB] LFB set but address invalid\n");
+        //return;
+    }
+
+    bpp = boot->bpp;
+    if (bpp == 15) bpp = 16;
+    if (bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32) {
+        //com_puts("[FB] Unsupported bpp\n");
+        return;
+    }
+    bytes_pp = (bpp + 7) / 8;   /* NO uint32_t */
+
+    width  = boot->width;
+    height = boot->height;
+    pitch  = boot->pitch;
+
+    if (width == 0 || height == 0 || pitch < width * bytes_pp) {
+        //com_puts("[FB] Invalid dimensions\n");
+        return;
+    }
+
+    //framebuffer = (uint8_t*)0xC0000000;//(uint8_t*)boot->framebuffer;
+    framebuffer = (uint8_t*)boot->framebuffer;
+
 }
 
 
@@ -408,6 +456,8 @@ int fb_blit(int x, int y, int w, int h, const void *src){
 }
 
 
+bool fb_has_wallpaper(void){ return fb_wallpaper_present; }
+
 
 
 void driver_main(struct boot_info *boot){
@@ -436,6 +486,7 @@ void driver_main(struct boot_info *boot){
 
     api_ptr->set_wallpaper = fb_upload_wallpaper;
     api_ptr->clear_tile = fb_clear_tile;
+    api_ptr->has_wallpaper = fb_has_wallpaper;
 
     api_ptr->scroll_rect = fb_scroll_rect;
     api_ptr->blit = fb_blit;

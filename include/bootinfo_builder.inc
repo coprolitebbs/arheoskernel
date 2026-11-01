@@ -36,8 +36,6 @@ build_boot_info:
     mov ax,[pitch]
     mov [edi+BOOT_PITCH],eax
 
-    call newline
-
     xor eax,eax
     mov ax,[screen_width]
     mov dword [edi+BOOT_WIDTH],eax
@@ -69,7 +67,7 @@ build_boot_info:
 
     mov dword [edi+BOOT_FS_INFO],FSINFO_ADDR
 
-    mov dword [edi+BOOT_MODULE_COUNT],3
+    mov dword [edi+BOOT_MODULE_COUNT],5
     mov dword [edi+BOOT_MODULE_TABLE],MODULES_ADDR
 
     mov dword [edi+BOOT_CMDLINE],0
@@ -91,6 +89,8 @@ build_boot_info:
 
 ;build_modules_info
 
+;build_modules_info
+
 build_modules_info:
     push ds
     push es
@@ -100,11 +100,15 @@ build_modules_info:
     xor ax,ax
     mov es,ax
 
-    ;Модуль 0 : драйвер framebuffer
 
+
+    ;Модуль 0 : драйвер framebuffer
     mov di,MODULES_ADDR
 
-    mov dword [es:di + MODULE_START],0x30000
+    xor eax,eax
+    mov ax,[fb_driver_seg]
+    shl eax,4
+    mov [es:di + MODULE_START],eax
 
     mov eax,[fb_driver_size]
     mov [es:di + MODULE_SIZE],eax
@@ -113,14 +117,55 @@ build_modules_info:
 
     mov di,MODULES_ADDR + MODULE_NAME
     mov si,fb_driver_filename
-
     call copy_string
 
-    ;Модуль 1 : драйвер файловой системы FAT12
 
+
+    ;Модуль 1 : драйвер блочных устройств
     mov di,MODULES_ADDR + MODULE_INFO_SIZE
 
-    mov dword [es:di + MODULE_START],0x40000
+    xor eax,eax
+    mov ax,[block_driver_seg]
+    shl eax,4
+    mov [es:di + MODULE_START],eax
+
+    mov eax,[block_driver_size]
+    mov [es:di + MODULE_SIZE],eax
+
+    mov dword [es:di + MODULE_TYPE],MODULE_BLOCKDEVICE_DRIVER
+
+    lea di,[di + MODULE_NAME]
+    mov si,block_driver_filename
+    call copy_string
+
+
+
+    ;Модуль 2 : драйвер USB
+    mov di,MODULES_ADDR + MODULE_INFO_SIZE + MODULE_INFO_SIZE
+
+    xor eax,eax
+    mov ax,[usb_driver_seg]
+    shl eax,4
+    mov [es:di + MODULE_START],eax
+
+    mov eax,[usb_driver_size]
+    mov [es:di + MODULE_SIZE],eax
+
+    mov dword [es:di + MODULE_TYPE],MODULE_USB_DRIVER
+
+    lea di,[di + MODULE_NAME]
+    mov si,usb_driver_filename
+    call copy_string
+
+
+
+    ;Модуль 3 : драйвер файловой системы FAT12
+    mov di,MODULES_ADDR + MODULE_INFO_SIZE + MODULE_INFO_SIZE + MODULE_INFO_SIZE
+
+    xor eax,eax
+    mov ax,[fat12_driver_seg]
+    shl eax,4
+    mov [es:di + MODULE_START],eax
 
     mov eax,[fat12_driver_size]
     mov [es:di + MODULE_SIZE],eax
@@ -131,11 +176,15 @@ build_modules_info:
     mov si,fat12_driver_filename
     call copy_string
 
-    ;Модуль 2 : драйвер файловой системы EXT2
 
-    mov di,MODULES_ADDR + MODULE_INFO_SIZE + MODULE_INFO_SIZE
 
-    mov dword [es:di + MODULE_START],0x50000
+    ;Модуль 4 : драйвер файловой системы EXT2
+    mov di,MODULES_ADDR + MODULE_INFO_SIZE + MODULE_INFO_SIZE + MODULE_INFO_SIZE + MODULE_INFO_SIZE
+
+    xor eax,eax
+    mov ax,[ext2_driver_seg]
+    shl eax,4
+    mov [es:di + MODULE_START],eax
 
     mov eax,[ext2_driver_size]
     mov [es:di + MODULE_SIZE],eax
@@ -153,6 +202,8 @@ build_modules_info:
 
     ret
 
+
+
 copy_string:
 
 .next:
@@ -166,8 +217,31 @@ copy_string:
 
     ret
 
+
+
+
+
+
 ;Variables
 
 fb_driver_size     dd 0
 fat12_driver_size  dd 0
 ext2_driver_size   dd 0
+block_driver_size  dd 0
+usb_driver_size    dd 0
+
+;kernel_size_pm       dd 0
+;kernel_inode         dw 0
+;fb_inode             dw 0
+;block_inode          dw 0
+;fat12_inode          dw 0
+;ext2_inode           dw 0
+;drive                db 0
+;cluster              dw 0
+
+;Динамическое размещение модулей (единица = параграф, 16 байт)
+;module_next_segment  dd 0x3000       ; стартовый сегмент fb_driver (phys 0x30000)
+;fb_driver_seg        dw 0
+;block_driver_seg     dw 0
+;fat12_driver_seg     dw 0
+;ext2_driver_seg      dw 0

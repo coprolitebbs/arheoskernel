@@ -22,7 +22,7 @@
 #define SYS_EXIT 		    3
 #define SYS_YIELD 		    4
 #define SYS_DRAW_STRING     5
-#define SYS_DRAW_CHAR    6
+#define SYS_DRAW_CHAR       6
 #define SYS_GET_FB_INFO     7
 #define SYS_ALLOC_PAGE      8
 #define SYS_FREE_PAGE       9
@@ -37,8 +37,8 @@
 #define SYS_RMDIR          17
 #define SYS_STAT           18
 #define SYS_SEEK           19
+#define SYS_RENAME         20
 
-#define SYS_CLEAR_SCREEN   20
 //#define SYS_DRAW_CHAR      21
 
 #define SYS_SPAWN          31
@@ -66,6 +66,14 @@
 #define SYS_GET_CONSOLE_GEOMETRY  55
 #define SYS_SCROLL_RECT           56
 #define SYS_FB_BLIT               57
+#define SYS_CLEAR_SCREEN          58
+#define SYS_CLIPBOARD             59
+
+
+//реестр USB устройств
+#define SYS_USB_COUNT             60   //-> eax = число устройств
+#define SYS_USB_GET_DEV           61   //ebx = idx, ecx = usb_dev_info_t*
+#define SYS_GET_CURSOR_POS        62
 
 #define SYS_HALT_OS               99
 
@@ -81,6 +89,11 @@
 
 #define TTY_DEFAULT    (TTY_ECHO)
 
+/* op-коды для SYS_CLIPBOARD (ebx = op, ecx = buf, edx = size) */
+#define CLIP_OP_GET_SIZE   0   /* ecx=edx=0 ; -> eax = размер буфера обмена */
+#define CLIP_OP_GET        1   /* ecx=buf, edx=max; -> eax = скопировано, буфер обрезан */
+#define CLIP_OP_SET        2   /* ecx=buf, edx=size; -> eax = 0 */
+#define CLIP_OP_CLEAR      3   /* -> eax = 0 */
 
 
 #endif

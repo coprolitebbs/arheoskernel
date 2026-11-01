@@ -18,6 +18,7 @@
 KERNEL_SEG   equ 0x2000
 INDIRECT_SEG equ 0x1800
 
+;--- вставить вместо существующего disk_read_sectors ---
 disk_read_sectors:
     push bx
     push cx
@@ -41,9 +42,6 @@ disk_read_sectors:
     ret
 
 
-
-;Чтение одного сектора по LBA с повторными попытками
-;AX = LBA, ES:BX = destination
 disk_read_sector:
     push ax
     push bx
@@ -51,84 +49,78 @@ disk_read_sector:
     push dx
     push si
     push di
-
-    mov di, 5               ; счётчик попыток в регистре, НЕ на стеке
-
-.retry_loop:
-    push ax
-    push bx
-    push cx
-    push dx
+    push es
     push ds
+    push bp
+    mov bp, sp
 
-    ; --- LBA -> CHS ---
+    ; Сохранить destination (ES:BX), куда потом копировать
+    mov [cs:fdc_dest_es], es
+    mov [cs:fdc_dest_bx], bx
+
+    ; LBA -> CHS
     xor dx, dx
     div word [cs:spt]
     inc dx
-    mov cl, dl              ; CL = sector (1-based)
-
+    mov cl, dl
     xor dx, dx
     div word [cs:heads]
-    mov ch, al              ; CH = cylinder low
-    mov dh, dl              ; DH = head
-
+    mov ch, al
+    mov dh, dl
     mov al, ah
     and al, 0x03
     shl al, 6
-    or  cl, al              ; CL[6:7] = cylinder high
+    or cl, al
 
+    ; Читаем всегда в 0x0000:0x1000 — фиксированный bounce,
+    ; в первом 64KB, никакой границы не пересекает
+    push ax             ; сохранить LBA low (для диагностики)
+    xor ax, ax
+    mov es, ax
+    mov bx, 0x1000
+    pop ax
     mov dl, [cs:drive]
     mov ah, 0x02
     mov al, 1
-
-    xor si, si
-    mov ds, si              ; DS = 0 для надёжности BIOS
-
     int 0x13
-    jc .read_error
+    jc .fail
 
-    ; Успех
+    ; Копируем 512 байт из 0x1000 в ES:BX
+    xor ax, ax
+    mov ds, ax
+    mov si, 0x1000
+    mov ax, [cs:fdc_dest_es]
+    mov es, ax
+    mov di, [cs:fdc_dest_bx]
+    mov cx, 256
+    cld
+    rep movsw
+
+    mov sp, bp
+    pop bp
     pop ds
+    pop es
+    pop di
+    pop si
     pop dx
     pop cx
     pop bx
     pop ax
-    jmp .success_exit
-
-.read_error:
+    clc
+    ret
+.fail:
+    pusha
+    mov al, '!'
+    call debug_char
+    mov al, ah
+    call screen_hex_byte
+    mov al, ' '
+    call debug_char
+    popa
+    mov sp, bp
+    pop bp
     pop ds
-    pop dx
-    pop cx
-    pop bx
-    pop ax
-
-    dec di
-    jz .fail_exit
-
-    ; --- Reset и пауза ---
-    push ax
-    push dx
-    mov ah, 0x00
-    mov dl, [cs:drive]
-    int 0x13
-    pop dx
-    pop ax
-
-    ; --- Пауза ~50-100 мс (вложенный цикл, 1 внешняя итерация ≈ 4 мс на 100 МГц) ---
-    push bx
-    push cx
-    mov bx, 20
-.pause_outer:
-    xor cx, cx
-.pause_inner:
-    loop .pause_inner
-    dec bx
-    jnz .pause_outer
-    pop cx
-    pop bx
-
-    jmp .retry_loop
-.fail_exit:
+    pop es
     pop di
     pop si
     pop dx
@@ -138,15 +130,6 @@ disk_read_sector:
     stc
     ret
 
-.success_exit:
-    pop di
-    pop si
-    pop dx
-    pop cx
-    pop bx
-    pop ax
-    clc
-    ret
 
 
 ;fat12_find_file
@@ -191,12 +174,25 @@ fat12_find_file:
     jnz .search
 
 .not_found:
+    pusha
+    push es
+    mov bx, 0x8000
+    mov es, bx
+    xor bx, bx
+    mov cx, 11
+.dbg_loop:
+    mov al, [es:bx]
+    call screen_hex_byte
+    mov al, ' '
+    call debug_char
+    inc bx
+    loop .dbg_loop
+    pop es
+    popa
     pop es
     pop di
-    ;pop dx
     pop bx
     stc
-
     ret
 
 .found:
@@ -302,6 +298,7 @@ fat12_load_file:
     push cx
     push dx
     push si
+    push ds
 ;ищем файл
     push cs
     pop ds
@@ -316,12 +313,30 @@ fat12_load_file:
     mov ax,[cs:load_cluster]
     ;cluster -> LBA
     call fat12_cluster_to_lba
+    ; --- debug ---
+    ;push ax
+    ;mov al, '['
+    ;call debug_char
+    ;pop ax
+    ;push ax
+    ;call debug_hex_word
+    ;pop ax
+    ;mov al, ']'
+    ;call debug_char
+    ; ------------
     ;Перед чтением BX всегда должен быть равен 0, чтобы BIOS писал строго в начало ES
     xor bx, bx
     ;читаем один кластер
     mov cx,[cs:spc]
     call disk_read_sectors
     jc .error
+
+    ; ---- прогресс: точка за кластер ----
+    ;push ax
+    ;mov al, '.'
+    ;call debug_char
+    ;pop ax
+
     ;переходим к следующему кластеру
     mov ax,[cs:load_cluster]
     call fat12_next_cluster
@@ -340,6 +355,7 @@ fat12_load_file:
     jmp .load_next
 
 .done:
+    pop ds
     pop si
     pop dx
     pop cx
@@ -353,6 +369,7 @@ fat12_load_file:
 
 
 .error:
+    pop ds
     pop si
     pop dx
     pop cx
@@ -419,6 +436,12 @@ fat12_load_kernel_high:
     mov cx, [cs:spc]
     call disk_read_sectors
     jc .error
+
+    ; ---- прогресс ----
+    ;push eax
+    ;mov al, '+'
+    ;call debug_char
+    ;pop eax
 
     ;Вычисляем размер кластера в байтах (SectorsPerCluster * 512)
     mov ax, [cs:spc]
@@ -652,4 +675,5 @@ load_cluster dw 0
 ;kernel_size    dd 0
 current_file_size dd 0
 kernel_load_offset dd 0
-
+fdc_dest_es     dw 0
+fdc_dest_bx     dw 0

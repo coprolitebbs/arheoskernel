@@ -53,6 +53,7 @@ typedef struct{
     int          driver_fd;// Реальный внутренний дескриптор файла внутри драйвера ФС
     uint32_t     flags;    // Флаги доступа (чтение/запись)
     bool         used;
+    uint32_t nop;
 } vfs_file_t;
 
 extern vfs_file_t vfs_file_table[VFS_MAX_OPEN_FILES];
@@ -69,6 +70,7 @@ int vfs_readdir(int vfs_fd, fs_dirent_t *entry);
 int vfs_touch(const char *path);
 int vfs_mkdir(const char *path);
 int vfs_unlink(const char *path);
+int vfs_rename(const char *oldpath, const char *newpath);
 int vfs_rmdir(const char *path);
 int vfs_stat(const char *path, fs_stat_t *st);
 void vfs_resolve_relative_path(const char *user_path, char *out_absolute_path);

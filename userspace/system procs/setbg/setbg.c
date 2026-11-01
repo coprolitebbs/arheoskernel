@@ -68,7 +68,7 @@ int main(int argc, char *argv[]){
     printf("Decoding wallpaper resource: %s...\n", filepath);
 
     //Загружаем TGA с передачей выбранного численного режима упаковки
-    uint8_t *wp_buffer = load_tga_to_buffer(filepath, scr_width, scr_height, scr_bpp, scr_pitch, mode);
+    uint8_t *wp_buffer = load_tga_to_buffer(filepath, scr_width, scr_height, scr_bpp, scr_pitch, mode,nullptr);
     if (!wp_buffer){
         printf("setbg: encoding crash or missing TGA file: %s\n", filepath);
         return -1;

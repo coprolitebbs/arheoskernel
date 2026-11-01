@@ -32,8 +32,9 @@ int ext2_free_single_block(ext2_volume_t *vol, uint32_t block_no){
     if (block_no == 0) return 0;
 
     //Отсекаем метаданные группы 0 (блок 1 = SB, 2 = BGDT при block_size 1024)
-    if (block_no == 1 || block_no == 2) return FS_CORRUPTED;
-    if (block_no < vol->sb.s_first_data_block) return FS_CORRUPTED;
+    //if (block_no == 1 || block_no == 2) return FS_CORRUPTED;
+    //if (block_no < vol->sb.s_first_data_block) return FS_CORRUPTED;
+    if (vol->sb.s_first_data_block == 1 && (block_no == 1 || block_no == 2)) return FS_CORRUPTED;
 
     uint32_t rel = block_no - vol->sb.s_first_data_block;
     uint32_t group = rel / vol->sb.s_blocks_per_group;
@@ -159,20 +160,25 @@ int ext2_truncate_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *ino
     uint32_t bgdt_lba = vol->partition_start_lba + (bgdt_block * vol->sectors_per_block);
     uint32_t bgdt_size_bytes = vol->groups_count * sizeof(ext2_bg_desc_t);
     uint32_t bgdt_sectors = (bgdt_size_bytes + 512 - 1) / 512;
-    ext2_disk_write_sectors(bgdt_lba, bgdt_sectors, vol->bg_desc_table);
+    ext2_disk_write_sectors_via(vol, bgdt_lba, bgdt_sectors, vol->bg_desc_table);
 
     uint32_t sb_lba = vol->partition_start_lba + 2;
     uint8_t *sb_save_buf = (uint8_t *)api_ptr->malloc_ptr(4096);
     if (sb_save_buf){
-        if (ext2_disk_read_sectors(sb_lba, 2, sb_save_buf) == FS_OK){
+        if (ext2_disk_read_sectors_via(vol, sb_lba, 2, sb_save_buf) == FS_OK){
             memcpy(sb_save_buf, &vol->sb, sizeof(ext2_superblock_t));
-            ext2_disk_write_sectors(sb_lba, 2, sb_save_buf);
+            ext2_disk_write_sectors_via(vol, sb_lba, 2, sb_save_buf);
         }
         api_ptr->free_ptr(sb_save_buf);
     }
 
     return FS_OK;
 }
+
+
+
+
+
 
 
 
@@ -203,7 +209,13 @@ int ext2_disk_read_sectors(uint32_t lba, uint32_t count, void *buf){
         }
 
         // Проверяем на таймаут или бит ошибки ERR (бит 0)
-        if (timeout == 0 || (status & 0x01)) return FS_IO_ERROR;
+        if (timeout == 0 || (status & 0x01)){
+                if (inb(0x1F7) & 0x08) {                 // DRQ залип
+                    __asm__ __volatile__("cld");
+                    for (int i = 0; i < 256; i++) inw(0x1F0);
+                }
+                return FS_IO_ERROR;
+        }
 
         // Обязательный сброс флага направления перед чтением строк портов
         __asm__ __volatile__("cld");
@@ -217,23 +229,43 @@ int ext2_disk_read_sectors(uint32_t lba, uint32_t count, void *buf){
     return FS_OK;
 }
 
-
+int ext2_disk_read_sectors_via(ext2_volume_t *vol, uint32_t lba, uint32_t count, void *buf){
+    if (!vol) return FS_IO_ERROR;
+    int r;
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    if (api_ptr->block_device_driver_enabled && api_ptr->block){
+        //uint32_t ppp = vol->drive;
+        r = api_ptr->block->read(vol->drive, (uint64_t)lba, count, buf);
+    } else {
+        r = ext2_disk_read_sectors(lba, count, buf);
+    }
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+    return r;
+}
 
 
 int ext2_read_block(ext2_volume_t *vol, uint32_t block, void *buf){
     if (!vol || !vol->mounted || block == 0) return FS_IO_ERROR;
+
     uint32_t lba = vol->partition_start_lba + (block * vol->sectors_per_block);
 
     int res;
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
-    res = ext2_disk_read_sectors(lba, vol->sectors_per_block, buf);
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
 
+    if (api_ptr->block_device_driver_enabled && api_ptr->block){
+        //uint32_t ppp = vol->drive;
+        res = api_ptr->block->read(vol->drive, (uint64_t)lba, vol->sectors_per_block, buf);
+    } else {
+        res = ext2_disk_read_sectors(lba, vol->sectors_per_block, buf);
+    }
+
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
     return res;
 }
 
 
 int ext2_read_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *out_inode){
+    //vol->drive = 0;
     if (!vol || inode_no == 0 || !out_inode) return FS_IO_ERROR;
 
     uint32_t inodes_per_group = vol->sb.s_inodes_per_group;
@@ -254,21 +286,32 @@ int ext2_read_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *out_ino
 
     uint32_t target_lba = (uint32_t)inode_table_start_lba + (uint32_t)sector_offset;
 
-    uint8_t *sector_buf = (uint8_t *)api_ptr->malloc_ptr(4096);
+    //uint8_t *sector_buf = (uint8_t *)api_ptr->malloc_ptr(4096);
+    //uint8_t sector_buf[4096];
+    uint8_t sector_buf[512] __attribute__((aligned(4)));
     if (!sector_buf) return FS_IO_ERROR;
 
+    int r = FS_IO_ERROR;
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
-    int r = ext2_disk_read_sectors(target_lba, 1, sector_buf);
+    //vol->drive = 0;
+    if (api_ptr->block_device_driver_enabled && api_ptr->block){
+        //блок-драйвер знает про транспорт
+        //vol->drive = 0;
+        //uint32_t ppp = 0;//vol->drive;
+        r = api_ptr->block->read(vol->drive, (uint64_t)target_lba, 1, sector_buf);
+    } else {
+        r = ext2_disk_read_sectors(target_lba, 1, sector_buf);
+    }
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
 
     if (r != FS_OK) {
-        api_ptr->free_ptr(sector_buf);
+        //api_ptr->free_ptr(sector_buf);
         return r;
     }
 
     memcpy(out_inode, sector_buf + offset_in_sector, sizeof(ext2_inode_t));
 
-    api_ptr->free_ptr(sector_buf);
+    //api_ptr->free_ptr(sector_buf);
     return FS_OK;
 }
 
@@ -321,24 +364,35 @@ int ext2_disk_write_sectors(uint32_t lba, uint32_t count, const void *buf){
     return FS_OK;
 }
 
-
-
-
-int ext2_write_block(ext2_volume_t *vol, uint32_t block, const void *buf) {
-    if (!vol || !vol->mounted || block == 0 || !buf) return FS_IO_ERROR;
-
-    //Если аллокатор пытается писать в системную область группы 0
-    if (block == 1 || block == 2) {
-        return FS_ACCESS_DENIED; // Возвращаем ошибку доступа вместо разрушения диска
+int ext2_disk_write_sectors_via(ext2_volume_t *vol, uint32_t lba, uint32_t count, const void *buf){
+    if (!vol) return FS_IO_ERROR;
+    int r;
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    if (api_ptr && api_ptr->block_device_driver_enabled && api_ptr->block){
+        r = api_ptr->block->write(vol->drive, (uint64_t)lba, count, buf);
+    } else {
+        r = ext2_disk_write_sectors(lba, count, buf);
     }
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+    return r;
+}
 
-    uint32_t start_lba = (uint32_t)vol->partition_start_lba;
-    uint32_t sec_per_blk = (uint32_t)vol->sectors_per_block;
 
-    uint32_t lba = start_lba + (block * sec_per_blk);
+int ext2_write_block(ext2_volume_t *vol, uint32_t block, const void *buf){
+    if (!vol || !vol->mounted || block == 0 || !buf) return FS_IO_ERROR;
+    if (vol->sb.s_first_data_block == 1 && (block == 1 || block == 2)) return FS_CORRUPTED;
+
+    uint32_t lba = vol->partition_start_lba + (block * vol->sectors_per_block);
+
     int res;
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
-    res = ext2_disk_write_sectors(lba, sec_per_blk, buf);
+
+    if (api_ptr->block_device_driver_enabled && api_ptr->block){
+        res = api_ptr->block->write(vol->drive, (uint64_t)lba, vol->sectors_per_block, buf);
+    } else {
+        res = ext2_disk_write_sectors(lba, vol->sectors_per_block, buf);
+    }
+
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
     return res;
 }
@@ -366,14 +420,29 @@ int ext2_write_inode(ext2_volume_t *vol, uint32_t inode_no, const ext2_inode_t *
     uint32_t target_lba = inode_table_start_lba + sector_offset;
 
     uint8_t sector_buf[512] __attribute__((aligned(4)));
+
+    int r = FS_IO_ERROR;
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
-    int r = ext2_disk_read_sectors(target_lba, 1, sector_buf);
+    if (api_ptr->block_device_driver_enabled && api_ptr->block){
+        //блок-драйвер знает про транспорт
+        //uint32_t ppp = 0;//vol->drive
+        r = api_ptr->block->read(vol->drive, (uint64_t)target_lba, 1, sector_buf);
+    } else {
+        r = ext2_disk_read_sectors(target_lba, 1, sector_buf);
+    }
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
     if (r != FS_OK) return r;
 
     memcpy(sector_buf + offset_in_sector, in_inode, sizeof(ext2_inode_t));
 
-    return ext2_disk_write_sectors(target_lba, 1, sector_buf);
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    if (api_ptr->block_device_driver_enabled && api_ptr->block){
+        r = api_ptr->block->write(vol->drive, (uint64_t)target_lba, 1, sector_buf);
+    } else {
+        r = ext2_disk_write_sectors(target_lba, 1, sector_buf);
+    }
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+    return r;
 }
 
 
@@ -451,7 +520,8 @@ int ext2_alloc_block(ext2_volume_t *vol, uint32_t group, uint32_t *out_block_no)
     uint32_t bgdt_size_bytes = vol->groups_count * sizeof(ext2_bg_desc_t);
     uint32_t bgdt_sectors = (bgdt_size_bytes + 512 - 1) / 512;
 
-    r = ext2_disk_write_sectors(bgdt_lba, bgdt_sectors, vol->bg_desc_table);
+    //r = ext2_disk_write_sectors(bgdt_lba, bgdt_sectors, vol->bg_desc_table);
+    r = ext2_disk_write_sectors_via(vol, bgdt_lba, bgdt_sectors, vol->bg_desc_table);
     if (r != FS_OK) return r;
 
     // Модифицируем общий счетчик свободных блоков в суперблоке (RAM)
@@ -464,7 +534,7 @@ int ext2_alloc_block(ext2_volume_t *vol, uint32_t group, uint32_t *out_block_no)
     uint8_t *sb_save_buf = (uint8_t *)api_ptr->malloc_ptr(4096);
     if (!sb_save_buf) return FS_IO_ERROR;
 
-    r = ext2_disk_read_sectors(sb_lba, 2, sb_save_buf);
+    r = ext2_disk_read_sectors_via(vol, sb_lba, 2, sb_save_buf);
     if (r != FS_OK) {
         api_ptr->free_ptr(sb_save_buf);
         return r;
@@ -472,7 +542,7 @@ int ext2_alloc_block(ext2_volume_t *vol, uint32_t group, uint32_t *out_block_no)
 
     memcpy(sb_save_buf, &vol->sb, sizeof(ext2_superblock_t));
 
-    r = ext2_disk_write_sectors(sb_lba, 2, sb_save_buf);
+    r = ext2_disk_write_sectors_via(vol, sb_lba, 2, sb_save_buf);
     api_ptr->free_ptr(sb_save_buf);
     if (r != FS_OK) return r;
 
@@ -545,7 +615,7 @@ int ext2_alloc_inode(ext2_volume_t *vol, uint32_t group, uint32_t *out_inode_no)
     uint32_t bgdt_size_bytes = vol->groups_count * sizeof(ext2_bg_desc_t);
     uint32_t bgdt_sectors = (bgdt_size_bytes + 512 - 1) / 512;
 
-    r = ext2_disk_write_sectors(bgdt_lba, bgdt_sectors, vol->bg_desc_table);
+    r = ext2_disk_write_sectors_via(vol, bgdt_lba, bgdt_sectors, vol->bg_desc_table);
     if (r != FS_OK) return r;
 
     // Обновляем общий счетчик свободных инодов в суперблоке тома
@@ -557,7 +627,7 @@ int ext2_alloc_inode(ext2_volume_t *vol, uint32_t group, uint32_t *out_inode_no)
     uint8_t *sb_save_buf = (uint8_t *)api_ptr->malloc_ptr(4096);
     if (!sb_save_buf) return FS_IO_ERROR;
 
-    r = ext2_disk_read_sectors(sb_lba, 2, sb_save_buf);
+    r = ext2_disk_read_sectors_via(vol, sb_lba, 2, sb_save_buf);
     if (r != FS_OK) {
         api_ptr->free_ptr(sb_save_buf);
         return r;
@@ -565,7 +635,7 @@ int ext2_alloc_inode(ext2_volume_t *vol, uint32_t group, uint32_t *out_inode_no)
 
     memcpy(sb_save_buf, &vol->sb, sizeof(ext2_superblock_t));
 
-    r = ext2_disk_write_sectors(sb_lba, 2, sb_save_buf);
+    r = ext2_disk_write_sectors_via(vol, sb_lba, 2, sb_save_buf);
     api_ptr->free_ptr(sb_save_buf);
     if (r != FS_OK) return r;
 

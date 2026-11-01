@@ -19,9 +19,21 @@
 debug_char:
     push ax
     push bx
+    push cx          ; ← добавить
+    push dx          ; ← добавить
+    push si          ; ← добавить
+    push di          ; ← добавить
+    push es          ; ← добавить
+    push ds          ; ← добавить
     mov ah, 0x0E
-    mov bx, 0x0007          ;page 0, light gray on black
+    mov bx, 0x0007
     int 0x10
+    pop ds           ; ← добавить
+    pop es           ; ← добавить
+    pop di           ; ← добавить
+    pop si           ; ← добавить
+    pop dx           ; ← добавить
+    pop cx           ; ← добавить
     pop bx
     pop ax
     ret
@@ -219,14 +231,14 @@ dump:
 	ret
 
 
-dump_fb:
+dump_ext2:
 	push si
 	;Вывод первых 16 байт
     mov dx, 0xE9
     mov si, msg_debug
     call print_debug
     push ds
-    mov ax, 0x3000
+    mov ax, [cs:ext2_driver_seg]
     mov ds, ax
     mov si, 0
     mov cx, 16
@@ -254,12 +266,39 @@ dump_fat12:
     mov si, msg_debug
     call print_debug
     push ds
-    mov ax, 0x3600
+    mov ax, [cs:fat12_driver_seg]
     mov ds, ax
     mov si, 0
     mov cx, 16
 
 dump3:
+    lodsb
+    call debug_hex_byte
+    mov al, ' '
+    out dx, al
+    loop dump3
+    pop ds
+    mov al, 13
+    out dx, al
+    mov al, 10
+    out dx, al
+    pop si
+
+	ret
+
+dump_block:
+	push si
+	;Вывод первых 16 байт
+    mov dx, 0xE9
+    mov si, msg_debug
+    call print_debug
+    push ds
+    mov ax, [cs:block_driver_seg]
+    mov ds, ax
+    mov si, 0
+    mov cx, 64
+
+dump4:
     lodsb
     call debug_hex_byte
     mov al, ' '
@@ -307,9 +346,21 @@ newline:
 screen_print_char:
     push ax
     push bx
+    push cx
+    push dx
+    push si
+    push di
+    push es
+    push ds
     mov ah, 0x0E
-    mov bx, 0x0007  ; Страница 0, цвет белый
+    mov bx, 0x0007
     int 0x10
+    pop ds
+    pop es
+    pop di
+    pop si
+    pop dx
+    pop cx
     pop bx
     pop ax
     ret

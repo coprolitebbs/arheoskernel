@@ -29,26 +29,7 @@
 unsigned int lfb_addr;
 unsigned int pitch;
 unsigned int bytes_pp;
-uint32_t back_buffer[1024 * 768];
 
-
-void back_buffer_draw_pixel(int x, int y, uint32_t color){
-    if (x >= 0 && x < 1024 && y >= 0 && y < 768){
-        back_buffer[y * 1024 + x] = color;
-    }
-}
-
-
-void back_buffer_screen_flip(void){
-    volatile uint32_t* dest = (volatile uint32_t*)fb_phys_addr;//0xDF000000;
-    uint32_t* src = (uint32_t*)back_buffer;
-    //Нужно скопировать (1024 * 768 * 2) байт
-    //В одном uint32_t содержится 4 байта
-    //Следовательно, итераций цикла должно быть: (1024 * 768 * 2) / 4 = 393216
-    for (uint32_t i = 0; i < 393216; i++){
-        dest[i] = src[i];
-    }
-}
 
 //Рисование символа
 //c — байт в CP866. Для ASCII (0x00..0x7F) совпадает с codepoint
@@ -264,6 +245,85 @@ void fill_screen(unsigned char r, unsigned char g, unsigned char b) {
 }
 
 
+
+//Низкоуровневая заливка прямоугольника через LFB из boot_info
+//Используется как fallback, когда fb-драйвер ещё не загружен
+static void _fill_rect_raw(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color){
+    if (!boot_info) return;
+    uint32_t scr_w = boot_info->width;
+    uint32_t scr_h = boot_info->height;
+    uint32_t pitch = boot_info->pitch;
+    uint32_t bpp   = boot_info->bpp;
+    uint32_t flags = boot_info->graphics_flags;
+    uint32_t lfb   = boot_info->framebuffer;
+
+    if (bpp == 0 || bpp > 32) bpp = 16;
+    uint32_t bytes_pp = (bpp + 7) / 8;
+
+    //Отсечение по границам экрана
+    if (x >= scr_w || y >= scr_h) return;
+    if (x + w > scr_w) w = scr_w - x;
+    if (y + h > scr_h) h = scr_h - y;
+    if (w == 0 || h == 0) return;
+
+    uint8_t *fb_ptr;
+    if (flags & 0x1){
+        if (lfb == 0) return;
+        fb_ptr = (uint8_t *)lfb;
+    } else {
+        uint32_t addr = graphics_get_fb_virt_addr();
+        if (addr == 0) return;
+        fb_ptr = (uint8_t *)addr;
+    }
+
+    uint32_t color32 = 0;
+    uint16_t color16 = 0;
+    uint8_t  color8  = (uint8_t)(color & 0xFF);
+
+    if (bpp == 16){
+        color16 = (uint16_t)((((color >> 19) & 0x1F) << 11) |
+                             (((color >> 10) & 0x3F) <<  5) |
+                             ( ((color >>  3) & 0x1F)      ));
+    } else if (bpp == 24 || bpp == 32){
+        uint8_t r = (color >> 16) & 0xFF;
+        uint8_t g = (color >>  8) & 0xFF;
+        uint8_t b =  color        & 0xFF;
+        color32 = b | (g << 8) | (r << 16);
+    }
+
+    for (uint32_t row = 0; row < h; row++){
+        uint8_t *line = fb_ptr + (y + row) * pitch + x * bytes_pp;
+        if (bpp == 32){
+            uint32_t *p = (uint32_t *)line;
+            for (uint32_t i = 0; i < w; i++) p[i] = color32;
+        } else if (bpp == 24){
+            for (uint32_t i = 0; i < w; i++){
+                line[0] =  color        & 0xFF;
+                line[1] = (color >>  8) & 0xFF;
+                line[2] = (color >> 16) & 0xFF;
+                line += 3;
+            }
+        } else if (bpp == 16){
+            uint16_t *p = (uint16_t *)line;
+            for (uint32_t i = 0; i < w; i++) p[i] = color16;
+        } else {
+            for (uint32_t i = 0; i < w; i++) line[i] = color8;
+        }
+    }
+}
+
+//Публичная заливка - через fb-драйвер, если он есть, иначе — через raw LFB.
+//Цвет в формате 0x00RRGGBB, как у fb->fill_rect.
+void kernel_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color){
+    if (fb && fb->fill_rect){
+        fb->fill_rect((int)x, (int)y, (int)w, (int)h, color);
+    } else {
+        _fill_rect_raw(x, y, w, h, color);
+    }
+}
+
+
+
 void kernel_draw_char(uint32_t x,uint32_t y,unsigned char c,uint32_t color){
     if(fb && fb->draw_char){
         fb->draw_char(x,y,c,color);
@@ -324,3 +384,4 @@ void kernel_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t color)
         }
     }
 }
+

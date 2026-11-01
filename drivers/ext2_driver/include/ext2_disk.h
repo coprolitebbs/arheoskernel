@@ -29,6 +29,8 @@ int ext2_truncate_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *ino
 
 int ext2_disk_read_sectors(uint32_t lba, uint32_t count, void *buffer);
 int ext2_disk_write_sectors(uint32_t lba, uint32_t count, const void *buf);
+int ext2_disk_read_sectors_via(ext2_volume_t *vol, uint32_t lba, uint32_t count, void *buffer);
+int ext2_disk_write_sectors_via(ext2_volume_t *vol, uint32_t lba, uint32_t count, const void *buf);
 int ext2_read_block(ext2_volume_t *vol, uint32_t block, void *buf);
 int ext2_read_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *out_inode);
 int ext2_write_block(ext2_volume_t *vol, uint32_t block, const void *buf);

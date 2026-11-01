@@ -23,7 +23,7 @@
 #include "lib.h"
 
 #define PAGE_SIZE 4096
-
+#define PCI_HOLE_START 0xC0000000ull
 
 //Структура записи E820 (для совместимости)
 struct e820_entry{
@@ -49,6 +49,8 @@ extern int has_lfb;
 extern size_t total_pages;
 extern size_t free_pages;
 
+extern uint32_t min_addr;
+
 //Инициализация - принять карту памяти из E820 (массив записей и их количество)
 void pmm_init(uint16_t num_entries, struct e820_entry *entries);
 
@@ -57,6 +59,8 @@ void *pmm_alloc_page(void);
 
 //Освободить физическую страницу
 void pmm_free_page(void *addr);
+
+void pmm_free_region(uint32_t addr, uint32_t size);
 
 //Выделить несколько непрерывных страниц (для DMA)
 void *pmm_alloc_pages(size_t count);

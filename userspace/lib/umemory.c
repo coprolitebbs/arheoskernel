@@ -1,49 +1,27 @@
-/*
- * Copyright (C) 2026 ARHeOS by Dmitry H
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <https://www.gnu.org/licenses/>.
- */
-
 #include "../include/umemory.h"
 #include "../include/ustd.h"
 #include "../include/syscall.h"
 #include <stddef.h>
 #include <stdint.h>
 
-static u_mem_block_t *u_free_list = NULL;
-
-
+/* ============ низкоуровневые обёртки над syscall ============ */
 
 void* u_alloc_page(void){
     uint32_t ret;
     __asm__ __volatile__(
         "int $0x80"
         : "=a"(ret)
-        : "a"(SYS_ALLOC_PAGE) // Номер вызова SYS_ALLOC_PAGE
+        : "a"(SYS_ALLOC_PAGE)
         : "memory"
     );
     return (void*)ret;
 }
 
-
 int u_free_page(void *addr){
     int ret;
-    // Используем константу SYS_FREE_PAGE через встроенный макрос,
-    // сохраняя ручную атомарную загрузку регистров!
     __asm__ __volatile__(
-        "movl %2, %%eax\n\t"  // Загружаем номер системного вызова (SYS_FREE_PAGE)
-        "movl %1, %%ebx\n\t"  // Загружаем адрес страницы в целевой EBX
+        "movl %2, %%eax\n\t"
+        "movl %1, %%ebx\n\t"
         "int $0x80"
         : "=a"(ret)
         : "r"(addr), "i"(SYS_FREE_PAGE)
@@ -52,96 +30,10 @@ int u_free_page(void *addr){
     return ret;
 }
 
-
-/*
-//Старый вариант
-void* malloc(size_t size){
-    if (size == 0) return NULL;
-    //Выравниваем размер под 4 байта
-    size = (size + 3) & ~3;
-    u_mem_block_t *prev = NULL;
-    u_mem_block_t *cur = u_free_list;
-    //Проверяем список повторного использования блоков
-    while (cur) {
-        if (cur->size >= size) {
-            if (prev) prev->next = cur->next;
-            else u_free_list = cur->next;
-
-            // Вместо арифметики указателей возвращаем чистый явный адрес данных за заголовком
-            uint32_t data_addr = (uint32_t)cur + sizeof(u_mem_block_t);
-            return (void*)data_addr;
-        }
-        prev = cur;
-        cur = cur->next;
-    }
-    //Округляем размер полезного графического буфера до целых физических страниц 4096 байт
-    size_t aligned_user_size = (size + 4095) & ~4095;
-    //Полный объем ОЗУ, запрашиваемый у sbrk: размер дескриптора + выровненный буфер
-    size_t total_allocated_size = sizeof(u_mem_block_t) + aligned_user_size;
-    //Вызываем sbrk. Переменная allocated_region гарантированно получит адрес вроде 0x50000000
-    void *allocated_region = u_sbrk(total_allocated_size);
-    if (!allocated_region || (uint32_t)allocated_region == 0) {
-        return NULL;
-    }
-    //Принудительно интерпретируем начало региона как беззнаковый адрес структуры
-    uint32_t block_base_addr = (uint32_t)allocated_region;
-    u_mem_block_t *block = (u_mem_block_t*)block_base_addr;
-    block->size = aligned_user_size;
-    block->next = NULL;
-    uint32_t final_user_data_pointer = block_base_addr + sizeof(u_mem_block_t);
-    //Возвращаем кристально чистый, беззнаковый адрес (например, строго 0x50000008)
-    return (void*)final_user_data_pointer;
-}
-*/
-
-//Специальный транзакционный аллокатор для тяжелых массивов
-void* malloc(size_t size){
-    if (size == 0) return NULL;
-    uint32_t pages_count = (size + 4095) / 4096;
-    //Выделяем стартовую страницу кучи
-    void *first_page = u_alloc_page();
-    if (!first_page || (uint32_t)first_page == 0) {
-        return NULL;
-    }
-    //Запускаем поштучный запрос остальных страниц
-    for (uint32_t i = 1; i < pages_count; i++){
-        void *next_page = u_alloc_page();
-        //printf("i=%d next_page: %x\n",i,(uint32_t)next_page);
-        uint32_t check_addr = (uint32_t)next_page;
-        if (check_addr == 0) {
-            free_pages(first_page, i * 4096);
-            return NULL;
-        }
-    }
-    return first_page;
-}
-
-
 int get_mem_info(am_mem_info_t *info){
     int ret;
     __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_GET_MEM_INFO), "b"(info) : "memory");
     return ret;
-}
-
-void free(void *ptr){
-    if (!ptr) return;
-    u_mem_block_t *block = ((u_mem_block_t*)ptr) - 1;
-    //Спокойно возвращаем блок в локальный список свободной памяти процесса
-    block->next = u_free_list;
-    u_free_list = block;
-}
-
-void free_pages(void *ptr, size_t size){
-    if (!ptr || size == 0) return;
-    //Вычисляем, сколько страниц ОЗУ занимает этот буфер
-    uint32_t pages_count = (size + 4095) / 4096;
-    uint32_t start_virt = (uint32_t)ptr;
-    //Поочередно отдаем каждую виртуальную страницу обратно ядру через SYS_FREE_PAGE
-    //Ядро сотрет маппинг в VMM и вернет физические блоки в PMM
-    for (uint32_t i = 0; i < pages_count; i++) {
-        uint32_t current_page_addr = start_virt + (i * PAGE_SIZE);
-        u_free_page((void*)current_page_addr);
-    }
 }
 
 void* u_sbrk(int32_t increment){
@@ -155,4 +47,135 @@ void* u_sbrk(int32_t increment){
         : "memory", "ebx"
     );
     return (void*)ret;
+}
+
+/* ============ аллокатор ============ */
+
+/*
+ * Формат блока в памяти:
+ *
+ *     [ u_hdr_t | payload ... ]
+ *      8 байт    size
+ *
+ * hdr.magic == SMALL_MAGIC  →  hdr.info = индекс класса slab
+ *                              размер слота = 16 << hdr.info
+ * hdr.magic == LARGE_MAGIC  →  hdr.info = сколько contiguous-страниц
+ *
+ * Для SMALL-пути базовые страницы держатся в slab-пулах до конца процесса
+ * (переиспользуются через freelist). Для LARGE-пути страницы освобождаются
+ * в PMM при free().
+ */
+
+#define SMALL_MAGIC  0x534D4C42u    /* "SMLB" */
+#define LARGE_MAGIC  0x4C415247u    /* "LARG" */
+
+#define NUM_CLASSES        8
+#define SMALL_MAX_PAYLOAD  2040     /* верхняя граница small-запроса */
+
+typedef struct {
+    uint32_t magic;
+    uint32_t info;
+} u_hdr_t;
+
+typedef struct u_slot {
+    struct u_slot *next;
+} u_slot_t;
+
+/* список свободных слотов для каждого класса (индекс = класс) */
+static u_slot_t *class_free_list[NUM_CLASSES] = {0};
+
+static inline uint32_t slot_size_for(int cls){
+    return 16u << cls;              /* 16, 32, 64, ... 2048 */
+}
+
+/* индекс класса для запроса size, или -1 если нужен LARGE */
+static int class_for(uint32_t size){
+    if (size > SMALL_MAX_PAYLOAD) return -1;
+    uint32_t need = size + (uint32_t)sizeof(u_hdr_t);
+    int cls = 0;
+    while (slot_size_for(cls) < need) cls++;
+    return cls;
+}
+
+/* забирает одну страницу у ядра и нарезает на слоты класса */
+static void refill_class(int cls){
+    uint8_t *page = (uint8_t *)u_alloc_page();
+    if (!page) return;
+    uint32_t ss = slot_size_for(cls);
+    for (uint32_t off = 0; off + ss <= PAGE_SIZE; off += ss){
+        u_slot_t *s = (u_slot_t *)(page + off);
+        s->next = class_free_list[cls];
+        class_free_list[cls] = s;
+    }
+}
+
+void *malloc(size_t size){
+    if (size == 0) return NULL;
+
+    int cls = class_for((uint32_t)size);
+
+    if (cls >= 0){
+        /* ---------- SMALL ---------- */
+        if (class_free_list[cls] == NULL){
+            refill_class(cls);
+            if (class_free_list[cls] == NULL) return NULL;   /* OOM */
+        }
+        u_slot_t *s = class_free_list[cls];
+        class_free_list[cls] = s->next;
+
+        u_hdr_t *h = (u_hdr_t *)s;
+        h->magic = SMALL_MAGIC;
+        h->info  = (uint32_t)cls;
+        return (void *)(h + 1);
+    }
+
+    /* ---------- LARGE ---------- */
+    uint32_t total = (uint32_t)size + (uint32_t)sizeof(u_hdr_t);
+    uint32_t pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (pages == 0) pages = 1;
+
+    uint8_t *base = NULL;
+    for (uint32_t i = 0; i < pages; i++){
+        void *p = u_alloc_page();
+        if (!p){
+            /* откат того, что уже выделили */
+            if (base){
+                for (uint32_t j = 0; j < i; j++)
+                    u_free_page(base + j * PAGE_SIZE);
+            }
+            return NULL;
+        }
+        if (!base) base = (uint8_t *)p;
+    }
+
+    u_hdr_t *h = (u_hdr_t *)base;
+    h->magic = LARGE_MAGIC;
+    h->info  = pages;
+    return (void *)(h + 1);
+}
+
+void free(void *ptr){
+    if (!ptr) return;
+
+    u_hdr_t *h = ((u_hdr_t *)ptr) - 1;
+
+    if (h->magic == SMALL_MAGIC){
+        uint32_t cls = h->info;
+        if (cls >= NUM_CLASSES) return;            /* повреждено — игнорируем */
+        u_slot_t *s = (u_slot_t *)h;
+        s->next = class_free_list[cls];
+        class_free_list[cls] = s;
+        return;
+    }
+
+    if (h->magic == LARGE_MAGIC){
+        uint32_t pages = h->info;
+        uint8_t *base = (uint8_t *)h;
+        for (uint32_t i = 0; i < pages; i++)
+            u_free_page(base + i * PAGE_SIZE);
+        return;
+    }
+
+    /* неизвестный magic — либо double free, либо чужой указатель.
+       молча игнорируем, чтобы не рвать процесс на ровном месте. */
 }

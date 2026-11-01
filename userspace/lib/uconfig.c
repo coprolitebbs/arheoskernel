@@ -82,7 +82,7 @@ static void cfg_trim(char *out, const char *in){
 //Конструктор: открытие файла, проверка ограничений 64Кб и аллокация буфера
 cfg_file_t *cfg_open(const char *path, uint32_t flags, bool use_bufferisation){
     int fd = open(path, flags);
-    if (fd < 0) return NULL;
+    if (fd < 0) {return NULL;}
 
     cfg_file_t *cfg = (cfg_file_t *)malloc(sizeof(cfg_file_t));
     if (!cfg){
@@ -123,7 +123,7 @@ cfg_file_t *cfg_open(const char *path, uint32_t flags, bool use_bufferisation){
                         cfg->file_buffer_ptr = buf;
                         cfg->file_size = (size_t)total_bytes_read;
                     } else {
-                        free_pages(buf, st.size);
+                        free(buf);
                     }
                 }
             }
@@ -154,10 +154,11 @@ void cfg_close(cfg_file_t *cfg_file){
     }
     if (cfg_file->buffer_used && cfg_file->file_buffer_ptr){
         //Честно возвращаем физические страницы менеджеру PMM ядра
-        free_pages(cfg_file->file_buffer_ptr, cfg_file->file_size);
+        free(cfg_file->file_buffer_ptr);
     }
     //Освобождаем память самой структуры
-    free_pages(cfg_file, sizeof(cfg_file_t));
+    //free_pages(cfg_file, sizeof(cfg_file_t));
+    free(cfg_file);
 }
 
 

@@ -1,22 +1,8 @@
- ; Copyright (C) 2026 ARHeOS by Dmitry H
- ;
- ; This program is free software: you can redistribute it and/or modify
- ; it under the terms of the GNU General Public License as published by
- ; the Free Software Foundation, either version 3 of the License, or
- ; (at your option) any later version.
- ;
- ; This program is distributed in the hope that it will be useful,
- ; but WITHOUT ANY WARRANTY; without even the implied warranty of
- ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- ; GNU General Public License for more details.
- ;
- ; You should have received a copy of the GNU General Public License
- ; along with this program. If not, see <https://www.gnu.org/licenses/>.
+; Copyright (C) 2026 ARHeOS by Dmitry H
+; Licensed under GNU GPL v3
 
 BITS 16
 ORG 0x7C00
-
-%define QEMU_DEBUG_PORT 0xE9
 
 start:
     cli
@@ -24,73 +10,71 @@ start:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp, 0x7C00      ;Инициализируем стек Ring 0 на безопасный адрес
+    mov sp, 0x7C00      ; Инициализируем стек строго под MBR
     sti
 
-    ;Маркер [S] - Старт MBR загрузчика
-    ;mov al, 'S'
-    ;call debug_char
+    mov [cs:boot_drive], dl ; Сохраняем номер диска от BIOS (0x80)
 
-    ;Проверка поддержки LBA Расширений BIOS
+    ; Проверка поддержки LBA Расширений BIOS
     mov ah, 0x41
     mov bx, 0x55AA
-    mov dl, 0x80        ;Жесткий диск 0 (C:)
+    mov dl, [cs:boot_drive]
     int 0x13
     jc .no_lba
     cmp bx, 0xAA55
     jne .no_lba
-
-    ;Поддерживается LBA - маркер [L]
     mov byte [cs:lba_supported], 1
-    mov al, 'L'
-    call debug_char
-    jmp .lba_ok
+    jmp .skip_geometry
 
 .no_lba:
     mov byte [cs:lba_supported], 0
-    mov al, 'C'
-    call debug_char
 
-.lba_ok:
-    ;Если LBA не поддерживается, получаем CHS геометрию
-    cmp byte [cs:lba_supported], 1
-    je .skip_geometry
-
-    call get_geometry
+    ; Получаем CHS геометрию, если LBA недоступен
+    mov ah, 0x08
+    mov dl, [cs:boot_drive]
+    int 0x13
     jc .geometry_error
-    jmp .geometry_ok
+
+    mov [cs:heads], dh
+    inc byte [cs:heads]
+    and cl, 0x3F
+    mov [cs:sectors], cl
+    jmp .skip_geometry
+
 .geometry_error:
-    mov word [cs:heads_tmp], 16
-    mov word [cs:sectors_tmp], 63
-.geometry_ok:
+    mov byte [cs:heads], 16
+    mov byte [cs:sectors], 63
 
 .skip_geometry:
-    ;Маркер [R] - Готовы читать Stage2 с диска LBA 1
-    mov al, 'R'
+    mov bx, 0x7E00      ; Буфер назначения Stage2 в памяти (0x0000:0x7E00)
+    mov ax, 1           ; AX = Стартовый логический сектор Stage2 (LBA 1)
+    mov cx, 63          ; Количество секторов для чтения (32256 байт)
+
+.read_loop:
+    push cx             ; Сохраняем счетчик циклов
+    push ax             ; Сохраняем текущий логический сектор
+
+    call read_sectors   ; Читаем строго 1 сектор
+    jc .read_failed
+
+    pop ax              ; Восстанавливаем LBA
+    inc ax              ; Переходим к следующему сектору
+    add bx, 0x0200      ; Сдвигаем буфер на 512 байт вперед
+
+    pop cx              ; Восстанавливаем счетчик циклов
+    loop .read_loop     ; Цикл по всем 63 секторам
+
+    ; =================================================================
+    ; УСПЕХ: Передаем управление Stage 2
+    ; =================================================================
+    mov dl, [cs:boot_drive]
+    jmp 0x0000:0x7E00       ; Прыгаем на выполнение Stage 2
+
+.read_failed:
+    pop ax
+    pop cx
+    mov al, 'F'         ; Выведем 'F', если все попытки чтения провалились
     call debug_char
-
-    mov ax, 0x0000
-    mov es, ax
-    mov bx, 0x7E00      ;ES:BX = 0x0000:0x7E00 (Буфер назначения Stage2)
-
-    mov eax, 1          ;Стартовый LBA сектор Stage2 (сектор 1 жесткого диска)
-    mov cx, 63          ;Количество секторов (8 КБ кода Stage2)
-
-    call read_sectors
-    jnc .read_success
-
-    ;Ошибка чтения - маркер [F]
-    mov al, 'F'
-    call debug_char
-    jmp .boot_error
-
-.read_success:
-    ; Маркер [J] - успешно, передаем управление Stage2 на 0x7E00
-    ;mov al, 'J'
-    call debug_char
-
-    mov dl, 0x80        ;Номер диска передаем в Stage2 через DL
-    jmp 0x0000:0x7E00
 
 .boot_error:
     cli
@@ -98,212 +82,125 @@ start:
     hlt
     jmp .halt_loop
 
-;Подпрограмма получения геометрии CHS
-get_geometry:
-    mov ah, 0x08
-    mov dl, 0x80
-    int 0x13
-    jc .default
-    mov [cs:heads], dh
-    inc byte [cs:heads]
-    mov [cs:sectors], cl
-    and byte [cs:sectors], 0x3F
-    cmp byte [cs:heads], 0
-    je .default
-    cmp byte [cs:sectors], 0
-    je .default
-    ;heads_tmp/sectors_tmp теперь не нужны для CHS, но оставим для совместимости
-    mov al, [cs:heads]
-    mov [cs:heads_tmp], al
-    mov al, [cs:sectors]
-    mov [cs:sectors_tmp], al
-    clc
-    ret
-.default:
-    mov byte [cs:heads], 16
-    mov byte [cs:sectors], 63
-    mov word [cs:heads_tmp], 16
-    mov word [cs:sectors_tmp], 63
-    clc
-    ret
-;Чтение секторов (LBA или CHS)
-;Чтение секторов. Вход: AX = LBA, CX = количество, ES:BX = буфер.
-;Возврат: CF=0 успех / CF=1 провал.
+; Функция чтения одного сектора (Отремонтированная и изолированная)
 read_sectors:
     push ax
     push bx
     push cx
     push dx
-    push es
 
-    ;Пытаемся LBA, если BIOS рапортовал поддержку
     cmp byte [cs:lba_supported], 1
-    jne .try_chs
+    jne .try_chs_mode
 
-    call .lba_read
-    jnc .done
+    ; --- Безопасный LBA Режим (3 попытки чтения со сбросом) ---
+    mov [cs:dap_lba_low], ax
+    mov [cs:dap_buffer_off], bx
+    mov byte [cs:retry_count], 3
 
-    ;BIOS соврал. Сбрасываем флаг навсегда и переключаемся на CHS.
+.lba_retry_loop:
+    mov ah, 0x42
+    mov dl, [cs:boot_drive]
+    mov si, dap_packet
+    int 0x13
+    jnc .done               ; Если прочиталось — уходим на выход
+
+    ; Сброс дискового контроллера при ошибке LBA
+    xor ax, ax
+    mov dl, [cs:boot_drive]
+    int 0x13
+
+    dec byte [cs:retry_count]
+    jnz .lba_retry_loop
+
+    ; Если LBA окончательно отказал, аварийно пробуем CHS
     mov byte [cs:lba_supported], 0
-    call get_geometry
 
-.try_chs:
-    call .chs_read
+.try_chs_mode:
+    ; --- Исправленный CHS Режим под спецификацию IBM PC ---
+    mov si, ax              ; SI = Текущий LBA сектор
+    xor dx, dx
+    movzx cx, byte [cs:sectors]
+    div cx
+    inc dl
+    mov [cs:chs_s], dl      ; Сохраняем точный 1-based номер сектора
+
+    xor dx, dx
+    movzx cx, byte [cs:heads]
+    div cx                  ; AX = Cylinder, DX = Head
+
+    mov dh, dl              ; DH = Head
+    mov ch, al              ; CH = Cylinder low
+    mov cl, [cs:chs_s]      ; CL = Восстанавливаем чистый сектор
+    shl ah, 6
+    or cl, ah               ; Подмешиваем старшие биты цилиндра в CL
+
+    mov byte [cs:retry_count], 3
+
+.chs_retry_loop:
+    mov dl, [cs:boot_drive]
+    mov ax, 0x0201          ; AH=02 (Read), AL=1 сектор
+    int 0x13
     jnc .done
-    stc
-    jmp .done
+
+    ; Безопасный сброс контроллера (БЕЗ затирания регистров CX/DX)
+    push ax
+    push dx
+    xor ax, ax
+    mov dl, [cs:boot_drive]
+    int 0x13
+    pop dx
+    pop ax
+
+    dec byte [cs:retry_count]
+    jnz .chs_retry_loop
+    stc                     ; Если и CHS не помог — взводим флаг ошибки Carry Flag
 
 .done:
-    pop es
     pop dx
     pop cx
     pop bx
     pop ax
     ret
 
-; --- LBA read (INT 13h AH=42h) ---
-.lba_read:
-    push ds
-    push si
-    push eax
-
-    ;DAP на стеке: [len+resv][count][off][seg][lba_lo][lba_hi]
-    push dword 0
-    push eax
-    push es
-    push bx
-    push cx
-    push word 0x0010
-
-    mov ax, ss
-    mov ds, ax
-    mov si, sp
-
-    mov dl, 0x80
-    mov ah, 0x42
-    int 0x13
-
-    add sp, 16
-    pop eax
-    pop si
-    pop ds
-    ret
-
-; --- CHS read (INT 13h AH=02h), по одному сектору ---
-.chs_read:
-    push ds
-    push si
-    push di
-    push bp
-
-    mov bp, sp
-    mov si, ax                    ;SI = LBA
-    mov di, cx                    ;DI = сколько секторов
-
-.next_chs:
-    ;LBA -> C/H/S
-    mov ax, si
-    xor dx, dx
-    movzx cx, byte [cs:sectors]   ;SPT (динамическая геометрия)
-    test cx, cx
-    jz .chs_fail
-    div cx
-    mov cl, dl
-    inc cl                        ;CL = sector (1-based)
-
-    xor dx, dx
-    movzx cx, byte [cs:heads]     ;heads
-    test cx, cx
-    jz .chs_fail
-    div cx                        ;AX = cylinder, DX = head
-
-    mov dh, dl                    ;DH = head
-    mov ch, al                    ;CH = cyl low
-    ; cyl high (2 бита) в CL[6:7] для полноты (для LBA < 2^14 не нужно, но пусть будет)
-    movzx bx, byte [cs:cylinder_high]
-    and bl, 0x03
-    shl bl, 6
-    or  cl, bl
-
-    mov dl, 0x80
-    mov ax, 0x0201                ;AH=02 (read), AL=1
-    int 0x13
-    jnc .chs_step_ok
-
-    ;Один retry с reset
-    push ax
-    push bx
-    push cx
-    push dx
-    push es
-    xor ax, ax
-    mov dl, 0x80
-    int 0x13
-    pop es
-    pop dx
-    pop cx
-    pop bx
-    pop ax
-    mov ax, 0x0201
-    int 0x13
-    jc .chs_fail
-
-.chs_step_ok:
-    add bx, 0x0200
-    jnc .no_seg_inc
-    mov ax, es
-    add ax, 0x1000
-    mov es, ax
-.no_seg_inc:
-    inc si
-    dec di
-    jnz .next_chs
-
-    pop bp
-    pop di
-    pop si
-    pop ds
-    clc
-    ret
-
-.chs_fail:
-    pop bp
-    pop di
-    pop si
-    pop ds
-    stc
-    ret
-
-;Один символ: AL = символ
+; Вспомогательная функция печати символа
 debug_char:
     push ax
     push bx
     mov ah, 0x0E
-    mov bx, 0x0007          ;page 0, light gray on black
+    mov bx, 0x0007
     int 0x10
     pop bx
     pop ax
     ret
 
-
-;Секция данных загрузчика STAGE1
+; Раздел данных Stage 1
 lba_supported     db 0
-heads_tmp         dw 16
-sectors_tmp       dw 63
+boot_drive        db 0x80
 heads             db 0
 sectors           db 0
-heads_temp        dw 0
-sectors_temp      dw 0
-cylinder_high     db 0
+retry_count       db 0
+chs_s             db 0
 
-;Заполнение сектора MBR до таблицы разделов
+; Статическая структура DAP, жестко выровненная
+align 4
+dap_packet:
+dap_size          db 0x10
+dap_reserved      db 0x00
+dap_sectors       dw 0x0001
+dap_buffer_off    dw 0x7E00
+dap_buffer_seg    dw 0x0000
+dap_lba_low       dw 0x0001
+dap_lba_mid       dw 0x0000
+dap_lba_high      dd 0x00000000
+
+; =====================================================================
+; ТОЧНАЯ РАЗМЕТКА СЕКТОРОВ И ТАБЛИЦЫ РАЗДЕЛОВ MBR (РОВНО 512 БАЙТ)
+; =====================================================================
 times 446-($-$$) db 0
-;times 64 db 0        ;Пространство таблицы разделов HDD
-;dw 0xAA55            ;Сигнатура MBR
-; Partition entry 1: active, тип 0x00 (не используется)
-db 0x80, 0x00, 0x00, 0x00
-db 0x00, 0x00, 0x00, 0x00
-dd 0
-dd 0
-times 48 db 0
-dw 0xAA55
+
+; Легальная таблица разделов (Partition Entry 1) - старт с LBA 1
+db 0x80, 0x00, 0x01, 0x00, 0x83, 0x0F, 0x3F, 0x82
+dd 0x00000001, 0x0001F000
+
+times 48 db 0       ; Нули для оставшихся 3 разделов
+dw 0xAA55           ; Сигнатура MBR

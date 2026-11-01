@@ -43,9 +43,16 @@ typedef enum {
     WP_MODE_STRETCH = 2 //Растягивание на весь экран (-s)
 } wp_mode_t;
 
+typedef struct{
+    void (*start_loading_phase)(uint32_t min_val, uint32_t max_val);
+    void(*loading_page_step)(uint32_t current_point);
+    void (*stop_loading_phase)(void);
+} img_loading_struct_t;
+
+
 int get_fb_info(uint32_t *pitch, uint32_t *bpp, uint32_t *width, uint32_t *height);
 
 //API библиотеки
-uint8_t* load_tga_to_buffer(const char *path, uint32_t target_w, uint32_t target_h, uint32_t target_bpp, uint32_t target_pitch, uint32_t mode);
+uint8_t* load_tga_to_buffer(const char *path, uint32_t target_w, uint32_t target_h, uint32_t target_bpp, uint32_t target_pitch, uint32_t mode, img_loading_struct_t *loading_struct);
 #endif
 

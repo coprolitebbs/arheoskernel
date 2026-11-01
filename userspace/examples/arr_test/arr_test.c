@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
 
     //Возвращаем страницы менеджеру памяти кучи
     printf("Releasing memory block via free()...\n");
-    free_pages(dynamic_array,ARRAY_SIZE * sizeof(int));
+    free(dynamic_array);
 
     printf("[SUCCESS] Dynamic context allocation verified.\n");
     printf("\x1B[0m--- All ELF runtime execution checks passed successfully! ---\n\n");

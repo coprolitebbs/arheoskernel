@@ -26,10 +26,13 @@
 #include "include-kernel/locale.h"
 #include "include-kernel/kbd_translate.h"
 #include "include-kernel/lib.h"
-
+#include "include-kernel/kernel_heap.h"
+#include "include-kernel/kload_screen.h"
 
 uint32_t console_bgcolor = 0x00000000;
 uint32_t console_fgcolor = 0x00FFFFFF;
+
+static bool console_bg_active = false;
 
 //Состояние UTF-8 декодера для байтового входного потока
 static uint32_t utf8_acc   = 0;
@@ -53,6 +56,52 @@ static const uint32_t ansi_color_table[8] = {
 
 tty_t tty_terminals[TTY_TERMINALS_COUNT];
 tty_t *current_tty = nullptr;
+static tty_clipboard_t tty_clipboards[TTY_TERMINALS_COUNT];
+
+// Буфер обмена
+
+static tty_clipboard_t *clipboard_for_current(void){
+    if (!current_tty) return NULL;
+    int idx = current_tty->id;
+    if (idx < 0 || idx >= TTY_TERMINALS_COUNT) return NULL;
+    return &tty_clipboards[idx];
+}
+
+
+void kernel_clipboard_set(const uint8_t *src, uint32_t size){
+    tty_clipboard_t *cb = clipboard_for_current();
+    if (!cb) return;
+    if (size > CLIPBOARD_MAX_BYTES) size = CLIPBOARD_MAX_BYTES;
+    if (size > cb->cap){
+        uint32_t nc = cb->cap ? cb->cap : 256;
+        while (nc < size) nc *= 2;
+        if (nc > CLIPBOARD_MAX_BYTES) nc = CLIPBOARD_MAX_BYTES;
+        uint8_t *nb = (uint8_t*)kmalloc(nc);
+        if (!nb) return;
+        if (cb->data) kfree(cb->data);
+        cb->data = nb;
+        cb->cap  = nc;
+    }
+    if (src && size) memcpy(cb->data, src, size);
+    cb->size = size;
+}
+
+uint32_t kernel_clipboard_get(uint8_t *dst, uint32_t max_size){
+    tty_clipboard_t *cb = clipboard_for_current();
+    if (!cb) return 0;
+    if (!dst || max_size == 0) return cb->size;
+    uint32_t copy = cb->size < max_size ? cb->size : max_size;
+    if (copy) memcpy(dst, cb->data, copy);
+    return copy;
+}
+
+void kernel_clipboard_clear(void){
+    tty_clipboard_t *cb = clipboard_for_current();
+    if (!cb) return;
+    cb->size = 0;
+}
+
+//===============================================
 
 
 //Сбрасывает незавершённую UTF-8 последовательность
@@ -110,25 +159,24 @@ static void parse_and_execute_ansi(char cmd){
         }
     }
     switch (cmd){
-        case 'm':{ //Спецификатор SGR (Управление цветом и стилем)
+        case 'm':{
             if (arg_count == 0 || args[0] == 0){
-                // \x1B[0m — Сброс цветов
                 console_fgcolor = DEFAULT_FG_COLOR;
                 console_bgcolor = DEFAULT_BG_COLOR;
+                console_bg_active = false;                       // ← сброс
                 if (fb && fb->set_fg) fb->set_fg(DEFAULT_FG_COLOR);
                 if (fb && fb->set_bg) fb->set_bg(DEFAULT_BG_COLOR);
             } else {
                 for (int i = 0; i < arg_count; i++){
                     int code = args[i];
-                    //Цвет текста (30-37)
                     if (code >= 30 && code <= 37){
                         console_fgcolor = ansi_color_table[code - 30];
                         if (fb && fb->set_fg) fb->set_fg(console_fgcolor);
                     }
-                    //Цвет фона (40-47)
                     else if (code >= 40 && code <= 47){
                         console_bgcolor = ansi_color_table[code - 40];
-                        if (fb && fb->set_bg) fb->set_bg(console_bgcolor);
+                        console_bg_active = true;                // ← взвод
+                    if (fb && fb->set_bg) fb->set_bg(console_bgcolor);
                     }
                 }
             }
@@ -159,18 +207,25 @@ static void parse_and_execute_ansi(char cmd){
             }
             break;
         }
-        case 'K':{ // Erase in Line: 0 = to end, 1 = to start, 2 = whole line
-                uint32_t mode = (arg_count > 0) ? args[0] : 0;
-                uint32_t row = current_tty->cursor_y / current_tty->cell_h;
-                //Да, я и так могу
-                uint32_t start_col = (mode == 2) ? 0 : (mode == 1) ? 0 : (current_tty->cursor_x / current_tty->cell_w);
-                uint32_t end_col   = (mode == 1) ? (current_tty->cursor_x / current_tty->cell_w) : current_tty->console_cols;
-                for (uint32_t c = start_col; c < end_col; c++){
-                    if (row < current_tty->console_rows){
-                        current_tty->matrix[row][c].codepoint = ' ';
-                    }
-                    if (fb && fb->clear_tile) fb->clear_tile(c * current_tty->cell_w, row * current_tty->cell_h, console_bgcolor);
+        case 'K':{
+            uint32_t mode = (arg_count > 0) ? args[0] : 0;
+            uint32_t row = current_tty->cursor_y / current_tty->cell_h;
+            uint32_t start_col = (mode == 2) ? 0 : (mode == 1) ? 0 : (current_tty->cursor_x / current_tty->cell_w);
+            uint32_t end_col   = (mode == 1) ? (current_tty->cursor_x / current_tty->cell_w) : current_tty->console_cols;
+            uint32_t cell_bg   = console_bg_active ? console_bgcolor : 0xFFFFFFFF;
+
+            for (uint32_t c = start_col; c < end_col; c++){
+                if (row < current_tty->console_rows){
+                    current_tty->matrix[row][c].codepoint = ' ';
+                    current_tty->matrix[row][c].bg        = cell_bg;      // ←
                 }
+                if (console_bg_active && fb && fb->fill_rect){
+                    fb->fill_rect(c * current_tty->cell_w, row * current_tty->cell_h,
+                          current_tty->cell_w, current_tty->cell_h, console_bgcolor);
+                } else if (fb && fb->clear_tile){
+                    fb->clear_tile(c * current_tty->cell_w, row * current_tty->cell_h, console_bgcolor);
+                }
+            }
             break;
         }
         case 'D':{// Cursor Left
@@ -252,15 +307,24 @@ void kconsole_update_cursor(void){
             uint32_t cell_x = cx / current_tty->cell_w;
             uint32_t cell_y = cy / current_tty->cell_h;
             uint32_t original_char = ' ';
+            uint32_t original_bg = 0xFFFFFFFF;
 
             if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols){
                 original_char = current_tty->matrix[cell_y][cell_x].codepoint;
+                original_bg = current_tty->matrix[cell_y][cell_x].bg;
             }
+
+            /*
             if (fb && fb->clear_tile) {
                 fb->clear_tile(cx, cy, console_bgcolor);
             } else {
                 //fb->draw_char(cx, cy, current_tty->cursor_code, console_bgcolor);
                 fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_bgcolor);
+            }*/
+            if (original_bg != 0xFFFFFFFF && fb && fb->fill_rect){            // ←
+                fb->fill_rect(cx, cy, current_tty->cell_w, current_tty->cell_h, original_bg);
+            } else if (fb && fb->clear_tile){
+                fb->clear_tile(cx, cy, console_bgcolor);
             }
 
             //Если на этом месте был символ текста — перерисовываем его поверх обоев
@@ -515,10 +579,20 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color){
 
     uint32_t cell_x = current_tty->cursor_x / current_tty->cell_w;
     uint32_t cell_y = current_tty->cursor_y / current_tty->cell_h;
+    uint32_t cell_bg = console_bg_active ? console_bgcolor : 0xFFFFFFFF;
+
     if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols){
         current_tty->matrix[cell_y][cell_x].codepoint = cp;
         current_tty->matrix[cell_y][cell_x].color = color;
+        current_tty->matrix[cell_y][cell_x].bg = cell_bg;
     }
+
+    //заливка фона до глифа
+    if (cell_bg != 0xFFFFFFFF && fb && fb->fill_rect){
+        fb->fill_rect(current_tty->cursor_x, current_tty->cursor_y,
+                  current_tty->cell_w, current_tty->cell_h, cell_bg);
+    }
+
     if (fb && fb->draw_codepoint){
         fb->draw_codepoint(current_tty->cursor_x, current_tty->cursor_y, cp, color);
     }
@@ -599,9 +673,11 @@ void kconsole_scroll_up(void){
     for (uint32_t c = 0; c < current_tty->console_cols; c++){
         current_tty->matrix[current_tty->console_rows - 1][c].codepoint = ' ';
         current_tty->matrix[current_tty->console_rows - 1][c].color = console_fgcolor;
+        current_tty->matrix[current_tty->console_rows - 1][c].bg = 0xFFFFFFFF;
     }
 
-    if (fb && fb->scroll_up){
+    bool has_wp = (fb && fb->has_wallpaper && fb->has_wallpaper());
+    if (fb && fb->scroll_up && !has_wp){
         fb->scroll_up(0, current_tty->console_rows * current_tty->cell_h, current_tty->cell_h);
     } else {
         kconsole_redraw_screen();
@@ -623,9 +699,16 @@ void kconsole_redraw_screen(void){
     for (uint32_t r = 0; r < current_tty->console_rows; r++){
         uint32_t pixel_y = r * current_tty->cell_h;
         for (uint32_t c = 0; c < current_tty->console_cols; c++){
-            uint32_t ch = current_tty->matrix[r][c].codepoint;
+            uint32_t pixel_x = c * current_tty->cell_w;
+            uint32_t ch      = current_tty->matrix[r][c].codepoint;
+            uint32_t cell_bg = current_tty->matrix[r][c].bg;
+
+            if (cell_bg != 0xFFFFFFFF && fb->fill_rect){                // ←
+                fb->fill_rect(pixel_x, pixel_y,
+                              current_tty->cell_w, current_tty->cell_h, cell_bg);
+            }
             if (ch != ' ' && ch != 0){
-                fb->draw_codepoint(c * current_tty->cell_w, pixel_y, ch, current_tty->matrix[r][c].color);
+                fb->draw_codepoint(pixel_x, pixel_y, ch, current_tty->matrix[r][c].color);
             }
         }
     }
@@ -640,10 +723,14 @@ uint32_t kconsole_get_char_at(uint32_t col, uint32_t row){
 
 void kconsole_clear_screen(void){
     if (!fb || !current_tty) return;
+    load_screen_can_paint = false;
+
+    uint32_t cell_bg = console_bg_active ? console_bgcolor : 0xFFFFFFFF;
     for (uint32_t r = 0; r < current_tty->console_rows; r++){
         for (uint32_t c = 0; c < current_tty->console_cols; c++){
             current_tty->matrix[r][c].codepoint = ' ';
-            current_tty->matrix[r][c].color = console_fgcolor;
+            current_tty->matrix[r][c].color     = console_fgcolor;
+            current_tty->matrix[r][c].bg        = cell_bg;
         }
     }
     current_tty->cursor_x = 0;
@@ -651,9 +738,16 @@ void kconsole_clear_screen(void){
     current_tty->input_start_x = 0;
     current_tty->input_start_y = 0;
     current_tty->line_cursor_pos = 0;
-    fb->clear(console_bgcolor);
+
+    if (console_bg_active && fb->fill_rect){
+        fb->fill_rect(0, 0, boot_info->width, boot_info->height, console_bgcolor);
+    } else {
+        fb->clear(console_bgcolor);
+    }
+
     current_tty->cursor_visible = true;
     current_tty->last_blink_tick = tick_count;
+    load_screen_can_paint = true;
 }
 
 
@@ -721,11 +815,12 @@ void kprintf(const char *format, ...){
 
 
 void kconsole_init(void){
-    kprintf("Console init...");
     if(fb){
         fb->set_bg(console_bgcolor);
         fb->set_fg(console_fgcolor);
+        load_screen_can_paint = false;
         fb->clear(console_bgcolor);
+        load_screen_can_paint = true;
     }
 
     for (int t = 0; t < TTY_TERMINALS_COUNT; t++) {
@@ -752,6 +847,7 @@ void kconsole_init(void){
             for (uint32_t c = 0; c < CONSOLE_COLS; c++) {
                 tty_terminals[t].matrix[r][c].codepoint = ' ';
                 tty_terminals[t].matrix[r][c].color = console_fgcolor;
+                tty_terminals[t].matrix[r][c].bg = 0xFFFFFFFF;
             }
         }
         for (int i = 0; i < LINE_BUFFER_SIZE; i++) {
@@ -759,13 +855,12 @@ void kconsole_init(void){
         }
     }
     current_tty = &tty_terminals[0];
-    kprintf("OK\n");
 }
 
 
 void kconsole_reconfigure(cfg_file_t *cfg){
     if (!cfg){
-        kprintf("[ACPI] Warning: boot.cfg not found, keeping fallback theme.\n");
+        //kprintf("[ACPI] Warning: boot.cfg not found, keeping fallback theme.\n");
         return;
     }
     //Вычитываем шестнадцатеричные палитры из секции [console] с использованием config
@@ -773,6 +868,8 @@ void kconsole_reconfigure(cfg_file_t *cfg){
     uint32_t new_fg = cfg_read_hex(cfg, "console", "fgcolor", console_fgcolor);
     console_bgcolor = new_bg;
     console_fgcolor = new_fg;
+
+
 
     char hotkey_name[32] = {0};
     cfg_read_string(cfg, "console", "layout_change_keys", "HOTKEY_ALT_SHIFT", hotkey_name, 32);
@@ -812,8 +909,6 @@ void kconsole_reconfigure(cfg_file_t *cfg){
         }
     }
 
-
-
     if (fb){
         //Прописываем новые цвета низкоуровневому видеоадаптеру
         fb->set_bg(console_bgcolor);
@@ -828,7 +923,7 @@ void kconsole_reconfigure(cfg_file_t *cfg){
         }
         //Чисто заливаем видеоматрицу экрана новым цветом фона
         kconsole_clear_screen();
-        kprintf("[ACPI] Display reconfigured dynamically. Theme applied successfully.\n");
+        //kprintf("[ACPI] Display reconfigured dynamically. Theme applied successfully.\n");
     }
 }
 

@@ -46,6 +46,8 @@ extern fs_driver_t fs_apis[FILESYSTEMS_API_MAX];
 
 extern kbd_driver_api_t *kbd_driver_api;
 
+extern block_driver_api_t *blockdevice_driver;
+
 //extern char* additional_drivers_list;
 
 void drivers_init(void);

@@ -205,14 +205,14 @@ found:
     mov cx, 16
     call disk_read_sectors
     jc disk_error
-    DEBUG 'L'
-    DEBUG 'S'
+    DEBUG 'l'
+    ;DEBUG 'S'
 
     mov dl, [drive]
     jmp 0x0000:0x7E00
 
 disk_error:
-    DEBUG 'E'
+    DEBUG 'e'
     jmp $
 
 ; ---- Данные ----

@@ -41,8 +41,6 @@
 extern int shedule_count;
 extern int ready_queue_count;
 
-
-
 //Переключение контекста (из switch.asm)
 extern void switch_task(uint32_t new_esp);
 
@@ -127,6 +125,16 @@ void vm_pages_free_all(task_t *task);
 task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t program_size, const char *cmdline);
 task_t* task_spawn_from_file(const char *path, uint32_t entry_virt, const char *cmdline);
 task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, const char *cmdline);
+
+/*Распространить только что созданный kernel-PDE
+   во все user-PD из ready_queue. */
+void task_mirror_kernel_pde(uint32_t pd_index);
+
+/* Реализуется в task.c. Распространить PTE из critical PDE во все user-PD,
+   у которых в этом PDE свежая копия PT. */
+void task_propagate_kernel_pte(uint32_t pd_index, uint32_t pt_index, uint32_t pte_val);
+
+
 
 task_t* create_kernel_thread(uint32_t entry_virt);
 void kernel_init_thread(void);

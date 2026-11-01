@@ -56,7 +56,17 @@ typedef enum {
 typedef struct{
     uint32_t codepoint;   //Unicode codepoint, 0 = пусто
     uint32_t color;
+    uint32_t bg;        // 0xFFFFFFFF = прозрачно, иначе — заливка
 } console_cell_t;
+
+
+#define CLIPBOARD_MAX_BYTES (1024u * 1024u)    /* 1 MB cap */
+
+typedef struct {
+    uint8_t  *data;
+    uint32_t  size;
+    uint32_t  cap;
+} tty_clipboard_t;
 
 //Структура параметров и состояния виртуального терминала TTY
 typedef struct tty {
@@ -122,5 +132,9 @@ void kconsole_init(void);
 void kconsole_reconfigure(cfg_file_t *cfg);
 
 void kconsole_reset_utf8_state(void);
+
+void kernel_clipboard_set(const uint8_t *src, uint32_t size);
+uint32_t kernel_clipboard_get(uint8_t *dst, uint32_t max_size);
+void kernel_clipboard_clear(void);
 
 #endif

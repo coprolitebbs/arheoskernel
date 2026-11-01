@@ -22,7 +22,8 @@
 #include "../../../include-kernel/bootinfo.h"
 #include "../../include_drivers/drv_format.h"
 
-#define WP_BUFFER_SIZE (1024 * 768 * 4)
+
+#define GRAPHICS_FLAG_LFB 0x01
 
 void font_draw_codepoint(uint32_t x, uint32_t y, uint32_t cp, uint32_t color);
 void driver_main(struct boot_info *boot);

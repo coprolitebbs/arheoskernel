@@ -35,6 +35,7 @@
 #include "include-kernel/config.h"
 #include "include-kernel/elf32.h"
 #include "include-kernel/font_vga.h"
+#include "include-kernel/kload_screen.h"
 
 static spinlock_t sched_spinlock = {0};
 
@@ -55,9 +56,20 @@ static uint32_t next_user_stack=0x800000;
 
 //Инициализация планировщика
 void init_tasking(void){
+    /*draw_string(10, 100, "before kmalloc");
+    extern uint32_t heap_next_va;
+    extern uint32_t fb_phys_addr;
+    extern size_t free_pages;
+    draw_hex_dword(heap_next_va,       10, 110);
+    draw_hex_dword(fb_phys_addr,       10, 120);
+    draw_hex_dword(free_pages,         10, 130);
+    draw_hex_dword(sizeof(task_t),     10, 140);*/
+
     current_task=(task_t*)kmalloc(sizeof(task_t));
     if(!current_task){
         draw_string(10,120,"NO CURRENT TASK");
+        draw_hex_dword(heap_next_va, 10, 160);   // сдвинулся ли heap?
+        draw_hex_dword(free_pages,   10, 170);
         for(;;);
     }
     memset(current_task,0,sizeof(task_t));
@@ -70,6 +82,7 @@ void init_tasking(void){
 	idle_task.user_stack = 0;
 	idle_task.next = 0;
 	prepare_task_stack(&idle_task,(uint32_t)idle_loop);
+	load_screen_add_string("Tasking initiated");
 }
 
 void load_user_program(task_t *task,uint32_t virt_addr,uint8_t *program,uint32_t size){
@@ -100,15 +113,18 @@ void load_user_program(task_t *task,uint32_t virt_addr,uint8_t *program,uint32_t
 //Планировщик (вызывается из обработчика таймера)
 void schedule(struct regs *r){
     task_t *old_task = current_task;
+    uint32_t old_state = old_task ? old_task->state : 0;
+    task_t  *old_next  = (old_task && old_task->pid != 0) ? old_task->next : NULL;
+
     //Сохраняем контекст регистров текущей выполняемой задачи
     if(old_task && old_task->pid != 0){
-        if(old_task->state == TASK_RUNNING || old_task->state == TASK_BLOCKED){
+        if(old_state == TASK_RUNNING || old_state == TASK_BLOCKED){
             if (r != NULL) old_task->esp = (uint32_t)r;
-            if(old_task->state == TASK_RUNNING){
+            if(old_state == TASK_RUNNING){
                 old_task->state = TASK_READY;
             }
         }
-        else if(old_task->state == TASK_TERMINATED){
+        else if(old_state == TASK_TERMINATED){
             old_task->esp = 0;
         }
     }
@@ -277,6 +293,19 @@ task_t* create_task(uint32_t entry){
 //Сборщик мусора. Очищает стек от задачи, у которой task->state == TASK_TERMINATED и убирает ее из списка задач
 void cleanup_tasks(void){
     if(!ready_queue) return;
+
+    /* Освобождаем PD текущей задачи -> CR3 не должен на неё указывать.
+       Принудительно переключаемся на kernel_directory: там все page tables
+       ядра (identity map, LFB/MMIO, kernel heap) гарантированно живы.
+       switch_task / vmm_switch_directory(next_task) в конце schedule()
+       переключит CR3 на реальную следующую задачу. */
+    uint32_t cur_cr3;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(cur_cr3) : : "memory");
+    if (kernel_directory &&
+        (cur_cr3 & 0xFFFFF000) != ((uint32_t)kernel_directory & 0xFFFFF000)){
+        vmm_switch_directory((uint32_t)kernel_directory);
+    }
+
     task_t *cur = ready_queue;
     task_t *prev = NULL;
     do{
@@ -284,6 +313,37 @@ void cleanup_tasks(void){
         if(cur->pid != 0 && cur->state == TASK_TERMINATED){
             //Сначала освобождаем всю пользовательскую память процесса
             vm_pages_free_all(cur);
+            // Закрываем все fd, которые задача не закрыла сама
+            for (int fd = 0; fd < MAX_PROCESS_FDS; fd++){
+                int global_fd = cur->fds[fd];
+                if (global_fd < 0) continue;
+
+                // STDOUT/STDERR/STDIN (0, 1, 2) не закрываем — это маркеры
+                if (global_fd < 3) { cur->fds[fd] = -1; continue; }
+
+                // Проверяем refcount: есть ли другие задачи/слоты с этим global_fd
+                int refs = 0;
+
+                // У этой же задачи (в других её слотах)
+                for (int j = 0; j < MAX_PROCESS_FDS; j++){
+                    if (j != fd && cur->fds[j] == global_fd) refs++;
+                }
+                // У других задач
+                task_t *t = ready_queue;
+                do {
+                    if (t != cur){
+                        for (int j = 0; j < MAX_PROCESS_FDS; j++){
+                            if (t->fds[j] == global_fd) refs++;
+                        }
+                    }
+                    t = t->next;
+                } while (t != ready_queue && ready_queue);
+
+                if (refs == 0 && global_fd < VFS_MAX_OPEN_FILES && vfs_file_table[global_fd].used){
+                    vfs_close(global_fd);
+                }
+                cur->fds[fd] = -1;
+            }
 
             //Освобождаем kernel stack
             if(cur->kernel_stack_phys){
@@ -291,6 +351,16 @@ void cleanup_tasks(void){
                 cur->kernel_stack_phys = 0;
                 cur->kernel_stack = 0;
             }
+
+            /* Освобождаем PD и все PT, эксклюзивно принадлежащие задаче.
+            Для kernel-потоков (page_dir == kernel_directory) — no-op. */
+
+            if (cur->page_dir){
+                vmm_destroy_address_space(cur->page_dir);
+                cur->page_dir = NULL;
+            }
+            cur->page_dir_phys = 0;
+
             if(cur == ready_queue){
                 if(cur->next == cur){
                     ready_queue = NULL;
@@ -322,6 +392,7 @@ void cleanup_tasks(void){
     } while(cur != ready_queue);
 }
 
+/*
 static uint32_t create_user_stack(task_t *task){
     //Сдвигаем виртуальный адрес стека Ring 3 на одну страницу вниз
     //Теперь страница будет полностью покрывать диапазон от 0x7FFFF000 до 0x7FFFFFFF
@@ -342,6 +413,42 @@ static uint32_t create_user_stack(task_t *task){
 
     //Возвращаем физическую вершину стека (конец замапленной страницы 0x7FFFFFFF)
     return virt + PAGE_SIZE;
+}
+*/
+/*static uint32_t create_user_stack(task_t *task){
+    const uint32_t STACK_PAGES = 4;                       // было 1
+    uint32_t virt = 0x80000000 - STACK_PAGES * PAGE_SIZE;
+
+    for (uint32_t i = 0; i < STACK_PAGES; i++){
+        uint32_t phys = (uint32_t)pmm_alloc_page();
+        if (!phys){
+            draw_string(10,300,"NO USER STACK");
+            for(;;);
+        }
+        int32_t flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        vmm_map_page(task->page_dir, virt + i * PAGE_SIZE, phys, flags);
+        if (!vm_page_add(task, virt + i * PAGE_SIZE, phys, flags)){
+            draw_string(10,300,"NO VM STACK");
+            for(;;);
+        }
+    }
+    return 0x80000000;
+}*/
+static uint32_t create_user_stack(task_t *task){
+    const uint32_t STACK_PAGES = 16; // Было 4 (16 КБ) -> Стало 16 (64 КБ)
+    uint32_t virt = 0x80000000 - STACK_PAGES * PAGE_SIZE;
+
+    for (uint32_t i = 0; i < STACK_PAGES; i++){
+        uint32_t phys = (uint32_t)pmm_alloc_page();
+        if (!phys){
+            draw_string(10,300,"NO USER STACK");
+            for(;;);
+        }
+        int32_t flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
+        vmm_map_page(task->page_dir, virt + i * PAGE_SIZE, phys, flags);
+        vm_page_add(task, virt + i * PAGE_SIZE, phys, flags);
+    }
+    return 0x80000000;
 }
 
 
@@ -382,6 +489,7 @@ int vm_page_add(task_t *task,uint32_t virt,uint32_t phys,uint32_t flags){
 
 
 //Удалить запись о странице из списка task, физическую страницу здесь не освобождаем.
+/*
 int vm_page_remove(task_t *task,uint32_t virt){
     if(!task) return 0;
     vm_page_t *cur = task->vm_pages;
@@ -400,7 +508,25 @@ int vm_page_remove(task_t *task,uint32_t virt){
     }
     return 0;
 }
-
+*/
+int vm_page_remove(task_t *task, uint32_t virt){
+    if(!task) return 0;
+    vm_page_t *cur = task->vm_pages;
+    vm_page_t *prev = NULL;
+    while(cur){
+        if(cur->virt == virt){
+            if(prev)
+                prev->next = cur->next;
+            else
+                task->vm_pages = cur->next;
+            kfree(cur);   // ← освобождаем узел
+            return 1;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+    return 0;
+}
 
 //Освободить все физические страницы, принадлежащие пользовательскому процессу
 void vm_pages_free_all(task_t *task){
@@ -415,7 +541,11 @@ void vm_pages_free_all(task_t *task){
         //Если физический адрес cur->phys указывает на область выше 128 МБ (0x08000000),
         //или равен адресу LFB (0xFD22B000), ядру запрещено
         //стирать его из PMM, иначе это уничтожит видеоадаптер и вызовет Page Fault
-        if (cur->phys && (uint32_t)cur->phys < 0x08000000) {
+        //if (cur->phys && (uint32_t)cur->phys < 0x08000000) {
+        //    pmm_free_page((void*)cur->phys);
+        //}
+        //if (cur->phys && (uint32_t)cur->phys < 0xC0000000 && (uint32_t)cur->phys >= 0x100000) {
+        if (cur->phys >= 0x1000000 && (uint32_t)cur->phys < 0xC0000000){
             pmm_free_page((void*)cur->phys);
         }
 
@@ -428,12 +558,27 @@ void vm_pages_free_all(task_t *task){
 
 
 task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t program_size, const char *cmdline){
+    if (entry_virt < 0x40000000 || entry_virt >= 0xC0000000) return NULL;
     task_t *task = (task_t*)kmalloc(sizeof(task_t));
     if (!task) return NULL;
     memset(task, 0, sizeof(task_t));
 
     task->fds[0] = 0; task->fds[1] = 1; task->fds[2] = 2;
     for (int i = 3; i < MAX_PROCESS_FDS; i++) task->fds[i] = -1;
+    if (current_task && current_task->pid != 0){
+        for (int i = 3; i < MAX_PROCESS_FDS; i++){
+            int pfd = current_task->fds[i];
+            if (pfd < 3) { task->fds[i] = -1; continue; }
+            // наследуем, увеличивая refcount
+            task->fds[i] = pfd;
+            // (refcount у вас неявный — считается по всем fds всех задач)
+        }
+        // Специально для STDOUT/STDERR redirect:
+        // если у родителя fds[1] != 1 — наследуем именно это
+        if (current_task->fds[1] > 2) task->fds[1] = current_task->fds[1];
+        if (current_task->fds[2] > 2) task->fds[2] = current_task->fds[2];
+        if (current_task->fds[0] > 2) task->fds[0] = current_task->fds[0];
+    }
 
     task->kernel_stack_phys = (uint32_t)pmm_alloc_page();
     if (!task->kernel_stack_phys){ kfree(task); return NULL; }
@@ -457,17 +602,46 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
 
     uint32_t old_cr3;
     __asm__ __volatile__("mov %%cr3, %0" : "=r"(old_cr3));
-    __asm__ __volatile__("mov %0, %%cr3" : : "r"(task->page_dir_phys));
-
-    uint32_t ustack_top = task->user_stack;
-
     char (*args_tokens)[64] = (char (*)[64])kmalloc(16 * 64);
-    if (!args_tokens) {
+
+    /*if (!args_tokens) {
         __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
         //В продакшене здесь нужна полная зачистка, пока упростим для стабильности
         return NULL;
+    }*/
+    if (!args_tokens) {
+        __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
+        vm_pages_free_all(task);
+        vmm_destroy_address_space(task->page_dir);
+        pmm_free_page((void*)task->kernel_stack_phys);
+        kfree(task);
+        return NULL;
     }
     memset(args_tokens, 0, 16 * 64);
+//kprintf("here\n");for(;;);
+/*
+uint32_t cur_esp;
+__asm__ __volatile__("mov %%esp, %0" : "=r"(cur_esp));
+
+uint32_t resume_eip;
+__asm__ __volatile__("mov $1f, %0" : "=r"(resume_eip));
+__asm__ __volatile__("1:");
+
+if (vmm_get_phys_addr(task->page_dir, resume_eip & ~0xFFF) == 0 ||
+    vmm_get_phys_addr(task->page_dir, cur_esp    & ~0xFFF) == 0){
+    vm_pages_free_all(task);
+    pmm_free_page((void*)task->kernel_stack_phys);
+    pmm_free_page((void*)task->page_dir_phys);
+    kfree(task);
+    return NULL;
+}
+*/
+
+
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(task->page_dir_phys));
+    //__asm__ __volatile__("1: cli; hlt; jmp 1b");
+//kprintf("here\n");for(;;);
+    uint32_t ustack_top = task->user_stack;
 
     int argc = 0;
 
@@ -533,6 +707,12 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
 
     prepare_task_stack(task, entry_virt);
 
+    /* Окно между vmm_create_address_space() и enqueue: kmalloc из
+       этой функции (args_tokens, загрузка драйверов и т.д.) мог
+       создать новые kernel-PDE. Молодая задача ещё не в ready_queue,
+       поэтому хук её не видел — догоняем вручную. */
+    vmm_sync_kernel_pdes(task->page_dir);
+
     uint32_t eflags = spin_lock_irqsave(&sched_spinlock);
     if (!ready_queue){ ready_queue = task; task->next = task; }
     else { task->next = ready_queue->next; ready_queue->next = task; }
@@ -547,7 +727,12 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
 //Функция парсинга и загрузки исполняемого ELF-файла в пользовательское пространство (Ring 3)
 task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, const char *cmdline){
     Elf32_Ehdr *ehdr = (Elf32_Ehdr*)elf_image;
-
+    //Sanity: user ELF must be PIE, otherwise we can't safely relocate it
+    if (ehdr->type != 3) {   // ET_DYN
+        com_puts("[ELF] Not PIE, rejecting\n");
+        //kfree(task);
+        return NULL;
+    }
     //Базовый адрес (Delta) для релокации PIE-исполняемого файла
     //Если файл статический (ehdr->type == ET_EXEC), load_base будет 0.
     //Если файл позиционно-независимый (ehdr->type == ET_DYN), сажаем на 0x40000000.
@@ -585,6 +770,18 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
         if (phdr[i].type == 1) { //PT_LOAD
             //Применяем смещение load_base к виртуальному адресу сегмента
             uint32_t vaddr = phdr[i].vaddr + load_base;
+            if (vaddr < 0x40000000 || vaddr >= 0xC0000000) {
+                com_puts("[ELF] vaddr out of user range: "); com_puthex(vaddr);
+                com_puts("\n");
+                /*pmm_free_page((void*)task->kernel_stack_phys);
+                pmm_free_page((void*)task->page_dir_phys);
+                pmm_free_page((void*)task->user_stack_phys);*/
+                vm_pages_free_all(task);                       /* вернёт user leaf pages */
+                vmm_destroy_address_space(task->page_dir);     /* вернёт PD + PT */
+                pmm_free_page((void*)task->kernel_stack_phys);
+                kfree(task);
+                return NULL;   // refuse to corrupt kernel identity
+            }
             uint32_t memsize = phdr[i].memsz;
             uint32_t filesize = phdr[i].filesz;
             uint32_t offset = phdr[i].offset;
@@ -596,9 +793,30 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
             for (uint32_t p = 0; p < pages_needed; p++) {
                 uint32_t page_vaddr = start_page + p * PAGE_SIZE;
 
-                if (vmm_get_phys_addr(task->page_dir, page_vaddr) == 0) {
+                /* Проверяем именно USER-доступность PTE, а не просто PRESENT.
+                   Для critical user-PDE (LFB/MMIO) vmm_create_address_space
+                   скопировал PTE без PAGE_USER — Ring 3 туда не достанет.
+                   Если бы мы полагались на vmm_get_phys_addr() != 0,
+                   загрузчик «увидел бы» LFB как «уже замапленную страницу»
+                   и не создал бы свежую user-страницу → #PF в Ring 3. */
+                uint32_t pd_i = page_vaddr >> 22;
+                uint32_t pt_i = (page_vaddr >> 12) & 0x3FF;
+                uint32_t pt_e = 0;
+                uint32_t pde = (*task->page_dir)[pd_i];
+                if ((pde & PAGE_PRESENT) && !(pde & 0x80)) {
+                    page_table_t *pt = (page_table_t*)(pde & 0xFFFFF000);
+                    if (pt) pt_e = (*pt)[pt_i];
+                }
+
+                if (!(pt_e & PAGE_PRESENT) || !(pt_e & PAGE_USER)) {
                     uint32_t phys = (uint32_t)pmm_alloc_page();
-                    if (!phys) return NULL;
+                    if (!phys) {
+                        vm_pages_free_all(task);
+                        vmm_destroy_address_space(task->page_dir);
+                        pmm_free_page((void*)task->kernel_stack_phys);
+                        kfree(task);
+                        return NULL;
+                    }
                     memset((void*)phys, 0, PAGE_SIZE);
 
                     uint32_t flags = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
@@ -653,26 +871,35 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
         }
     }
 
+
     //Подготовка стека и аргументов
     uint32_t old_cr3;
     __asm__ __volatile__("mov %%cr3, %0" : "=r"(old_cr3));
+    char (*args_tokens)[64] = (char (*)[64])kmalloc(16 * 64);
+    //if (!args_tokens) { __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3)); return NULL; }
+    if (!args_tokens) {
+        __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
+        vm_pages_free_all(task);
+        vmm_destroy_address_space(task->page_dir);
+        pmm_free_page((void*)task->kernel_stack_phys);
+        kfree(task);
+        return NULL;
+    }
+    memset(args_tokens, 0, 16 * 64);
+
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(task->page_dir_phys));
 
     uint32_t ustack_top = task->user_stack;
-    char (*args_tokens)[64] = (char (*)[64])kmalloc(16 * 64);
-    if (!args_tokens) { __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3)); return NULL; }
-    memset(args_tokens, 0, 16 * 64);
 
+    /*
     int argc = 0;
     const char *prog_name = path;
     for (int i = 0; path[i] != '\0'; i++) {
         if (path[i] == '/') prog_name = &path[i + 1];
     }
     if (*prog_name == '\0') prog_name = "unknown";
-
     strcpy(args_tokens[0], prog_name);
     argc = 1;
-
     if (cmdline && cmdline[0] != '\0'){
         int t_idx = 0;
         for (int i = 0; cmdline[i] != '\0' && argc < 16; i++){
@@ -684,6 +911,30 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
         }
         if (t_idx > 0 && argc < 16) { args_tokens[argc][t_idx] = '\0'; argc++; }
     }
+    */
+    int argc = 0;
+    const char *prog_name = path;
+    if (cmdline && cmdline[0] != '\0'){
+        int t_idx = 0;
+        for (int i = 0; cmdline[i] != '\0' && argc < 16; i++){
+            if (cmdline[i] == ' ' || cmdline[i] == '\t'){
+                if (t_idx > 0) { args_tokens[argc][t_idx] = '\0'; argc++; t_idx = 0; }
+            } else {
+                if (t_idx < 63) args_tokens[argc][t_idx++] = cmdline[i];
+            }
+        }
+        if (t_idx > 0 && argc < 16) { args_tokens[argc][t_idx] = '\0'; argc++; }
+    } else {
+        //fallback: basename(path)
+        const char *prog_name = path;
+        for (int i = 0; path[i] != '\0'; i++)
+            if (path[i] == '/') prog_name = &path[i + 1];
+        if (*prog_name == '\0') prog_name = "unknown";
+        strcpy(args_tokens[0], prog_name);
+        argc = 1;
+    }
+
+
 
     uint32_t argv_addresses[16];
     for (int i = argc - 1; i >= 0; i--){
@@ -715,6 +966,8 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
     //Точка входа также смещается на load_base
     uint32_t entry_point = ehdr->entry + load_base;
     prepare_task_stack(task, entry_point);
+
+    vmm_sync_kernel_pdes(task->page_dir);
 
     uint32_t eflags = spin_lock_irqsave(&sched_spinlock);
     if (!ready_queue){ ready_queue = task; task->next = task; }
@@ -762,13 +1015,14 @@ task_t *task_spawn_from_file(const char *path, uint32_t entry_virt, const char *
     bool read_error = false;
     while (total_bytes_read < file_size){
         uint32_t bytes_to_read = file_size - total_bytes_read;
-        if (bytes_to_read > 512) bytes_to_read = 512;
+        if (bytes_to_read > 4096) bytes_to_read = 4096;
 
         int r = vfs_read(fd, kernel_load_buf + total_bytes_read, bytes_to_read);
         if (r <= 0){
             read_error = true;
             break;
         }
+
         total_bytes_read += r;
     }
     vfs_close(fd);
@@ -780,6 +1034,7 @@ task_t *task_spawn_from_file(const char *path, uint32_t entry_virt, const char *
     }
     //Автоопределение формата по магическому числу
     uint8_t *magic = kernel_load_buf;
+
     if (magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F'){
         //Обнаружен elf
         //com_puts("[KERNEL] Format match: ELF executable detected. Loading headers...\n");
@@ -804,6 +1059,7 @@ task_t* create_kernel_thread(uint32_t entry_virt){
     task_t *task = (task_t*)kmalloc(sizeof(task_t));
     if (!task) return NULL;
     memset(task, 0, sizeof(task_t));
+
     //Выделяем личную физическую страницу под стек этого потока ядра
     task->kernel_stack_phys = (uint32_t)pmm_alloc_page();
 
@@ -852,7 +1108,7 @@ task_t* create_kernel_thread(uint32_t entry_virt){
     *(--kstack) = 0x10;        // fs
     *(--kstack) = 0x10;        // gs
 
-    //Фиксируем получившийся чистейший указатель вершины стека в дескрипторе задачи!
+    //Фиксируем получившийся указатель вершины стека в дескрипторе задачи
     task->esp = (uint32_t)kstack;
 
     //Атомарно врезаем новый поток в кольцевую очередь планировщика
@@ -866,58 +1122,188 @@ task_t* create_kernel_thread(uint32_t entry_virt){
         ready_queue->next = task;
     }
     spin_unlock_irqrestore(&sched_spinlock, eflags);
-
+//draw_hex_dword(eflags, 20, 300);for(;;);
     return task;
 }
 
 
+/* Зеркалит только что созданный kernel-PDE во все user-PD.
+   Вызывается из vmm_map_page, когда в kernel_directory появился новый PDE.
+   Должно вызываться при IF=0 (kmalloc держит heap_spinlock с CLI). */
+void task_mirror_kernel_pde(uint32_t pd_index){
+    if (!ready_queue) return;
+    task_t *t = ready_queue;
+    do {
+        if (t->page_dir && t->page_dir != kernel_directory){
+            vmm_sync_pde_into_user_pd(t->page_dir, pd_index);
+        }
+        t = t->next;
+    } while (t != ready_queue);
+}
+
+/* Зеркалит один kernel-PTE в user-PD, если у того в этом PDE СВЕЖАЯ PT
+   (а не шаренная — шаренная и так видит изменения). Актуально для critical
+   PDE (LFB/MMIO). */
+void task_propagate_kernel_pte(uint32_t pd_index, uint32_t pt_index, uint32_t pte_val){
+    if (!ready_queue) return;
+    task_t *t = ready_queue;
+    do {
+        if (t->page_dir && t->page_dir != kernel_directory){
+            uint32_t user_pde    = (*t->page_dir)[pd_index];
+            uint32_t kernel_pde  = (*kernel_directory)[pd_index];
+            if (user_pde == 0) continue;         /* PDE ещё нет — догонит spawn-sync */
+            if (user_pde == kernel_pde) continue;/* PT шаренная — PTE уже виден */
+            /* Свежая PT: копируем PTE */
+            page_table_t *user_pt = (page_table_t*)(user_pde & 0xFFFFF000);
+            (*user_pt)[pt_index] = pte_val & ~PAGE_USER;
+        }
+        t = t->next;
+    } while (t != ready_queue);
+}
+
+
+
+
+/* Одноразовый стресс-тест: заставляем kmalloc перескочить через границу PDE */
+static void vmm_stress_test_cross_pde(void){
+    /* mem_ptr обычно на ~2-3 MB. Прыгаем через ~10 MB, чтобы гарантированно
+       перешли не один, а два-три PDE. */
+    com_puts("[STRESS] start\n");
+    void *a = kmalloc(8 * 1024 * 1024);
+    memset(a, 0xAA, 8 * 1024 * 1024);
+    com_puts("[STRESS] memset 8 * 1024 * 1024 ok \n");
+    void *b = kmalloc(8 * 1024 * 1024);
+    //return;
+
+    if (!a || !b){
+        com_puts("[STRESS] alloc failed\n");
+        return;
+    }
+
+    memset(b, 0xBB, 8 * 1024 * 1024);
+    com_puts("[STRESS] memsets\n");
+    //return;
+    /* Теперь проверим что для ВСЕХ user-PD адреса a и b видны */
+    uint32_t eflags = spin_lock_irqsave(&sched_spinlock);
+    if (ready_queue){
+        task_t *t = ready_queue;
+        do {
+            if (t->page_dir && t->page_dir != kernel_directory){
+                uint32_t pa = vmm_get_phys_addr(t->page_dir, (uint32_t)a);
+                uint32_t pb = vmm_get_phys_addr(t->page_dir, (uint32_t)b);
+                if (!pa || !pb){
+                    com_puts("[STRESS] MISSING PDE in task pid=");
+                    com_puthex(t->pid); com_puts("\n");
+                }
+            }
+            t = t->next;
+        } while (t != ready_queue);
+    }
+    spin_unlock_irqrestore(&sched_spinlock, eflags);
+
+    kfree(b);
+    kfree(a);
+    com_puts("[STRESS] passed\n");
+}
 
 void kernel_init_thread(void){
     drivers_init();
+/*
+    com_puts("[CFG] fb_phys=");  com_puthex(boot_info->framebuffer);
+    com_puts(" fb_size=");       com_puthex(boot_info->pitch * boot_info->height);
+    com_puts(" heap_base=");     com_puthex(KERNEL_HEAP_VA_BASE);
+    com_puts(" pmm_pages=");     com_puthex(pmm_get_total_memory() / 4096);
+    com_puts("\n");
+*/
 
     kconsole_init();
+    //draw_string(0, 232, "here");
 
     //__asm__ __volatile__("sti" ::: "memory");
 
-    //com_puts("[KERNEL THREAD] System Init Thread started successfully!\n");
+    // Освобождаем образы модулей загрузчика — они уже скопированы
+    // в область драйверов (0xC00000..0x1000000) и больше не нужны.
+    // Экономия — до ~1-2 MB нижней памяти на 4 драйвера.
+    //for (uint32_t i = 0; i < boot_info->module_count; i++){
+        //module_info_t *m = &boot_info->modules[i];
+        //if (m->start != 0 && m->size != 0){
+            //pmm_free_region(m->start, m->size);
+        //}
+    //}
+
+
     //Инициализация драйверов дисковода и VFS
     //Планировщик в этот момент работает, прерывание 32 тикает фоном
     //Драйвер ФС сам переключает свой локальный schedule_lock на время чтения портов
     int r = vfs_init_system();
-    //Выводим статус монтирования на COM-порт или дебаг-область
-    //com_puts("[KERNEL THREAD] VFS Init Status: ");
-    //com_puthex(r);
-    //com_puts("\n");
-
+    //load_screen_add_string("r %d",r);for(;;);
     if(r == VFS_STATUS_OK){
-        kprintf("Open boot config...");
+        load_screen_add_string("VFS init normal");
         cfg_file_t *cfg = cfg_open("/config/boot/boot.cfg", FS_OPEN_READ,true);
-        kprintf("OK\n");
+        //draw_string(0, 270, "cfg opened");for(;;);
+
         init_standard_locales();
 
-        kconsole_reconfigure(cfg);
+        kconsole_reconfigure(cfg);//for(;;);
 
         int adddrv_status = load_additional_drivers(cfg);
         if(adddrv_status != DRV_STATUS_OK){
-            //com_puts("[KERNEL THREAD] Additional drv load error: ");
-            //com_puthex(adddrv_status);
-            //com_puts("\n");
+            com_puts("[KERNEL THREAD] Additional drv load error: ");
+            com_puthex(adddrv_status);
+            com_puts("\n");
+            load_screen_add_string("Additional drv load error:%x",adddrv_status);
+        } else {
+            load_screen_add_string("Additional drv loading ok");
         }
         cfg_close(cfg);
+        //Если всё загрузилось, переключим драйвер файловой системы на работу с блочным драйвером
+        if (main_filesystem_fs_api->block_device_driver_enabled) {
+            load_screen_add_string("Blockdevice driver enabled");
+        } else {
+            load_screen_add_string("Blockdevice driver disabled");
+        }/*
+        if (main_filesystem_fs_api && main_filesystem_fs_api->block &&
+            main_filesystem_fs_api->block->enabled) {
+            main_filesystem_fs_api->block_device_driver_enabled = true;
+            kprintf("BLOCK device driver enabled\n");
+        } else {
+            kprintf("BLOCK device driver NOT enabled\n");
+        }*/
+    } else {
+        if (main_filesystem_fs_api->block_device_driver_enabled) {
+            //load_screen_add_string("Blockdevice driver enabled");
+        } else {
+            //load_screen_add_string("Blockdevice driver disabled");
+        }
+        //load_screen_add_string("VFS init error: %x s:%x",r,main_filesystem_fs_api->__ext2_dbg_hit_lba);
+        kernel_load_animation_stop_nohide();
+        for(;;);
     }
+    //for(;;);
+    load_screen_add_string("Spawning Chorus & Sekhmet");
 
+    /*kprintf("modules: fb=%x(%d) block=%x(%d) fat12=%x(%d) ext2=%x(%d)\n",
+    boot_info->modules[0].start, boot_info->modules[0].size,
+    boot_info->modules[1].start, boot_info->modules[1].size,
+    boot_info->modules[2].start, boot_info->modules[2].size,
+    boot_info->modules[3].start, boot_info->modules[3].size);
+    */
+    //for(;;);
+
+//draw_hex_dword(console_bgcolor, 20, 50);
     //task_spawn_from_file("/usbin/hello.bin", 0x40000000,"-v --test-mode");
     task_spawn_from_file("/bin/chorus.bin", 0x40000000, NULL);
     //task_spawn_from_file("/usbin/vfs_test.bin", 0x40000000, NULL);
     //task_spawn_from_file("/usbin/cat.bin", 0x40000000, NULL);
-    //task_spawn_from_file("/usbin/hello.bin", 0x40000000, NULL);
+    //task_spawn_from_file("/bin/hello.bin", 0x40000000, NULL);
     //task_spawn_from_file("/usbin/kb_check.bin", 0x40000000, NULL);
     //task_spawn_from_file("/usbin/allocram.bin", 0x40000000, "512");
 
     task_spawn_from_file("/bin/sekhmet.bin", 0x40000000, NULL);
-
-
+    //vmm_stress_test_cross_pde();
     //current_task = ready_queue;
+
+    kernel_load_animation_stop();
 
 
     com_puts("[KERNEL THREAD] Userspace task HELLO.BIN spawned from disk.\n");

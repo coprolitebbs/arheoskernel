@@ -90,6 +90,8 @@ typedef struct{
     uint8_t fat[FAT12_MAX_FAT_SIZE];
 
     fat12_dirent_t rentry;
+
+    uint32_t use_block_api;
 } fat12_fs_t;
 
 

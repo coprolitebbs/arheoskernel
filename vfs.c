@@ -29,13 +29,17 @@
 #include "drivers/ext2_driver/include/ext2_internal.h"
 
 
-vfs_mount_t vfs_mount_table[VFS_MAX_MOUNTS];
+
 
 // Глобальная ядерная таблица открытых файлов
 vfs_file_t vfs_file_table[VFS_MAX_OPEN_FILES];
 
 // Глобальный безопасный буфер ядра для нормализации и отсечения префиксов путей VFS
 uint8_t vfs_path_buffer[VFS_PATH_MAX] __attribute__((aligned(4)));
+
+uint8_t local_rel_path[VFS_PATH_MAX] __attribute__((aligned(4)));
+
+vfs_mount_t vfs_mount_table[VFS_MAX_MOUNTS];
 
 //Внутренние функции
 
@@ -147,6 +151,9 @@ int vfs_mount(const char *mount_point, fs_driver_api_t *driver, uint32_t drive_i
 
     //Инициализируем (монтируем) физический диск через переданный драйвер ФС
     int r = driver->mount(drive_id);
+    //draw_hex_dword(r, 30, 420);
+    //for(;;);
+
     if (r != FS_OK) return r;
 
     //Выделяем память из кучи ядра через kmalloc под точную длину строки + терминальный ноль
@@ -191,7 +198,7 @@ int vfs_unmount(uint32_t drive_id){
 }
 
 
-int vfs_open(const char *path, uint32_t flags) {
+int vfs_open(const char *path, uint32_t flags){
     if (!path || path[0] != '/') return VFS_STATUS_IO_ERROR;
 
     if (!(flags & (FS_OPEN_READ | FS_OPEN_WRITE))) return FS_INVALID_PATH;
@@ -208,24 +215,32 @@ int vfs_open(const char *path, uint32_t flags) {
 
     vfs_mount_t *mnt = &vfs_mount_table[slot];
 
-    char local_rel_path[VFS_PATH_MAX];
+    //char local_rel_path[VFS_PATH_MAX]={0};
+    //char *local_rel_path = (char *)kmalloc(VFS_PATH_MAX);
     memset(local_rel_path, 0, VFS_PATH_MAX);
     vfs_get_relative_path_safe(path, match_len, local_rel_path);
-
     //uint32_t safe_flags = flags;
     //if (safe_flags & 0x0004) {
         //safe_flags &= ~0x0001;
     //}
 
     //int driver_fd = mnt->driver->open(mnt->volume, local_rel_path, safe_flags);
+    //ext2_volume_t *drv = (ext2_volume_t *)mnt->volume;
+    //kprintf("---fopen=%x\n",drv->drive);
     int driver_fd = mnt->driver->open(mnt->volume, local_rel_path, flags);
-    if (driver_fd < 0) return driver_fd;
+    //kprintf("---after=%x\n",drv->drive);
+    //kfree(local_rel_path);
+    //if (driver_fd < 0) return driver_fd;
+    if (driver_fd < 0) {
+        //kprintf("[VFS] open failed: path='%s', err=%d\n", path, driver_fd);
+        return driver_fd;
+    }
 
-    vfs_file_table[vfs_fd].used = true;
-    vfs_file_table[vfs_fd].mount = mnt;
-    vfs_file_table[vfs_fd].driver_fd = driver_fd;
-    //vfs_file_table[vfs_fd].flags = safe_flags;
-    vfs_file_table[vfs_fd].flags = flags;
+    vfs_file_t *vfs = &vfs_file_table[vfs_fd];
+    vfs->flags = flags;
+    vfs->used = true;
+    vfs->mount = mnt;
+    vfs->driver_fd = driver_fd;
 
     return vfs_fd;
 }
@@ -242,11 +257,11 @@ int vfs_close(int vfs_fd){
     int res = file->mount->driver->close(file->driver_fd);
 
     //Освобождаем глобальный дескриптор ядра
-    if (res == FS_OK){
-        file->used = false;
-        file->mount = NULL;
-        file->driver_fd = -1;
-    }
+    //if (res == FS_OK){
+    file->used = false;
+    file->mount = NULL;
+    file->driver_fd = -1;
+    //}
     return res;
 }
 
@@ -330,6 +345,117 @@ int vfs_unlink(const char *path){
 }
 
 
+/*
+int vfs_rename(const char *oldpath, const char *newpath){
+    if (!oldpath || oldpath[0] != '/' || !newpath || newpath[0] != '/')
+        return VFS_STATUS_IO_ERROR;
+
+    if (strcmp(oldpath, newpath) == 0) return FS_OK;
+
+    uint32_t old_ml = 0, new_ml = 0;
+    int old_slot = vfs_find_mount_slot(oldpath, &old_ml);
+    int new_slot = vfs_find_mount_slot(newpath, &new_ml);
+    if (old_slot == -1 || new_slot == -1) return VFS_STATUS_IO_ERROR;
+    if (old_slot != new_slot)             return FS_NOT_SUPPORTED;
+
+    vfs_mount_t *mnt = &vfs_mount_table[old_slot];
+    char old_rel[VFS_PATH_MAX], new_rel[VFS_PATH_MAX];
+    vfs_get_relative_path_safe(oldpath, old_ml, old_rel);
+    vfs_get_relative_path_safe(newpath, new_ml, new_rel);
+
+    int sfd = vfs_open(oldpath, FS_OPEN_READ);
+    if (sfd < 0) return sfd;
+    int dfd = vfs_open(newpath, FS_OPEN_WRITE | FS_OPEN_CREATE | FS_OPEN_TRUNCATE);
+    if (dfd < 0){ vfs_close(sfd); return dfd; }
+
+    uint8_t *buf = (uint8_t *)kmalloc(4096);
+    if (!buf){ vfs_close(sfd); vfs_close(dfd); return VFS_STATUS_IO_ERROR; }
+
+    int res = FS_OK;
+    int r;
+    while ((r = vfs_read(sfd, buf, 4096)) > 0){
+        if (vfs_write(dfd, buf, r) != r){ res = FS_IO_ERROR; break; }
+    }
+    if (r < 0) res = FS_IO_ERROR;
+    kfree(buf);
+    vfs_close(sfd);
+    vfs_close(dfd);
+
+    if (res == FS_OK){
+        res = vfs_unlink(oldpath);
+    }
+    return res;
+}
+*/
+
+int vfs_rename(const char *oldpath, const char *newpath){
+    if (!oldpath || oldpath[0] != '/' || !newpath || newpath[0] != '/')
+        return VFS_STATUS_IO_ERROR;
+
+    if (strcmp(oldpath, newpath) == 0) return FS_OK;   /* no-op */
+
+    uint32_t old_ml = 0, new_ml = 0;
+    int old_slot = vfs_find_mount_slot(oldpath, &old_ml);
+    int new_slot = vfs_find_mount_slot(newpath, &new_ml);
+    if (old_slot == -1 || new_slot == -1) return VFS_STATUS_IO_ERROR;
+    if (old_slot != new_slot)             return FS_NOT_SUPPORTED;
+
+    vfs_mount_t *mnt = &vfs_mount_table[old_slot];
+    char old_rel[VFS_PATH_MAX], new_rel[VFS_PATH_MAX];
+    vfs_get_relative_path_safe(oldpath, old_ml, old_rel);
+    vfs_get_relative_path_safe(newpath, new_ml, new_rel);
+
+    /* 1. Пробуем драйверный fast-path: приёмник ещё не существует */
+    if (mnt->driver->rename){
+        int r = mnt->driver->rename(mnt->volume, old_rel, new_rel);
+        if (r == FS_OK) return FS_OK;
+        if (r != FS_NOT_SUPPORTED) return r;
+    }
+
+    /* 2. Если приёмник существует — unlink его (это быстро) и повторить rename.
+       Иначе копирование через буфер (медленно). */
+    fs_stat_t st;
+    bool dest_exists = (vfs_stat(newpath, &st) == FS_OK);
+
+    if (dest_exists){
+        if (st.attributes & FS_ATTR_DIRECTORY) return FS_NOT_SUPPORTED;
+        if (!mnt->driver->rename)              return FS_NOT_SUPPORTED;
+
+        int ur = mnt->driver->unlink(mnt->volume, new_rel);
+        if (ur != FS_OK) return ur;            /* откат: old цел, new цел */
+
+        int r = mnt->driver->rename(mnt->volume, old_rel, new_rel);
+        if (r == FS_OK) return FS_OK;
+
+        /* приёмник удалён, но rename не прошёл — данные целы, old на месте.
+           пользователь может повторить вручную или восстановить из бэкапа */
+        return r;
+    }
+
+    /* 3. Последний резерв: copy+unlink (driver не умеет / нет rename) */
+    int sfd = vfs_open(oldpath, FS_OPEN_READ);
+    if (sfd < 0) return sfd;
+    int dfd = vfs_open(newpath, FS_OPEN_WRITE | FS_OPEN_CREATE | FS_OPEN_TRUNCATE);
+    if (dfd < 0){ vfs_close(sfd); return dfd; }
+
+    uint8_t *buf = (uint8_t *)kmalloc(4096);
+    if (!buf){ vfs_close(sfd); vfs_close(dfd); return VFS_STATUS_IO_ERROR; }
+
+    int res = FS_OK;
+    int r;
+    while ((r = vfs_read(sfd, buf, 4096)) > 0){
+        if (vfs_write(dfd, buf, r) != r){ res = FS_IO_ERROR; break; }
+    }
+    if (r < 0) res = FS_IO_ERROR;
+    kfree(buf);
+    vfs_close(sfd);
+    vfs_close(dfd);
+
+    if (res == FS_OK) res = vfs_unlink(oldpath);
+    return res;
+}
+
+
 int vfs_rmdir(const char *path){
     if (!path || path[0] != '/') return VFS_STATUS_IO_ERROR;
 
@@ -353,7 +479,7 @@ int vfs_stat(const char *path, fs_stat_t *st) {
 
     vfs_mount_t *mnt = &vfs_mount_table[slot];
 
-    char local_rel_path[VFS_PATH_MAX];
+    //char local_rel_path[VFS_PATH_MAX];
     memset(local_rel_path, 0, VFS_PATH_MAX);
     vfs_get_relative_path_safe(path, match_len, local_rel_path);
 
@@ -364,7 +490,6 @@ int vfs_stat(const char *path, fs_stat_t *st) {
 
 
 int vfs_init_system(void){
-    kprintf("VFS init...");
     memset(vfs_mount_table, 0, sizeof(vfs_mount_table));
 
     uint8_t fs_ind = 255;
@@ -381,15 +506,48 @@ int vfs_init_system(void){
     if(fs_ind == 255) return VFS_STATUS_NOT_SUPPORTED;
     if(!fs_apis[fs_ind].api) return VFS_STATUS_INVALID_HANDLE;
     main_filesystem_fs_api = fs_apis[fs_ind].api;
-    //монтируем корневую фс
-    res = vfs_mount("/", main_filesystem_fs_api, 0);
 
-    //Резервирование файла 0 под stdin
+    //монтируем корневую фс
+    //res = vfs_mount("/", main_filesystem_fs_api, 0);
+
+    if (blockdevice_driver && blockdevice_driver->enabled &&
+        blockdevice_driver->enum_devices){
+
+        //Приоритетная подсказка от BIOS (может быть неверной)
+        uint32_t boot_id = 0;
+        if (blockdevice_driver->resolve_boot_drive){
+            blockdevice_driver->resolve_boot_drive(boot_info->boot_drive, &boot_id);
+        }
+
+        block_info_t bi;
+        if (blockdevice_driver->get_info(boot_id, &bi) == FS_OK){
+            res = vfs_mount("/", main_filesystem_fs_api, boot_id);
+            if (res == VFS_STATUS_OK) goto mount_ok;
+        }
+
+        //перебрать все устройства
+        for (int i = 0; i < 16; i++){
+            if (blockdevice_driver->enum_devices(i, &bi) != FS_OK) break;
+            if ((uint32_t)i == boot_id) continue;
+
+            res = vfs_mount("/", main_filesystem_fs_api, i);
+            if (res == VFS_STATUS_OK){
+                //kprintf("[VFS] Root mounted from block id %d\n", i);
+                goto mount_ok;
+            }
+        }
+    } else {
+        //legacy PIO-путь без block API (старая проверка)
+        res = vfs_mount("/", main_filesystem_fs_api, 0);
+    }
+
+mount_ok:
+    //Резервирование под stdin
     vfs_file_table[0].used = true;
     vfs_file_table[0].driver_fd = VFS_DRIVER_SIG; //Маркер устройства ввода
     vfs_file_table[0].flags = FS_OPEN_READ;
     vfs_file_table[0].mount = &vfs_mount_table[0];
-    kprintf("ok\n");
+    //kprintf("ok\n");
     return res;
 }
 

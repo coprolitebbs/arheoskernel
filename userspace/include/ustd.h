@@ -18,6 +18,8 @@
 #ifndef USTD_H
 #define USTD_H
 
+//#define ARHEOS_OS
+
 #include <stddef.h>
 #include <stdint.h>
 #include "fileattrs.h"
@@ -78,6 +80,7 @@ int mkdir(const char *path);
 int u_readdir(int fd, u_dirent_t *entry);
 int close(int fd);
 int unlink(const char *path);
+int rename(const char *oldpath, const char *newpath);
 int rmdir(const char *path);
 void clear_screen(void);
 void u_clear_tile(uint32_t x, uint32_t y, uint32_t color);
@@ -107,5 +110,11 @@ int  u_fb_blit(int x, int y, int w, int h, const void *src);
 void printf(const char *format, ...);
 int scanf(const char *format, ...);
 
+uint32_t u_clipboard_size(void);
+int      u_clipboard_get(void *buf, uint32_t max);
+int      u_clipboard_set(const void *buf, uint32_t size);
+void     u_clipboard_clear(void);
+
+void u_get_console_pos(uint32_t *x, uint32_t *y);
 
 #endif

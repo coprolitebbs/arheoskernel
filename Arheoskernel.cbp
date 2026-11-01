@@ -14,6 +14,7 @@
 				<Option compiler="null" />
 			</Target>
 		</Build>
+		<Unit filename="bochsrc" />
 		<Unit filename="boot_1440.asm" />
 		<Unit filename="boot_720.asm" />
 		<Unit filename="boot_hdd.asm" />
@@ -36,6 +37,11 @@
 		<Unit filename="driver_elf.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="drivers/block_driver/block_driver.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/block_driver/block_start.asm" />
+		<Unit filename="drivers/block_driver/include/block_driver.h" />
 		<Unit filename="drivers/ext2_driver/ext2_disk.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -80,6 +86,35 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="drivers/kbd_driver/kbd_start.asm" />
+		<Unit filename="drivers/usb_driver/ehci_core.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/usb_driver/include/ehci_priv.h" />
+		<Unit filename="drivers/usb_driver/include/usb_core.h" />
+		<Unit filename="drivers/usb_driver/include/usb_driver.h" />
+		<Unit filename="drivers/usb_driver/include/usb_hcd.h" />
+		<Unit filename="drivers/usb_driver/include/usb_hub.h" />
+		<Unit filename="drivers/usb_driver/include/usb_msc.h" />
+		<Unit filename="drivers/usb_driver/include/usb_uhci.h" />
+		<Unit filename="drivers/usb_driver/usb_core.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/usb_driver/usb_driver.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/usb_driver/usb_hcd.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/usb_driver/usb_hub.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/usb_driver/usb_msc.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/usb_driver/usb_start.asm" />
+		<Unit filename="drivers/usb_driver/usb_uhci.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="drivers/userspace_driver.ld" />
 		<Unit filename="f12ld.asm" />
 		<Unit filename="font.c">
@@ -98,6 +133,7 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="hddld.asm" />
+		<Unit filename="include-kernel/block.h" />
 		<Unit filename="include-kernel/bootinfo.h" />
 		<Unit filename="include-kernel/comdebug.h" />
 		<Unit filename="include-kernel/config.h" />
@@ -115,6 +151,8 @@
 		<Unit filename="include-kernel/kconsole.h" />
 		<Unit filename="include-kernel/kernel.h" />
 		<Unit filename="include-kernel/kernel_heap.h" />
+		<Unit filename="include-kernel/kload_screen.h" />
+		<Unit filename="include-kernel/kpanic.h" />
 		<Unit filename="include-kernel/lib.h" />
 		<Unit filename="include-kernel/locale.h" />
 		<Unit filename="include-kernel/locale_types.h" />
@@ -123,6 +161,7 @@
 		<Unit filename="include-kernel/spinlock.h" />
 		<Unit filename="include-kernel/syscalls.h" />
 		<Unit filename="include-kernel/task.h" />
+		<Unit filename="include-kernel/usb_registry.h" />
 		<Unit filename="include-kernel/use_drivers.h" />
 		<Unit filename="include-kernel/vfs.h" />
 		<Unit filename="include-kernel/vmm.h" />
@@ -159,7 +198,15 @@
 		<Unit filename="kernel.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="kernel.ld" />
+		<Unit filename="kernel_elf.ld" />
 		<Unit filename="kernel_heap.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="kload_screen.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="kpanic.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="lib.c">
@@ -178,6 +225,9 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="task.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="usb_registry.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="use_drivers.c">
@@ -205,15 +255,21 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/filesystem/config/boot/boot.cfg" />
+		<Unit filename="userspace/filesystem/config/boot/boot_usbtest.cfg" />
 		<Unit filename="userspace/filesystem/config/sekhmet/config.cfg" />
 		<Unit filename="userspace/filesystem/config/sekhmet/sekhmet.hlp" />
 		<Unit filename="userspace/include/fileattrs.h" />
 		<Unit filename="userspace/include/syscall.h" />
 		<Unit filename="userspace/include/uconfig.h" />
+		<Unit filename="userspace/include/udevices.h" />
+		<Unit filename="userspace/include/udevices_struct.h" />
 		<Unit filename="userspace/include/uimage.h" />
 		<Unit filename="userspace/include/umemory.h" />
 		<Unit filename="userspace/include/ustd.h" />
 		<Unit filename="userspace/lib/uconfig.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/lib/udevices.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/lib/uimage.c">
@@ -224,6 +280,9 @@
 		</Unit>
 		<Unit filename="userspace/lib/userspace.ld" />
 		<Unit filename="userspace/lib/ustd.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/arfetch/arfetch.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/cat/cat.c">
@@ -241,6 +300,9 @@
 		<Unit filename="userspace/system procs/ls/ls.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="userspace/system procs/lsusb/lsusb.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="userspace/system procs/mkdir/mkdir.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -250,10 +312,20 @@
 		<Unit filename="userspace/system procs/rmdir/rmdir.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="userspace/system procs/sekhmet/include/sekhmet.h" />
 		<Unit filename="userspace/system procs/sekhmet/sekhmet.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/setbg/setbg.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/thoth/Makefile" />
+		<Unit filename="userspace/system procs/thoth/include/thoth.h" />
+		<Unit filename="userspace/system procs/thoth/include/thoth_platform.h" />
+		<Unit filename="userspace/system procs/thoth/platform_arheos.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/thoth/platform_posix.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/thoth/thoth.c">

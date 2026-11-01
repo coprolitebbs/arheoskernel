@@ -27,7 +27,7 @@ int main(int argc, char *argv[]) {
     char name[64];
 
     // u_read() внутри ustd.c заблокирует поток, дождется ввода строки лога,
-    // а наш новый scanf распарсит её по переменным!
+    // а scanf распарсит её по переменным
     int scanned = scanf("%d %s", &age, name);
 
     printf("\nРезолюция scanf (успешных совпадений: %d):\n", scanned);

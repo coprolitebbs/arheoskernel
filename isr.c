@@ -29,6 +29,8 @@
 #include "include-kernel/kbd_translate.h"
 #include "include-kernel/locale.h"
 #include "include-kernel/font_vga.h"
+#include "include-kernel/kpanic.h"
+#include "include-kernel/kload_screen.h"
 
 volatile uint8_t floppy_irq_fired = 0;
 volatile uint32_t tick_count = 0;
@@ -182,96 +184,62 @@ void pic_init(void) {
 }
 
 
+
+//GENRAL PROTECTION FAULT
 void isr_halt13(struct regs *r){
-    int xoffs = 0;
-    int yoffs = 60;
-	draw_string(10, 30, "GP: ");
-	char buf[16];
-	itoa(r->err_code, buf, 16);
-	draw_string(120, 30, buf);
-	draw_string(10, 40, "EIP: ");
-	itoa(r->eip, buf, 16);
-	draw_string(120, 40, buf);
-	draw_string(10, 50, "CS: ");
-	itoa(r->cs, buf, 16);
-	draw_string(120, 50, buf);
+    panic_field_t fields[6] = {
+        { "ERR",   r->err_code          },
+        { "EIP",   r->eip               },
+        { "CS",    r->cs                },
+        { "ESP",   r->user_esp          },
+        { "Sched", (uint32_t)shedule_count },
+        { "Ticks", tick_count           },
+    };
 
-	draw_string(10, 60, "Shedule count: ");
-	itoa(shedule_count, buf, 16);
-	draw_string(xoffs, yoffs, buf);
-	//xoffs += 10;
-	if(xoffs > 1020){
-		xoffs = 0;
-		yoffs += 10;
-	}
-	draw_string(10, 70, "user_esp: ");
-	itoa(r->user_esp, buf, 16);
-	draw_string(120, 70, buf);
-	draw_string(10, 80, "user_eip: ");
-	itoa(r->eip, buf, 16);
-	draw_string(120, 80, buf);
+    draw_kernel_panic("GENERAL PROTECTION FAULT", fields, 6);
 
-    com_puts("[KERNEL] General Protection Fault! Stop.\n");
-
-	for(;;) {}
+    com_puts("[KERNEL] General Protection Fault! Halted.\n");
+    for(;;) { __asm__ __volatile__("cli; hlt"); }
 }
 
+void isr_double_fault(struct regs *r){
+    (void)r;
+    //com_puts("[KERNEL] DOUBLE FAULT! Halted.\n");
+    __asm__ __volatile__("cli");
+    for(;;) __asm__ __volatile__("hlt");
+}
 
+//PAGE FAULT
 void isr_pagefault(struct regs *r){
-	uint32_t cr2;
-	asm volatile("mov %%cr2,%0":"=r"(cr2));
+    uint32_t cr2, cr3;
+    __asm__ __volatile__("mov %%cr2,%0":"=r"(cr2));
+    __asm__ __volatile__("mov %%cr3,%0":"=r"(cr3));
 
-	draw_string(10,630,"PAGE FAULT");
+    /* Переключаемся на kernel_directory: там LFB точно замаплен
+       (vmm_map_pages добавлял его туда). Панику рисуем из
+       гарантированно-валидного адресного пространства. */
+    uint32_t kd_phys = (uint32_t)kernel_directory & 0xFFFFF000;
+    if (kd_phys != 0 && (cr3 & 0xFFFFF000) != kd_phys){
+        __asm__ __volatile__("mov %0, %%cr3" : : "r"(kd_phys) : "memory");
+    }
 
-	draw_string(10,640,"CR2:");
-	draw_hex_dword(cr2,100,640);
+    panic_field_t fields[8] = {
+        { "CR2",   cr2                                                    },
+        { "ERR",   r->err_code                                            },
+        { "EIP",   r->eip                                                 },
+        { "CS",    r->cs                                                  },
+        { "ESP",   r->user_esp                                            },
+        { "CR3",   cr3                                                    },
+        { "TaskCR3", current_task ? current_task->page_dir_phys : 0       },
+        { "Sched", (uint32_t)shedule_count                                },
+    };
 
-	draw_string(10,650,"ERR:");
-	draw_hex_dword(r->err_code,100,650);
+    draw_kernel_panic("PAGE FAULT", fields, 8);
 
-	draw_string(10,660,"EIP:");
-	draw_hex_dword(r->eip,100,660);
-
-	draw_string(10,670,"CS:");
-	draw_hex_dword(r->cs,100,670);
-
-	draw_string(10,680,"ESP");
-	draw_hex_dword(r->user_esp,100,680);
-
-	uint32_t cr3;
-	asm volatile("mov %%cr3,%0":"=r"(cr3));
-
-	draw_string(10,690,"PF CR3:");
-	draw_hex_dword(cr3,100,690);
-	draw_hex_dword(current_task->page_dir_phys,250,690);
-
-	uint32_t pdee = (*current_task->page_dir)[0x40000000 >> 22];
-	draw_hex_dword(pdee,100,700);
-
-	uint32_t *pt=(uint32_t*)(pdee & 0xFFFFF000);
-	draw_hex_dword(pt[0],250,700);
-
-	uint32_t va = r->eip;
-	uint32_t pde_index = va >> 22;
-	uint32_t pte_index = (va >> 12) & 0x3FF;
-	draw_string(10,510,"PDE IDX:");
-	draw_hex_dword(pde_index,100,510);
-	draw_string(10,520,"PTE IDX:");
-	draw_hex_dword(pte_index,100,520);
-
-	uint32_t *dir = (uint32_t*)current_task->page_dir_phys;
-	uint32_t pde = dir[pde_index];
-	draw_string(10,530,"PDE:");
-	draw_hex_dword(pde,100,530);
-
-	if(pde & PAGE_PRESENT){
-		uint32_t *pt = (uint32_t*)(pde & 0xFFFFF000);
-		uint32_t pte = pt[pte_index];
-		draw_string(10,540,"PTE:");
-		draw_hex_dword(pte,100,540);
-	}
-	com_puts("[KERNEL] PAGE FAULT! Stop.\n");
+    com_puts("[KERNEL] PAGE FAULT! Halted.\n");
+    for(;;) { __asm__ __volatile__("cli; hlt"); }
 }
+
 
 
 
@@ -384,6 +352,11 @@ void irq6_handler(struct regs *r){
 
 
 void isr_handler(struct regs *r){
+    if (r->int_no == 8){
+        isr_double_fault(r);
+        for(;;);
+    }
+
     //Исключения (0–31) — критическая ошибка
     if (r->int_no < 32){
 		if (r->int_no == 14){
@@ -418,6 +391,10 @@ void isr_handler(struct regs *r){
 
             //Обновляем мигание курсора TTY
             kconsole_update_cursor();
+
+            if ((tick_count & 5) == 0){
+                kernel_load_animation_next_step();
+            }
 
             if (kernel_schedule_lock == 1) return;
             //Вызываем планировщик

@@ -122,36 +122,52 @@ static int floppy_read_sector(fat12_fs_t *vol,uint32_t lba,void *buffer){
 
 
 //Чтение сектора
- int fat12_read_sectors(fat12_fs_t *vol,uint32_t lba,uint32_t count,void *buffer){
+ int fat12_read_sectors(fat12_fs_t *vol, uint32_t lba, uint32_t count, void *buffer){
     if (!vol || !buffer) return FS_IO_ERROR;
     if (count == 0) return FS_OK;
 
-    //Пока поддерживаем только стандартные 512-байтовые сектора, но, больше для дискет и не надо
+    //Block API
+    if (vol->use_block_api && api_ptr->block){
+        int r;
+        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+        r = api_ptr->block->read(vol->drive, (uint64_t)lba, count, buffer);
+        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+        return r;
+    }
+
+    //FDC (legacy PIO)
     if (vol->bytes_per_sector != 512) return FS_NOT_SUPPORTED;
     uint8_t *dst = (uint8_t *)buffer;
     for (uint32_t i = 0; i < count; i++){
-        //Читаем один физический сектор через FDC
         uint32_t current_lba = lba + i;
         uint32_t sectors_per_cylinder = vol->heads * vol->sectors_per_track;
         uint32_t cylinder = current_lba / sectors_per_cylinder;
         uint32_t tmp = current_lba % sectors_per_cylinder;
         uint32_t head = tmp / vol->sectors_per_track;
         uint32_t sector = (tmp % vol->sectors_per_track) + 1;
-        int r = fdc_read_sector(vol,cylinder,head,sector,dst + i * vol->bytes_per_sector);
+        int r = fdc_read_sector(vol, cylinder, head, sector, dst + i * vol->bytes_per_sector);
         if (r != FS_OK) return r;
     }
-
     return FS_OK;
 }
 
 
 //Запись сектора
-int fat12_write_sectors(fat12_fs_t *vol,uint32_t lba,uint32_t count,const void *buffer){
+int fat12_write_sectors(fat12_fs_t *vol, uint32_t lba, uint32_t count, const void *buffer){
     if (!vol || !buffer || count == 0) return FS_IO_ERROR;
+
+    //Block API
+    if (vol->use_block_api && api_ptr->block){
+        int r;
+        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+        r = api_ptr->block->write(vol->drive, (uint64_t)lba, count, buffer);
+        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+        return r;
+    }
+
+    //FDC (legacy PIO)
     if (vol->bytes_per_sector != 512) return FS_NOT_SUPPORTED;
-
     const uint8_t *src = (const uint8_t *)buffer;
-
     for (uint32_t i = 0; i < count; i++){
         uint32_t current_lba = lba + i;
         uint32_t sectors_per_cylinder = vol->heads * vol->sectors_per_track;
@@ -159,33 +175,85 @@ int fat12_write_sectors(fat12_fs_t *vol,uint32_t lba,uint32_t count,const void *
         uint32_t tmp = current_lba % sectors_per_cylinder;
         uint32_t head = tmp / vol->sectors_per_track;
         uint32_t sector = (tmp % vol->sectors_per_track) + 1;
-
         int r = fdc_write_sector(vol, cylinder, head, sector, src + i * 512);
         if (r != FS_OK) return r;
     }
-
     return FS_OK;
 }
 
 
 
 //Инициализация
+/*
 int fat12_disk_init(fat12_fs_t *vol){
     if (!vol) return FS_IO_ERROR;
-    //Пока поддерживаем только floppy A:
-    if (vol->drive != 0) return FS_NOT_SUPPORTED;
-    //Стандартная геометрия будет уточнена после чтения BPB.
-    //Временно ставим 18 секторов/трек.
 
+    //Геометрия по умолчанию; реальная будет взята из BPB после чтения boot-сектора.
     vol->sectors_per_track = 18;
     vol->heads = 2;
-    //Сброс FDC
+
+    //Путь 1: block API (USB-FDD / USB-HDD / ATA)
+    if (api_ptr->block_device_driver_enabled && api_ptr->block){
+        block_info_t bi;
+        if (api_ptr->block->get_info(vol->drive, &bi) == FS_OK){
+            vol->use_block_api = 1;
+            return FS_OK;
+        }
+        //get_info() не знает такого id — не ошибка, пробуем FDC ниже
+    }
+
+    //Путь 2: физический FDC (только floppy A)
+    if (vol->drive != 0) return FS_NOT_SUPPORTED;
+
+    vol->use_block_api = 0;
     int r = fdc_reset();
     if (r != FS_OK) return r;
-    //Возвращаем головку на cylinder 0.
     r = fdc_recalibrate();
     if (r != FS_OK) return r;
+    return FS_OK;
+}
+*/
 
+int fat12_disk_init(fat12_fs_t *vol){
+    if (!vol) return FS_IO_ERROR;
+    vol->sectors_per_track = 18;
+    vol->heads = 2;
+
+    /* Пробуем block API. Принимаем его, только если блок-устройство по
+       адресу vol->drive реально содержит FAT12 boot sector. Это отсекает
+       86box с пустым/не-FAT12 ATA hda (там блок есть, но не тот) и
+       корректно ловит USB-FDD (там USB-образ как раз FAT12). */
+    if (api_ptr->block_device_driver_enabled && api_ptr->block){
+        block_info_t bi;
+        if (api_ptr->block->get_info(vol->drive, &bi) == FS_OK){
+            uint8_t probe[512];
+            if (api_ptr->block->read(vol->drive, 0, 1, probe) == FS_OK){
+                /* Лёгкая проверка FAT12/FAT16:
+                   - bps == 512 (отсекает большинство не-дисков)
+                   - root_entries > 0 (отсекает FAT32, у неё 0)
+                   - sectors_per_fat > 0
+                   - boot signature 0xAA55 */
+                uint16_t bps          = probe[0x0B] | ((uint16_t)probe[0x0C] << 8);
+                uint16_t root_entries = probe[0x11] | ((uint16_t)probe[0x12] << 8);
+                uint16_t spf          = probe[0x16] | ((uint16_t)probe[0x17] << 8);
+                uint16_t sig          = probe[510]  | ((uint16_t)probe[511]  << 8);
+
+                if (bps == 512 && root_entries > 0 && spf > 0 && sig == 0xAA55){
+                    vol->use_block_api = 1;
+                    return FS_OK;
+                }
+            }
+        }
+    }
+
+    /* Блок либо отсутствует, либо не FAT12 — идём в FDC. */
+    if (vol->drive != 0) return FS_NOT_SUPPORTED;
+
+    vol->use_block_api = 0;
+    int r = fdc_reset();
+    if (r != FS_OK) return r;
+    r = fdc_recalibrate();
+    if (r != FS_OK) return r;
     return FS_OK;
 }
 

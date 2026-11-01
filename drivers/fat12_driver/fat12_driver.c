@@ -38,6 +38,8 @@ uint8_t *fat12_path_buffer_ptr;
 
 description_driver_api_t descr_api;
 
+boot_info_t *main_boot_info = 0;
+
 //  ----- внутренние функции  -----
 
 
@@ -498,8 +500,9 @@ int fat12_find_parent_cluster(fat12_fs_t *vol, const char *path, uint16_t *out_p
     if (*p == '/') p++;
     if (*p == '\0') return FS_INVALID_PATH;
 
-    char *token = strtok(p, "/");
-    char *next_token = strtok(NULL, "/");
+    char *saveptr = NULL;
+    char *token = strtok_r(p, "/", &saveptr);
+    char *next_token = strtok_r(NULL, "/", &saveptr);
 
     if (token == NULL) return FS_INVALID_PATH;
 
@@ -519,7 +522,7 @@ int fat12_find_parent_cluster(fat12_fs_t *vol, const char *path, uint16_t *out_p
 
         current_dir_cluster = dir_entry.cluster_low; // Спускаемся внутрь
         token = next_token;
-        next_token = strtok(NULL, "/");
+        next_token = strtok_r(NULL, "/", &saveptr);
     }
     // В token осталось финальное имя файла. Конвертируем его в 8.3 наружу в драйвер
     if (fat12_make_83(token, out_child_name83) != FS_OK) return FS_INVALID_PATH;
@@ -1276,6 +1279,87 @@ int fat12_rmdir(void *vol_ptr, const char *path){
 
 
 
+int fat12_rename(void *vol_ptr, const char *oldpath, const char *newpath){
+    if (!vol_ptr || !oldpath || !newpath) return FS_IO_ERROR;
+    fat12_fs_t *vol = (fat12_fs_t *)vol_ptr;
+    if (!vol->mounted) return FS_IO_ERROR;
+
+    /* 1. Old 8.3 */
+    uint16_t old_parent = 0;
+    char old_name83[11];
+    int r = fat12_find_parent_cluster(vol, oldpath, &old_parent, old_name83);
+    if (r != FS_OK){
+        if (fat12_make_83(oldpath, old_name83) != FS_OK) return FS_INVALID_PATH;
+        old_parent = 0;
+    }
+
+    /* 2. New 8.3 */
+    uint16_t new_parent = 0;
+    char new_name83[11];
+    r = fat12_find_parent_cluster(vol, newpath, &new_parent, new_name83);
+    if (r != FS_OK){
+        if (fat12_make_83(newpath, new_name83) != FS_OK) return FS_INVALID_PATH;
+        new_parent = 0;
+    }
+
+    /* 3. Fast-path: одна и та же директория */
+    if (old_parent != new_parent) return FS_NOT_SUPPORTED;
+
+    /* 4. Old entry должен существовать */
+    fat12_dirent_t old_entry;
+    uint32_t old_entry_id = 0;
+    r = fat12_lookup_in_dir(vol, old_parent, old_name83, &old_entry, &old_entry_id);
+    if (r != FS_OK) return r;
+
+    /* 5. Приёмник не должен существовать */
+    fat12_dirent_t tmp_entry;
+    uint32_t tmp_entry_id = 0;
+    if (fat12_lookup_in_dir(vol, new_parent, new_name83, &tmp_entry, &tmp_entry_id) == FS_OK){
+        if (memcmp(old_name83, new_name83, 11) == 0) return FS_OK;
+        return FS_NOT_SUPPORTED;
+    }
+
+    /* 6. Находим абсолютный LBA и смещение внутри сектора */
+    uint32_t byte_offset = old_entry_id * sizeof(fat12_dirent_t);
+    uint32_t lba;
+    uint32_t entry_offset_in_sector;
+
+    if (old_parent == 0){
+        uint32_t sector_index = byte_offset / vol->bytes_per_sector;
+        if (sector_index >= vol->root_size) return FS_CORRUPTED;
+        lba = vol->root_start + sector_index;
+        entry_offset_in_sector = byte_offset % vol->bytes_per_sector;
+    } else {
+        uint32_t cluster_bytes = vol->sectors_per_cluster * vol->bytes_per_sector;
+        uint32_t cluster_index = byte_offset / cluster_bytes;
+        uint32_t offset_in_cluster = byte_offset % cluster_bytes;
+
+        uint16_t cur = old_parent;
+        for (uint32_t k = 0; k < cluster_index; k++){
+            uint16_t nxt = fat12_get_next_cluster(vol, cur);
+            if (nxt >= 0xFF8 || nxt < 2) return FS_CORRUPTED;
+            cur = nxt;
+        }
+        lba = vol->data_start + (uint32_t)(cur - 2) * vol->sectors_per_cluster
+              + offset_in_cluster / vol->bytes_per_sector;
+        entry_offset_in_sector = offset_in_cluster % vol->bytes_per_sector;
+    }
+
+    /* 7. Читаем сектор, проверяем что это действительно та запись, меняем имя */
+    uint8_t buffer[512] __attribute__((aligned(4)));
+    r = fat12_read_sectors(vol, lba, 1, buffer);
+    if (r != FS_OK) return r;
+
+    fat12_dirent_t *entry = (fat12_dirent_t *)(buffer + entry_offset_in_sector);
+    if (entry->name[0] == 0x00 || entry->name[0] == 0xE5) return FS_CORRUPTED;
+    if ((entry->attr & 0x0F) == 0x0F) return FS_CORRUPTED;
+    if (memcmp(entry->name, old_name83, 11) != 0) return FS_CORRUPTED;
+
+    memcpy(entry->name, new_name83, 11);
+
+    return fat12_write_sectors(vol, lba, 1, buffer);
+}
+
 
 
 
@@ -1286,6 +1370,7 @@ void fs_init(struct boot_info *boot){
     //for(int i = 0 ; i < FAT12_MAX_OPEN_FILES; i++){
         //fat12_files[i].used = 0;
     //}
+    main_boot_info = boot;
 }
 
 
@@ -1314,6 +1399,7 @@ void driver_main(struct boot_info *boot){
     api_ptr->get_volume = fat12_get_volume;
     api_ptr->read = fat12_read;
     api_ptr->unlink = fat12_unlink;
+    api_ptr->rename = fat12_rename;
     //api_ptr->set_floppy_irq_fired_ptr = set_floppy_irq_fired_ptr;
 
     fat12_files_ptr = fat12_files;

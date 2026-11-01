@@ -46,7 +46,7 @@ int get_fb_info(uint32_t *pitch, uint32_t *bpp, uint32_t *width, uint32_t *heigh
 
 
 
-uint8_t* load_tga_to_buffer(const char *path, uint32_t target_w, uint32_t target_h, uint32_t target_bpp, uint32_t target_pitch, uint32_t mode){
+uint8_t* load_tga_to_buffer(const char *path, uint32_t target_w, uint32_t target_h, uint32_t target_bpp, uint32_t target_pitch, uint32_t mode, img_loading_struct_t *loading_struct){
     int fd = open(path, FS_OPEN_READ);
     if (fd < 0) return NULL;
 
@@ -74,25 +74,32 @@ uint8_t* load_tga_to_buffer(const char *path, uint32_t target_w, uint32_t target
         for (int i = 0; i < hdr.id_length; i++) u_read(fd, &dummy, 1);
     }
 
+    if(loading_struct != nullptr) loading_struct->start_loading_phase(0,src_size_bytes);
     uint32_t bytes_read = 0;
     while (bytes_read < src_size_bytes) {
         uint32_t chunk = src_size_bytes - bytes_read;
-        if (chunk > 256) chunk = 256;
+        if (chunk > 32768) chunk = 32768;
         int r = u_read(fd, raw_pixels + bytes_read, chunk);
-        if (r <= 0) break;
+        if (r <= 0) { break;}
         bytes_read += r;
+        if(loading_struct != nullptr) loading_struct->loading_page_step(bytes_read);
+        //yield();
+        //printf("here\n");
     }
     close(fd);
+    if(loading_struct != nullptr) loading_struct->stop_loading_phase();
 
     if (bytes_read < src_size_bytes) {
-        free_pages(raw_pixels,src_size_bytes);
+        free(raw_pixels);
         return NULL;
     }
+
 
     uint32_t dest_size_bytes = target_h * target_pitch;
     uint8_t *dest_canvas = (uint8_t *)malloc(dest_size_bytes);
     if (!dest_canvas) {
-        free_pages(raw_pixels, src_size_bytes);
+        //free_pages(raw_pixels, src_size_bytes);
+        free(raw_pixels);
         return NULL;
     }
     memset(dest_canvas, 0, dest_size_bytes);
@@ -162,7 +169,7 @@ uint8_t* load_tga_to_buffer(const char *path, uint32_t target_w, uint32_t target
         }
     }
 
-    free_pages(raw_pixels, src_size_bytes);
+    free(raw_pixels);
     return dest_canvas;
 }
 

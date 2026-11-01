@@ -23,6 +23,7 @@
 #include "../../include/fileattrs.h"
 #include "../../include/syscall.h"
 #include "../../../include-kernel/locale_types.h"
+#include "include/sekhmet.h"
 
 #define MAX_CMD_LEN 256
 #define MAX_ARGS 16
@@ -33,7 +34,12 @@
 locale_keymap_t g_keymap;
 static int g_keymap_locale_idx = -1;
 
-char* appname_default = "\x91\xA5\xE5\xAC\xA5\xE2";
+char* appname_default = "Сехмет";
+
+
+img_loading_struct_t loading_struct;
+
+
 
 #define HISTORY_MAX 16
 char cmd_history[HISTORY_MAX][MAX_CMD_LEN];
@@ -44,11 +50,286 @@ int history_browse_idx = -1;
 char startup_paths[MAX_ENV_PATHS][MAX_PATH_LEN];
 int startup_paths_count = 0;
 char greeting[128], greeting2[128], appname[32], prompt_format[128], /*shell_prompt[64],*/ help_path[128], help_notfound[64];
-char f_execute_mess[32], wallp_load[32], f_cd_mess[40], exit_mess[50], awake_mess[20], awake_failed_mess[50];
+char f_execute_mess[64], wallp_load[32], f_cd_mess[64], exit_mess[64], awake_mess[20], awake_failed_mess[64];
 
 uint32_t cursor_char = '_';
 //static bool kbd_lang_ru = false;
 static bool g_cursor_blink_on = true;
+
+static alias_t g_aliases[MAX_ALIASES];
+static int     g_alias_count = 0;
+
+//uint32_t loading_start_pos = 0;
+//uint32_t loading_end_pos = 0;
+uint32_t loading_pos = 0;
+//uint32_t loading_delim = 0;
+float loading_delim_f = 0.f;
+
+uint32_t loading_screen_start_pos = 0;
+uint32_t loading_screen_end_pos = 0;
+uint32_t loading_screen_pos = 0;
+uint32_t loading_screen_y = 0;
+uint32_t loading_screen_delim = 0;
+
+
+/* ---------- alias helpers ---------- */
+
+/* Формирует ключ вида "aliasN_name" / "aliasN_cmd" */
+static void format_alias_key(char *out, int idx, const char *suffix){
+    int o = 0;
+    const char *p = "alias";
+    while (*p) out[o++] = *p++;
+    char num[8]; int n = 0;
+    int v = idx;
+    if (v == 0) num[n++] = '0';
+    while (v > 0) { num[n++] = '0' + (v % 10); v /= 10; }
+    while (n > 0) out[o++] = num[--n];
+    p = suffix;
+    while (*p) out[o++] = *p++;
+    out[o] = '\0';
+}
+
+/* Загружает алиасы из секции {aliases} уже открытого конфига */
+static void load_aliases(cfg_file_t *cfg){
+    g_alias_count = 0;
+    for (int i = 1; i <= MAX_ALIASES; i++){
+        char name_key[32], cmd_key[32];
+        format_alias_key(name_key, i, "_name");
+        format_alias_key(cmd_key,  i, "_cmd");
+
+        char a_name[ALIAS_NAME_LEN];
+        char a_cmd [ALIAS_CMD_LEN];
+        a_name[0] = '\0'; a_cmd[0] = '\0';
+
+        if (!cfg_read_string(cfg, "aliases", name_key, NULL, a_name, sizeof(a_name))) break;
+        if (!cfg_read_string(cfg, "aliases", cmd_key,  NULL, a_cmd,  sizeof(a_cmd)))  break;
+        if (a_name[0] == '\0') break;
+
+        strncpy(g_aliases[g_alias_count].name, a_name, ALIAS_NAME_LEN - 1);
+        g_aliases[g_alias_count].name[ALIAS_NAME_LEN - 1] = '\0';
+        strncpy(g_aliases[g_alias_count].cmd,  a_cmd,  ALIAS_CMD_LEN  - 1);
+        g_aliases[g_alias_count].cmd [ALIAS_CMD_LEN  - 1] = '\0';
+        g_alias_count++;
+    }
+}
+
+/* Однократное раскрытие первого слова, если это алиас */
+static void expand_aliases(char *cmdline, int max_len){
+    if (g_alias_count == 0) return;
+
+    int i = 0;
+    while (cmdline[i] && cmdline[i] != ' ' && cmdline[i] != '\t') i++;
+    int name_len = i;
+    if (name_len == 0 || name_len >= ALIAS_NAME_LEN) return;
+
+    char name[ALIAS_NAME_LEN];
+    int j = 0;
+    for (j = 0; j < name_len; j++) name[j] = cmdline[j];
+    name[j] = '\0';
+
+    for (int k = 0; k < g_alias_count; k++){
+        if (strcmp(g_aliases[k].name, name) != 0) continue;
+
+        int cmd_len  = strlen(g_aliases[k].cmd);
+        int rest_len = strlen(cmdline + name_len); /* обычно начинается с пробела */
+        if (cmd_len + rest_len >= max_len) return; /* не влезает — не трогаем */
+
+        char tmp[MAX_CMD_LEN];
+        int o = 0;
+        for (int m = 0; m < cmd_len; m++) tmp[o++] = g_aliases[k].cmd[m];
+        for (int m = 0; m <= rest_len; m++) tmp[o++] = cmdline[name_len + m];
+        for (int m = 0; m < o; m++) cmdline[m] = tmp[m];
+        return; /* однократное раскрытие, как в bash по умолчанию */
+    }
+}
+
+/* Обёртка, потому что SYS_WRITE режет на 4096 */
+static int write_all(int fd, const char *buf, uint32_t len){
+    uint32_t written = 0;
+    while (written < len){
+        uint32_t chunk = len - written;
+        if (chunk > 4096) chunk = 4096;
+        int r = u_write(fd, buf + written, chunk);
+        if (r <= 0) return -1;
+        written += (uint32_t)r;
+    }
+    return 0;
+}
+
+/* Переписывает секцию {aliases} в конфиге, не трогая остальное */
+static int save_aliases_to_config(void){
+    const char *path = "/config/sekhmet/config.cfg";
+
+    int fd = open(path, FS_OPEN_READ);
+    if (fd < 0) return -1;
+
+    u_stat_t st;
+    if (stat(path, &st) < 0 || st.size == 0 || st.size > 65536){
+        close(fd); return -1;
+    }
+
+    char *buf = (char*)malloc(st.size + 1);
+    if (!buf){ close(fd); return -1; }
+
+    uint32_t total = 0;
+    while (total < st.size){
+        uint32_t c = st.size - total;
+        if (c > 4096) c = 4096;
+        int r = u_read(fd, buf + total, c);
+        if (r <= 0) break;
+        total += (uint32_t)r;
+    }
+    close(fd);
+    if (total < st.size){ free(buf); return -1; }
+    buf[total] = '\0';
+
+    /* Ищем границы секции {aliases} */
+    int aliases_start = -1;
+    int aliases_end   = -1;
+    uint32_t line_start = 0;
+    int in_aliases = 0;
+    while (line_start <= total){
+        uint32_t line_end = line_start;
+        while (line_end < total && buf[line_end] != '\n') line_end++;
+        uint32_t ts = line_start, te = line_end;
+        while (ts < te && (buf[ts] == ' ' || buf[ts] == '\t' || buf[ts] == '\r')) ts++;
+        while (te > ts && (buf[te-1] == ' ' || buf[te-1] == '\t' || buf[te-1] == '\r')) te--;
+
+        if (te - ts >= 2 && buf[ts] == '{' && buf[te-1] == '}'){
+            if (te - ts == 9 && strncmp(buf + ts, "{aliases}", 9) == 0){
+                aliases_start = (int)line_start;
+                in_aliases = 1;
+            } else if (in_aliases){
+                aliases_end = (int)line_start;
+                in_aliases = 0;
+                break;
+            }
+        }
+        if (line_end >= total) break;
+        line_start = line_end + 1;
+    }
+    if (aliases_start >= 0 && aliases_end < 0) aliases_end = (int)total;
+
+    /* Перезапись файла */
+    fd = open(path, FS_OPEN_WRITE | FS_OPEN_CREATE | FS_OPEN_TRUNCATE);
+    if (fd < 0){ free(buf); return -1; }
+
+    int ret = 0;
+
+    /* Префикс — всё до {aliases}; если {aliases} не было — весь файл */
+    uint32_t prefix_end = (aliases_start >= 0) ? (uint32_t)aliases_start : total;
+    if (prefix_end > 0 && ret == 0){
+        if (write_all(fd, buf, prefix_end) < 0) ret = -1;
+        /* Чтобы новый заголовок не приклеился к последней строке файла */
+        if (ret == 0 && buf[prefix_end - 1] != '\n'){
+            if (write_all(fd, "\n", 1) < 0) ret = -1;
+        }
+    }
+
+    /* Новая секция {aliases} */
+    if (ret == 0){
+        const char *hdr = "{aliases}\n";
+        if (write_all(fd, hdr, (uint32_t)strlen(hdr)) < 0) ret = -1;
+    }
+    for (int i = 0; i < g_alias_count && ret == 0; i++){
+        char line[256]; int n = 0;
+        const char *p = "alias";
+        while (*p) line[n++] = *p++;
+        char num[8]; int nn = 0; int v = i + 1;
+        if (v == 0) num[nn++] = '0';
+        while (v > 0){ num[nn++] = '0' + (v % 10); v /= 10; }
+        while (nn > 0) line[n++] = num[--nn];
+        p = "_name=";
+        while (*p) line[n++] = *p++;
+        for (int j = 0; g_aliases[i].name[j] && n < 250; j++) line[n++] = g_aliases[i].name[j];
+        line[n++] = '\n';
+        if (write_all(fd, line, n) < 0){ ret = -1; break; }
+
+        n = 0; p = "alias";
+        while (*p) line[n++] = *p++;
+        nn = 0; v = i + 1;
+        if (v == 0) num[nn++] = '0';
+        while (v > 0){ num[nn++] = '0' + (v % 10); v /= 10; }
+        while (nn > 0) line[n++] = num[--nn];
+        p = "_cmd=";
+        while (*p) line[n++] = *p++;
+        for (int j = 0; g_aliases[i].cmd[j] && n < 250; j++) line[n++] = g_aliases[i].cmd[j];
+        line[n++] = '\n';
+        if (write_all(fd, line, n) < 0){ ret = -1; break; }
+    }
+
+    /* Суффикс — всё после старой секции */
+    if (ret == 0 && aliases_end >= 0 && (uint32_t)aliases_end < total){
+        if (write_all(fd, buf + aliases_end, total - (uint32_t)aliases_end) < 0) ret = -1;
+    }
+
+    close(fd);
+    free(buf);
+    return ret;
+}
+
+/* ---------- встроенная команда alias ---------- */
+static int cmd_alias(int argc, char *args[]){
+    if (argc == 1){
+        for (int i = 0; i < g_alias_count; i++){
+            printf("%s=%s\n", g_aliases[i].name, g_aliases[i].cmd);
+        }
+        return 0;
+    }
+
+    if (strcmp(args[1], "-delete") == 0){
+        if (argc < 3){ printf("Usage: alias -delete <name>\n"); return -1; }
+        int found = -1;
+        for (int i = 0; i < g_alias_count; i++){
+            if (strcmp(g_aliases[i].name, args[2]) == 0){ found = i; break; }
+        }
+        if (found < 0){ printf("alias: %s: not found\n", args[2]); return -1; }
+        for (int i = found; i < g_alias_count - 1; i++) g_aliases[i] = g_aliases[i + 1];
+        g_alias_count--;
+        if (save_aliases_to_config() < 0){ printf("alias: failed to write config\n"); return -1; }
+        return 0;
+    }
+
+    if (argc < 3){ printf("Usage: alias <name> <command> [args...]\n"); return -1; }
+
+    /* Собираем команду из args[2..] обратно в строку */
+    char cmd_buf[ALIAS_CMD_LEN]; int o = 0;
+    for (int i = 2; i < argc; i++){
+        if (i > 2 && o < ALIAS_CMD_LEN - 1) cmd_buf[o++] = ' ';
+        for (int j = 0; args[i][j] && o < ALIAS_CMD_LEN - 1; j++)
+            cmd_buf[o++] = args[i][j];
+    }
+    cmd_buf[o] = '\0';
+    if (o == 0){ printf("alias: empty command\n"); return -1; }
+
+    int name_len = strlen(args[1]);
+    if (name_len == 0 || name_len >= ALIAS_NAME_LEN){
+        printf("alias: name too long (max %d)\n", ALIAS_NAME_LEN - 1);
+        return -1;
+    }
+
+    int found = -1;
+    for (int i = 0; i < g_alias_count; i++){
+        if (strcmp(g_aliases[i].name, args[1]) == 0){ found = i; break; }
+    }
+    if (found < 0){
+        if (g_alias_count >= MAX_ALIASES){
+            printf("alias: too many aliases (max %d)\n", MAX_ALIASES);
+            return -1;
+        }
+        found = g_alias_count++;
+    }
+
+    strncpy(g_aliases[found].name, args[1], ALIAS_NAME_LEN - 1);
+    g_aliases[found].name[ALIAS_NAME_LEN - 1] = '\0';
+    strncpy(g_aliases[found].cmd,  cmd_buf, ALIAS_CMD_LEN  - 1);
+    g_aliases[found].cmd [ALIAS_CMD_LEN  - 1] = '\0';
+
+    if (save_aliases_to_config() < 0){ printf("alias: failed to write config\n"); return -1; }
+    return 0;
+}
+
+
 
 
 static void ensure_keymap(void){
@@ -589,7 +870,7 @@ bool find_executable(const char *cmd_name, char *out_resolved_path, int max_out_
 
 void load_config(void){
     cfg_file_t *cfg = cfg_open("/config/sekhmet/config.cfg", FS_OPEN_READ, true);
-    if (cfg < 0){
+    if (!cfg){
         strcpy(appname, appname_default);
         //strcpy(shell_prompt, appname_default);
         strcpy(prompt_format, "$appname:[$cwd]> ");
@@ -598,15 +879,16 @@ void load_config(void){
         strcpy(startup_paths[0], "/bin");
         startup_paths_count = 1;
         cursor_char = '_'; //Дефолтный фолбек
+        g_alias_count = 0;
         return;
     }
 
     printf("Loading config, please wait");
 
-    //char raw_prompt[64]={0};
     char help_filename[64]={0};
 
     cfg_read_string(cfg, "main", "appname", appname_default, appname, 32);printf(".");
+
     //cfg_read_string(cfg, "main", "prompt", "$appname", raw_prompt, 64);printf(".");
     cfg_read_string(cfg, "main", "prompt", "$appname:[$cwd]> ", prompt_format, 128);printf(".");
     cfg_read_string(cfg, "main", "greeting", "greeting err", greeting, 128);printf(".");
@@ -635,12 +917,12 @@ void load_config(void){
         }
     }
 
-    cfg_read_string(cfg, "messages", "f_execute", "Unknown ritual or missing deity", f_execute_mess, 32);printf(".");
+    cfg_read_string(cfg, "messages", "f_execute", "Unknown ritual or missing deity", f_execute_mess, 64);printf(".");
     cfg_read_string(cfg, "messages", "wallp_load", "Loading wallpaper...", wallp_load, 32);printf(".");
-    cfg_read_string(cfg, "messages", "f_cd", "cd: no such file or directory", f_cd_mess, 40);printf(".");
-    cfg_read_string(cfg, "messages", "exit_mess", "shell session dissolved. Looming into darkness", exit_mess, 50);printf(".");
+    cfg_read_string(cfg, "messages", "f_cd", "cd: no such file or directory", f_cd_mess, 64);printf(".");
+    cfg_read_string(cfg, "messages", "exit_mess", "shell session dissolved. Looming into darkness", exit_mess, 64);printf(".");
     cfg_read_string(cfg, "messages", "awake_mess", "Awakening entity", awake_mess, 20);printf(".");
-    cfg_read_string(cfg, "messages", "awake_failed", "Ritual failed. Cannot awake entity.", awake_failed_mess, 50);printf(".");
+    cfg_read_string(cfg, "messages", "awake_failed", "Ritual failed. Cannot awake entity.", awake_failed_mess, 64);printf(".");
 
     char wp_file[128];
     char wp_flag[32];
@@ -649,6 +931,8 @@ void load_config(void){
     memset(wp_flag, 0, 32);
     cfg_read_string(cfg, "wallpaper", "file", "", wp_file, 128);printf(".");
     cfg_read_string(cfg, "wallpaper", "flag", "stretch", wp_flag, 32);printf(".");
+
+    //printf("wallpaper file: %s\n",wp_file);
 
     if (wp_file[0] != '\0' && fileexists(wp_file)){
         printf("\n%s %s\n",wallp_load,wp_file);
@@ -662,14 +946,16 @@ void load_config(void){
             scr_width = 1024; scr_height = 768; scr_bpp = 32; scr_pitch = 1024 * 4;
         }
 
-        uint8_t *wp_buffer = load_tga_to_buffer(wp_file, scr_width, scr_height, scr_bpp, scr_pitch, mode);
+        uint8_t *wp_buffer = load_tga_to_buffer(wp_file, scr_width, scr_height, scr_bpp, scr_pitch, mode, &loading_struct);
         if (wp_buffer){
             uint32_t wp_size_bytes = scr_height * scr_pitch;
             int res = set_wallpaper(wp_buffer, wp_size_bytes);
-            free_pages(wp_buffer, wp_size_bytes);
+            free(wp_buffer);
             if (res == 0) clear_screen();
         }
     }
+
+    load_aliases(cfg);
 
     cfg_close(cfg);
     printf("\n");
@@ -701,6 +987,50 @@ void show_external_help(void) {
 }
 
 
+
+
+//Фолбэки загрузки изображения
+void s_start_loading_phase(uint32_t min_val, uint32_t max_val){
+    //loading_start_pos = min_val;
+    //loading_end_pos = max_val;
+    //loading_delim = max_val - min_val;
+    if((max_val - min_val) == 0) {
+        max_val = 1;
+        min_val = 0;
+    }
+    loading_delim_f = 1.f /  (max_val - min_val);
+    loading_pos = min_val;
+
+    uint32_t cols,rows,cell_w,cell_h;
+    u_get_console_geometry(&cols,&rows,&cell_w,&cell_h);
+    printf("\n\n");
+    u_get_console_pos(&loading_screen_start_pos,&loading_screen_y);
+    //printf("\n");
+    loading_screen_end_pos = cols - 2;
+    loading_screen_pos = 1;
+    printf("\033[%d;%dH[\033[%d;%dH]",loading_screen_y,loading_screen_start_pos,loading_screen_y,loading_screen_end_pos+1);
+    loading_screen_start_pos+=2;
+    loading_screen_delim = loading_screen_end_pos - loading_screen_start_pos - 2;
+}
+
+void s_loading_page_step(uint32_t current_point){
+    uint32_t old_lp = loading_pos;
+    loading_pos = current_point;
+
+    uint32_t ocpr = (uint32_t)((loading_screen_delim * (loading_delim_f * old_lp))) + loading_screen_start_pos + 1;
+    uint32_t cpr = (uint32_t)((loading_screen_delim * (loading_delim_f * current_point))) + loading_screen_start_pos + 1;
+    for(uint32_t i = ocpr; i <= cpr; i++) printf("\033[%d;%dH%c",loading_screen_y,i,0xB2);
+}
+
+void s_stop_loading_phase(void){
+    printf("\n");
+}
+
+
+
+
+
+
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
     char cmd_buf[MAX_CMD_LEN];
@@ -711,10 +1041,16 @@ int main(int argc, char *argv[]) {
     //u_kbd_set_mode(INPUT_MODE_COOKED);
     u_tty_set_flags(TTY_KBD_RAW, TTY_KBD_RAW);
 
+    loading_struct.start_loading_phase = s_start_loading_phase;
+    loading_struct.loading_page_step = s_loading_page_step;
+    loading_struct.stop_loading_phase = s_stop_loading_phase;
+
     load_config();
     chdir("/");
     printf("\n%s\n", greeting);
     printf("%s\n\n", greeting2);
+
+
 
     while (1){
         memset(cwd_buf, 0, 256);
@@ -723,13 +1059,14 @@ int main(int argc, char *argv[]) {
         //printf("%s :\[%s\]>", shell_prompt, cwd_buf);
         char prompt_buf[192];
         build_prompt(prompt_buf, sizeof(prompt_buf), cwd_buf);
-        printf("%s", prompt_buf);
+        //printf("%s", prompt_buf);
 
         sekhmet_read_line(cmd_buf, MAX_CMD_LEN);
 
         trim_newline(cmd_buf);
         if (cmd_buf[0] == '\0') continue;
 
+        expand_aliases(cmd_buf, MAX_CMD_LEN);
         strcpy(temp_parse_buf, cmd_buf);
 
         int cmd_argc = parse_command(cmd_buf, args);
@@ -791,6 +1128,7 @@ int main(int argc, char *argv[]) {
         }
 
         if (strcmp(args[0], "help") == 0) show_external_help();
+        else if (strcmp(args[0], "alias") == 0) cmd_alias(cmd_argc, args);
         else if (strcmp(args[0], "clear") == 0) clear_screen();
         else if (strcmp(args[0], "cd") == 0) {
             const char *target = "/";
@@ -812,9 +1150,12 @@ int main(int argc, char *argv[]) {
             char resolved_path[128];
             memset(resolved_path, 0, sizeof(resolved_path));
             if (find_executable(args[0], resolved_path, 128) /*&& is_valid_executable(resolved_path)*/){
+                yield();
                 int child_pid = u_spawn(resolved_path, temp_parse_buf);
+                //printf("here %d\n",child_pid);
                 if (child_pid >= 0) u_wait_deity(child_pid);
                 else printf("%s: %s\n", appname, awake_failed_mess);
+                //printf("here2 %d\n",child_pid);
             } else {
                 printf("%s: %s: %s\n", appname, f_execute_mess, args[0]);
             }

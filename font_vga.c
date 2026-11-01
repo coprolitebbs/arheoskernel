@@ -108,8 +108,6 @@ void font_vga_init(void){
 
 
 void init_standard_locales(void){
-    kprintf("Init standard locales...\n");
-    //kprintf("[LOC] g_vga_font=%p\n", (void*)&g_vga_font);
     locale_alloc("en", "English",&g_vga_font);
     locale_alloc("ru", "Русский",&g_vga_font);
 

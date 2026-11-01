@@ -264,6 +264,31 @@ char *strtok(char *str, const char *delim){
     return token_start;
 }
 
+
+char *strtok_r(char *str, const char *delim, char **saveptr){
+    if (!str) str = *saveptr;
+    if (!str) return NULL;
+
+    /* пропускаем ведущие разделители */
+    while (*str){
+        const char *d = delim;
+        int is_delim = 0;
+        while (*d){ if (*str == *d++){ is_delim = 1; break; } }
+        if (!is_delim) break;
+        str++;
+    }
+    if (*str == '\0'){ *saveptr = str; return NULL; }
+
+    char *start = str;
+    while (*str){
+        const char *d = delim;
+        while (*d){ if (*str == *d++){ *str = '\0'; *saveptr = str + 1; return start; } }
+        str++;
+    }
+    *saveptr = str;
+    return start;
+}
+
 char *strcat(char *dest, const char *src){
     char *rdest = dest;
     // Move pointer to the end of the destination string

@@ -19,6 +19,9 @@
 #include "include-kernel/lib.h"
 #include "include-kernel/vfs.h"
 #include "include-kernel/kernel_heap.h"
+#include "include-kernel/draw.h"
+#include "include-kernel/debug.h"
+#include "include-kernel/kload_screen.h"
 
 static void cfg_reset_file(cfg_file_t *cfg_file){
     if (cfg_file->buffer_used) {
@@ -65,11 +68,13 @@ cfg_file_t *cfg_open(const char *path, uint32_t flags, bool use_bufferisation){
     int fd = vfs_open(path, flags);
     if (fd < 0) return NULL;
     //Выделяем память под управляющую структуру
+
     cfg_file_t *cfg = (cfg_file_t *)kmalloc(sizeof(cfg_file_t));
     if (!cfg){
         vfs_close(fd);
         return NULL;
     }
+
     cfg->fd = fd;
     cfg->buffer_used = false;
     cfg->file_buffer_ptr = NULL;
@@ -91,8 +96,8 @@ cfg_file_t *cfg_open(const char *path, uint32_t flags, bool use_bufferisation){
                     while (total_bytes_read < st.size){
                         uint32_t bytes_to_read = st.size - total_bytes_read;
                         //Задаем безопасный чанк чтения (например, 512 байт под сектор)
-                        if (bytes_to_read > 512){
-                            bytes_to_read = 512;
+                        if (bytes_to_read > 4096){
+                            bytes_to_read = 4096;
                         }
                         //Вызываем vfs_read со смещением в буфере kmalloc
                         int r = vfs_read(fd, dst_ptr + total_bytes_read, bytes_to_read);
