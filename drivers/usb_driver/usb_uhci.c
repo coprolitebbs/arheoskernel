@@ -58,6 +58,9 @@ void uhci_select_host(uhci_hc_t *hc)
     }
 }
 
+
+
+
 /* ==================== PCI config helpers (ICH6 legacy fix) ==================== */
 /* Прототипы: эти хелперы определены ниже в файле, но используются внутри
    функций, объявленных выше (uhci_disable_legacy / uhci_add_host). */
@@ -1046,4 +1049,127 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     api_ptr->debug8 = control_tds[0].status;
     api_ptr->debug9 = control_tds[sidx].status;
     return result;
+}
+
+
+int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
+                       uint16_t ep_max_pkt, uint8_t *toggle,
+                       void *buf, uint32_t len, int dir_in)
+{
+    if (!hc || !buf || len == 0 || !toggle) return -1;
+    if (ep_max_pkt == 0 || ep_max_pkt > 1024) ep_max_pkt = 64;
+
+    uhci_select_host(hc);
+
+    {
+        uint16_t regp = portsc_reg(0), regp2 = portsc_reg(1);
+        uint16_t psx  = inw(hc->io_base + regp) | inw(hc->io_base + regp2);
+        uint16_t stsx = inw(hc->io_base + UHCI_USBSTS);
+        uint16_t cmdx = inw(hc->io_base + UHCI_USBCMD);
+        if ((stsx & USBSTS_RESUME) || (psx & PORTSC_SUSPEND) || (cmdx & USBCMD_EGSM)) {
+            int woke = 0;
+            if (inw(hc->io_base + regp)  & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 0);
+            if (inw(hc->io_base + regp2) & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 1);
+            woke |= uhci_resume_port(hc, 0);
+            if (woke)
+                api_ptr->load_screen_add_string("UHCI BULK resumed sts=%x cmd=%x", stsx, cmdx);
+        }
+    }
+
+    uint32_t num_tds = (len + ep_max_pkt - 1) / ep_max_pkt;
+    if (num_tds > MAX_BULK_TDS)
+    {
+        num_tds = MAX_BULK_TDS;
+        len = num_tds * ep_max_pkt;
+    }
+    uint8_t ep_num = ep_addr & 0x0F;
+    uint8_t cur_toggle = *toggle ? 1 : 0;
+    uint8_t *b = (uint8_t *)buf;
+    uint32_t ls_flag = hc->current_device_low_speed ? TD_CTRL_LS : 0u;
+
+    for (uint32_t i = 0; i < num_tds; i++)
+    {
+        uint32_t off   = i * ep_max_pkt;
+        uint32_t chunk = (len - off > ep_max_pkt) ? ep_max_pkt : (len - off);
+        uint32_t toggle_bit = cur_toggle ? TD_TOKEN_TOGGLE : 0u;
+        uint32_t next_td_phys = (i + 1 < num_tds)
+                                ? (usb_virt_to_phys((uint32_t)&bulk_tds[i + 1]) & ~0x0Fu)
+                                : TD_LINK_TERM;
+        bulk_tds[i].link   = next_td_phys;
+        bulk_tds[i].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK | ls_flag |
+                             (i == num_tds - 1 ? TD_CTRL_IOC : 0u);
+        bulk_tds[i].token  = ((uint32_t)(dir_in ? PID_IN : PID_OUT) << TD_TOKEN_PID_SHIFT) |
+                             ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
+                             ((uint32_t)ep_num << TD_TOKEN_EP_SHIFT) |
+                             toggle_bit | ((uint32_t)(chunk - 1) << TD_TOKEN_LEN_SHIFT);
+        uint32_t pa = usb_virt_to_phys((uint32_t)(b + off));
+        if (pa == 0) return -1;
+        bulk_tds[i].buffer = pa;
+        cur_toggle ^= 1;
+    }
+
+    uint32_t first_bulk_td_phys = usb_virt_to_phys((uint32_t)&bulk_tds[0]);
+    uint32_t dummy_td_phys      = usb_virt_to_phys((uint32_t)&g_bulk_queue.dummy_td);
+    if (!first_bulk_td_phys || !dummy_td_phys) return -1;
+
+    bulk_tds[num_tds - 1].link = (dummy_td_phys & ~0x0Fu) | TD_LINK_VF;
+
+    usb_dma_sync_before();
+    if (uhci_force_wbinvd) __asm__ __volatile__("wbinvd" ::: "memory");
+
+    g_bulk_queue.tail_td->link = (first_bulk_td_phys & ~0x0Fu) | TD_LINK_VF;
+    g_bulk_queue.tail_td = &bulk_tds[num_tds - 1];
+
+    uint32_t timeout = 5000000;
+    int result = -3;
+
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+
+    while (timeout--)
+    {
+        __asm__ __volatile__("" ::: "memory");
+        uint32_t st = bulk_tds[num_tds - 1].status;
+        if (!(st & TD_CTRL_ACTIVE))
+        {
+            int ec = 0;
+            for (uint32_t k = 0; k < num_tds; k++)
+            {
+                ec = uhci_td_error_code(bulk_tds[k].status);
+                if (ec) break;
+            }
+            if (!ec)
+            {
+                *toggle = cur_toggle;
+                result = (int)len;
+            }
+            else
+            {
+                result = ec;
+            }
+            break;
+        }
+    }
+
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+
+    if (result == -3) {
+        hc->dbg_swstamp = timeout;
+        hc->dbg_sts = inw(hc->io_base + UHCI_USBSTS);
+        api_ptr->load_screen_add_string("BULK TIMEOUT sts=%x td0=%x",
+                                        hc->dbg_sts, bulk_tds[0].status);
+    }
+
+    usb_dma_sync_after();
+    if (uhci_force_wbinvd) __asm__ __volatile__("wbinvd" ::: "memory");
+    return result;
+}
+
+void uhci_register_ptrs(void)
+{
+    frame_list_ptr    = (uint32_t *)raw_frame_buffer;
+    control_qh_ptr    = &control_qh;
+    control_tds_ptr   = control_tds;
+    setup_static_ptr  = setup_static;
+    bulk_qh_ptr       = &bulk_qh;
+    bulk_tds_ptr      = bulk_tds;
 }
