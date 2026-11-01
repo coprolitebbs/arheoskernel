@@ -56,6 +56,96 @@ void uhci_select_host(uhci_hc_t *hc)
     }
 }
 
+/* ==================== PCI config helpers (ICH6 legacy fix) ==================== */
+static uint32_t pci_cfg_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
+{
+    outl(0xCF8, 0x80000000u | ((uint32_t)bus << 16) |
+         ((uint32_t)dev << 11) | ((uint32_t)func << 8) | (off & 0xFCu));
+    return inl(0xCFC + (off & 3));
+}
+
+static void pci_cfg_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off, uint32_t val)
+{
+    outl(0xCF8, 0x80000000u | ((uint32_t)bus << 16) |
+         ((uint32_t)dev << 11) | ((uint32_t)func << 8) | (off & 0xFCu));
+    outl(0xCFC + (off & 3), val);
+}
+
+/* ==================== Root-hub Resume (фикс для CF-18 / ICH6) ====================
+   Panasonic CF-18 после выхода из BIOS часто оставляет контроллер в Global
+   Suspend (USBCMD.EGSM=1), а порты — в suspend (PORTSC.SUSPEND=1): линии D+
+   удерживаются в низком уровне. В таком состоянии даже с PED=1 все транзакты
+   уходят в CRC/Time-out ("prclr=0 done ccs=0 ped=0 fin=288"). Функция снимает
+   EGSM, выключает suspend порта и подаёт resume-посылку >=20 мс (USB spec
+   tRS = 10..20 мс), затем W1C-сит USBSTS.RESUME. Возвращает 1, если что-то
+   реально пришлось "будить". */
+static uint16_t portsc_reg(int port);   /* прототип: определение ниже в файле */
+
+/* ICH6 (и большинство южных мостов Intel) имеют в конфигурационном
+   пространстве UHCI на смещении 0xC0 регистр USBLEGSUP (LEG SMIs Enable):
+     бит 0      SMIEN  — разрешает SMI на события USB (connect/disconnect,
+                         suspend/resume). Пока он взведён, BIOS-смущающий
+                         SMI-код может ВСЕГДА возвращать хост-контроллер в
+                         Global Suspend между нашими операциями: PR игнори-
+                         руется железом, PED не поднимается (fin=0x288).
+     бит 8      HCSEL  — ownership: 0 = HC принадлежит SMM/BIOS!
+     бит 9      OSRSTCTL/SYSRSTCTL, бит 10 ECP select и т.д.
+   Linux (uhci-hcd/pci-quirks: usb_legacy_disable) и Haiku перед работой с
+   UHCI пишут сюда 0x0000 (или читают-модифицируют-пишут, сбрасывая SMIEN и
+   выставляя HCSEL). Делаем то же самое при регистрации каждого хоста. */
+static void uhci_disable_legacy(uhci_hc_t *hc)
+{
+    uint32_t v = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
+    /* Сбрасываем SMIEN (bit0) и выставляем HCSEL (bit8) + SWRDC (bit9) —
+       просим firmware отдать нам контроллер и не трогать его SMI'ами. */
+    uint32_t nv = (v & ~0x1u) | (1u << 8);
+    pci_cfg_write32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0, nv);
+    uint32_t chk = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
+    api_ptr->load_screen_add_string("UHCImem f=%d LEGSUP %x->%x (chk=%x)",
+                                    hc->pci_func, v, nv, chk);
+}
+
+static int uhci_resume_port(uhci_hc_t *hc, int port)
+{
+    if (!hc) return 0;
+    uint16_t reg = portsc_reg(port);
+    int woke = 0;
+
+    uint16_t cmd = inw(hc->io_base + UHCI_USBCMD);
+    if (cmd & USBCMD_EGSM) {                 /* выход из Global Suspend */
+        outw(hc->io_base + UHCI_USBCMD, cmd & ~(uint16_t)USBCMD_EGSM);
+        uhci_mdelay(5);
+        woke = 1;
+        /* Если EGSM поднялся СРАЗУ после снятия — нас душит SMM/SMI:
+           дополнительно лочим legacy-режим прямо сейчас. */
+        if (inw(hc->io_base + UHCI_USBCMD) & USBCMD_EGSM) {
+            uhci_disable_legacy(hc);
+            outw(hc->io_base + UHCI_USBCMD,
+                 inw(hc->io_base + UHCI_USBCMD) & ~(uint16_t)USBCMD_EGSM);
+            uhci_mdelay(5);
+        }
+    }
+
+    uint16_t ps = inw(hc->io_base + reg);
+    if (ps & PORTSC_SUSPEND) {               /* suspend конкретного порта */
+        ps &= ~(uint16_t)PORTSC_SUSPEND;     /* deassert SUSPEND -> HC начнёт
+                                                J-state (resume) на линии */
+        outw(hc->io_base + reg, ps | PORTSC_CSC | PORTSC_PEDC); /* W1C change */
+        uhci_mdelay(25);                     /* hold resume >= 20 мс */
+        ps = inw(hc->io_base + reg);
+        ps &= ~(uint16_t)PORTSC_SUSPEND;
+        outw(hc->io_base + reg, ps);
+        woke = 1;
+    }
+
+    uint16_t sts = inw(hc->io_base + UHCI_USBSTS);
+    if (sts & USBSTS_RESUME) {               /* W1C Resume Detected */
+        outw(hc->io_base + UHCI_USBSTS, sts & USBSTS_RESUME);
+        woke = 1;
+    }
+    return woke;
+}
+
 uint32_t usb_virt_to_phys(uint32_t va)
 {
     // ЖЕСТКИЙ АППАРАТНЫЙ ФИКС: Убираем ручной обход CR3, который возвращал мусор на реальном ПК!
@@ -244,6 +334,13 @@ int uhci_init(uhci_hc_t *hc)
     uint32_t pci_cmd = pci_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0x04);
     pci_write32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0x04, (pci_cmd & ~0x7u) | 0x07u);
 
+    // 1b) КРИТИЧНО для CF-18/ICH6: отбираем контроллер у firmware.
+    //     USBLEGSUP(0xC0): SMIEN=0 — BIOS-EMI больше не сможет загонять HC
+    //     обратно в Global Suspend между нашими операциями (это и есть
+    //     причина "prclr=0 ccs=0 ped=0 fin=288": PR физически игнорируется,
+    //     пока SMM держит ownership). HCSEL=1 + SWRDC — просьба отдать HC ОС.
+    uhci_disable_legacy(hc);
+
     // 2) ПОЛНЫЙ аппаратный сброс контроллера (HCRESET), как делает uhci-hcd в Linux:
     //    "uhci_reset: outw(USBCMD_HCRESET); while (inw(USBCMD) & HCRESET) udelay(...)"
     //    Сброс вычищает BIOS-состояние портов, планировщика и ошибки USBSTS.
@@ -301,6 +398,19 @@ int uhci_init(uhci_hc_t *hc)
     outw(hc->io_base + UHCI_USBSTS, 0x003F); // W1C всех статусных флагов
     outw(hc->io_base + UHCI_USBINTR, 0);     // polling-режим, прерывания не нужны
 
+    /* 4b) Явно гарантируем выход из Global Suspend: на CF-18 BIOS/ACPI могут
+       оставить EGSM=1 даже после HCRESET-нечувствительных состояний; в этом
+       режиме планировщик формально крутится, но трансиверы портов обесточены
+       (линии D+/D- в SEFS) — любой пакет даёт CRC/Time-out. */
+    {
+        uint16_t cmdg = inw(hc->io_base + UHCI_USBCMD);
+        if (cmdg & USBCMD_EGSM) {
+            outw(hc->io_base + UHCI_USBCMD, cmdg & ~(uint16_t)USBCMD_EGSM);
+            api_ptr->load_screen_add_string("U%d: cleared EGSM global suspend",
+                                            (int)(hc - uhci_hosts));
+        }
+    }
+
     // 5) Вертикальный обход очередей (depth-first) — корректный режим для
     //    multi-TD транзакций (SETUP->DATA->STATUS идут в одном кадре подряд).
     uint16_t cmdv = inw(hc->io_base + UHCI_USBCMD);
@@ -321,7 +431,7 @@ int uhci_init(uhci_hc_t *hc)
 
 
 
-uint16_t portsc_reg(int port)
+static uint16_t portsc_reg(int port)
 {
     return (port == 0) ? UHCI_PORTSC1 : UHCI_PORTSC2;
 }
@@ -355,6 +465,15 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
 {
     if (!hc) return -1;
     uint16_t reg = portsc_reg(port);
+
+    // 0) КРИТИЧНО для CF-18: BIOS часто оставляет контроллер в Global
+    //    Suspend (EGSM=1) и порт в suspend (SUSPEND=1). В этом состоянии
+    //    PR игнорируется железом: сброс "не начинается", PR автосброса нет
+    //    (prclr=0), CCS гаснет, PED не поднимается (fin=0x288). Сначала —
+    //    полный resume root-hub'а (снятие EGSM/SUSPEND + J-state >=20 мс).
+    if (uhci_resume_port(hc, port)) {
+        api_ptr->load_screen_add_string("RESET[%d] resumed from suspend/smi", port);
+    }
 
     // 1) Читаем текущий PORTSC, чистим W1C change-биты, снимаем suspend.
     //    Прагматика ICH: перед сбросом порт обязан быть включён (PED=1),
@@ -455,6 +574,29 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
 
     /* Транзакты крутим только через ОДИН контроллер за раз (общие TD/QH). */
     uhci_select_host(hc);
+
+    /* CF-18/ICH6: BIOS или SMI могут оставить HC в Global Suspend / порт в
+       suspend между транзактами. На "спящей" линии D+ любой SETUP уходит в
+       CRC/Time-out даже при ped=1. Перед КАЖДОЙ цепочкой TD проверяем
+       USBSTS.RESUME и бит SUSPEND порта и при необходимости будим root-hub
+       (снятие EGSM, deassert SUSPEND, resume >=20 мс, W1C RESUME). */
+    {
+        uint16_t regp = portsc_reg(0), regp2 = portsc_reg(1);
+        uint16_t psx  = inw(hc->io_base + regp) | inw(hc->io_base + regp2);
+        uint16_t stsx = inw(hc->io_base + UHCI_USBSTS);
+        uint16_t cmdx = inw(hc->io_base + UHCI_USBCMD);
+        if ((stsx & USBSTS_RESUME) || (psx & PORTSC_SUSPEND) || (cmdx & USBCMD_EGSM)) {
+            /* Определяемsuspend-порт для точечного resume; если непонятно —
+               будим оба (resume-посылка на свободном порту безвредна). */
+            int woke = 0;
+            if (inw(hc->io_base + regp)  & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 0);
+            if (inw(hc->io_base + regp2) & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 1);
+            woke |= uhci_resume_port(hc, 0);   /* снимает EGSM + W1C RESUME */
+            if (woke)
+                api_ptr->load_screen_add_string("UHCI resumed before xfer sts=%x cmd=%x",
+                                                stsx, cmdx);
+        }
+    }
 
     uint32_t num_data = 0;
     int has_data = (data_len > 0 && data_buf != NULL);
@@ -636,6 +778,25 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr, uint16_
 
     /* Только один контроллер может крутить общие TD за раз. */
     uhci_select_host(hc);
+
+    /* Будим root-hub перед bulk-транзакцией (см. комментарий в
+       uhci_control_transfer): SMI/BIOS могли загнать порт в suspend между
+       перечислением и чтением флешки — иначе каждый CBWDTO/CBWRET уходит
+       в CRC/Time-out. */
+    {
+        uint16_t regp = portsc_reg(0), regp2 = portsc_reg(1);
+        uint16_t psx  = inw(hc->io_base + regp) | inw(hc->io_base + regp2);
+        uint16_t stsx = inw(hc->io_base + UHCI_USBSTS);
+        uint16_t cmdx = inw(hc->io_base + UHCI_USBCMD);
+        if ((stsx & USBSTS_RESUME) || (psx & PORTSC_SUSPEND) || (cmdx & USBCMD_EGSM)) {
+            int woke = 0;
+            if (inw(hc->io_base + regp)  & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 0);
+            if (inw(hc->io_base + regp2) & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 1);
+            woke |= uhci_resume_port(hc, 0);
+            if (woke)
+                api_ptr->load_screen_add_string("UHCI BULK resumed sts=%x cmd=%x", stsx, cmdx);
+        }
+    }
 
     uint32_t num_tds = (len + ep_max_pkt - 1) / ep_max_pkt;
     if (num_tds > MAX_BULK_TDS)

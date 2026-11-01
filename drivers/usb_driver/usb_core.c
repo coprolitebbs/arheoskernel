@@ -222,11 +222,11 @@ int usb_enumerate(usb_hcd_t *hcd, int port, uint8_t new_addr,
     }
     if (gd_r != 0) {
         api_ptr->debug4 = usb_hcd_port_status(hcd, port);
-        //api_ptr->debug5 = usb_hcd_port_status(hcd, 0);
+        api_ptr->debug5 = usb_hcd_port_status(hcd, 0);
         //api_ptr->debug6 = hcd->type;
         api_ptr->load_screen_add_string("GET_DESC(8) r=%d setup=%x data=%x stat=%x",
                                 (int)api_ptr->debug7,
-                                api_ptr->debug8, ((uhci_hc_t*)hcd->priv)->dbg_td0_token, api_ptr->debug9);
+                                api_ptr->debug8, api_ptr->debug6, api_ptr->debug9);
         return -12;
     }
 
