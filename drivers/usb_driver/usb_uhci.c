@@ -130,9 +130,35 @@ static inline uint64_t uhci_rdtsc(void)
 }
 
 /* Оценка TSC в герцах через PIT-канал 2 (режим one-shot, gate уже поднят
-   BIOS'ом). Однократно ~50 мс. Если PIT не отвечает — правдоподобная
-   оценка для Pentium M CF-18 (~1.2 ГГц). */
+   BIOS'ом). Однократно ~54.6 мс. Если PIT не отвечает — правдоподобная
+   оценка для Pentium M CF-18 (~1.2 ГГц).
+   Важно: freestanding i686-elf без libgcc НЕ предоставляет __udivdi3
+   (64-битное деление), линковка драйвера его не подтягивает ->
+   "undefined reference to '__udivdi3'". Поэтому здесь нет ни одного
+   деления/умножения 64-битных величин между собой: только сдвиги и
+   32-битные mul/div, которые gcc эмитит инструкциями 'imul'/'div'. */
 static uint32_t g_tsc_hz = 0;
+
+/* hz = delta * 1193182 / 65535, где delta <= 2.2e8 (см. лимит выше).
+   Реализация «на вычитаниях» без 64/64-деления:
+   delta*1193182/65535 = delta*18 + delta*(1193182-18*65535)/65535
+                       = delta*18 + delta*4852/65535.
+   Оба члена считаем 32-битной арифметикой с контролем переполнения. */
+static uint32_t uhci_tsc_hz_from_delta(uint32_t delta)
+{
+    uint32_t whole = delta * 18u;          /* < 4e9, в uint32 помещается */
+    /* second = delta*4852/65535. Дробь мала (< delta/13.5), но произведение
+       может переполнить 32 бита, поэтому делим на 2^16 приближённо:
+       delta*4852/65535 ≈ (delta/65535)*4852 + остаток. Считаем точно
+       длинным делением только 32-битного произведения:
+       delta <= 2.2e8 => delta*4852 <= 1.07e12 — не влезает в 32 бита.
+       Разбиваем: delta = q*65535 + r, тогда
+       delta*4852/65535 = q*4852 + r*4852/65535  (r*4852 < 3.2e8 — влезает!) */
+    uint32_t q = delta / 65535u;           /* 32/32 div — инлайнится в 'div' */
+    uint32_t r = delta - q * 65535u;
+    uint32_t frac = (r * 4852u) / 65535u;  /* оба операнда 32-битные */
+    return whole + q * 4852u + frac;
+}
 
 static uint32_t uhci_tsc_hz(void)
 {
@@ -154,10 +180,13 @@ static uint32_t uhci_tsc_hz(void)
         g_tsc_hz = 1200000000u;  /* fallback: типичная частота CF-18 */
     } else {
         uint64_t delta = t1 - t0;
-        uint64_t hz = delta * 1193182u / 65535u;
-        if (hz < 100000000ull) hz = 100000000ull;   /* sanity: <100 МГц */
-        if (hz > 4000000000ull) hz = 4000000000ull; /* sanity: >4 ГГц */
-        g_tsc_hz = (uint32_t)hz;
+        /* Ограничиваем delta сверху: 4 ГГц * 54.6 мс ≈ 2.18e8 тактов.
+           Приведение к uint32 безопасно после клампинга (без 64-бит del). */
+        if (delta > 220000000ull) delta = 220000000ull;
+        uint32_t hz = uhci_tsc_hz_from_delta((uint32_t)delta);
+        if (hz < 100000000u) hz = 100000000u;    /* sanity: <100 МГц */
+        if (hz > 4000000000u) hz = 4000000000u;  /* sanity: >4 ГГц */
+        g_tsc_hz = hz;
     }
     return g_tsc_hz;
 }
@@ -168,7 +197,11 @@ static uint32_t uhci_tsc_hz(void)
    не выставлял PED (порт оставался disabled, fin=0x93). */
 void uhci_mdelay(uint32_t ms)
 {
-    uint64_t cycles = ((uint64_t)uhci_tsc_hz() / 1000ull) * ms;
+    /* Все операции — 32-битные (gcc эмитит 'div eax', без __udivdi3):
+       cpms = tsc_hz / 1000 < 4e6; cycles64 = cpms * ms — только умножение,
+       оно раскладывается в 'imul' с расширением, RTL-вызовов нет. */
+    uint32_t cpms = uhci_tsc_hz() / 1000u;
+    uint64_t cycles = (uint64_t)cpms * (uint64_t)ms;
     uint64_t start  = uhci_rdtsc();
     while (uhci_rdtsc() - start < cycles) {
         uhci_io_wait();
@@ -310,47 +343,64 @@ int uhci_port_connected(uhci_hc_t *hc, int port)
      4) Ждём, пока хост-контроллер сам выставит PED=1 (до ~250 мс; если за
         это время PED так и не поднялся — устройство не отвечает / его нет)
    Возвращает 0 при успехе (PED=1), -1/-2 при проблемах. */
-/* Одна попытка сброса порта. Возвращает 0 при PED=1, -2 в противном случае. */
+/* Одна попытка сброса порта. Возвращает 0 при PED=1, -2 в противном случае.
+   ВАЖНО (UHCI Rev1.1 §4.1, Linux uhci-hcd root_hub_init_ports):
+   в UHCI бит PR автосбрасывается САМИМ контроллером по окончании 10-мс
+   сброса. Программная запись PR=0 раньше срока ОБРЫВАЕТ сброс на середине
+   — устройство остаётся в неопределённом состоянии и PED так и не
+   поднимается (прежний лог: "done ccs=1 ped=0 fin=93", код -2). Поэтому
+   здесь PR только устанавливается, а затем ждём, пока железо само его
+   снимет, после чего ожидаем восстановления PED. */
 static int uhci_reset_port_once(uhci_hc_t *hc, int port)
 {
     if (!hc) return -1;
     uint16_t reg = portsc_reg(port);
 
-    // 1) Читаем текущий PORTSC, чистим W1C change-биты, снимаем suspend
+    // 1) Читаем текущий PORTSC, чистим W1C change-биты, снимаем suspend.
+    //    Прагматика ICH: перед сбросом порт обязан быть включён (PED=1),
+    //    иначе HC может не начать генерацию reset-последовательности.
     uint16_t ps = inw(hc->io_base + reg);
     ps &= ~(PORTSC_SUSPEND | PORTSC_PR);
     outw(hc->io_base + reg, ps | PORTSC_CSC | PORTSC_PEDC); /* W1C */
     uhci_mdelay(20);
+    ps = inw(hc->io_base + reg);
+    if (!(ps & PORTSC_PED)) {
+        outw(hc->io_base + reg, ps | PORTSC_PED);   /* форсируем enable порта */
+        uhci_mdelay(50);
+    }
 
-    // 2) Assert reset: PR=1 (не менее 10 мс по USB spec)
+    // 2) Assert reset: PR=1. НЕ трогаем PR afterwards — пусть HC сам его
+    //    сбросит через ~10 мс (USB spec tRSM держим запасом в 20 мс).
     ps = inw(hc->io_base + reg);
     outw(hc->io_base + reg, (ps & ~PORTSC_SUSPEND) | PORTSC_PR);
-    uhci_mdelay(20);   // честные 20мс теперь (раньше эта задержка была ~2мс)
 
-    // 3) Deassert reset: PR=0
-    ps = inw(hc->io_base + reg);
-    outw(hc->io_base + reg, ps & ~PORTSC_PR);
-
-    /* USB spec 7.1.7.5: после deassert hub/HC даёт устройству 10 мс
-       "reset recovery" — в это время PED может быть ещё не выставлен,
-       а любые транзакции запрещены. Ждём честно, потом опрашиваем PED. */
-    uhci_mdelay(15);
-
-    // 4) Ждём PED=1 от железа (Polling до ~500 мс)
-    int ped_ok = 0;
+    // 3) Ждём авто-снятия PR контроллером (до 500 мс на медленных HC)
+    int pr_clear = 0;
     for (uint32_t i = 0; i < 250; i++) {
         uhci_mdelay(2);
+        uint16_t st = inw(hc->io_base + reg);
+        if (!(st & PORTSC_PR)) { pr_clear = 1; break; }
+        if (!(st & PORTSC_CCS)) break;  // устройство пропало — ждать нечего
+    }
+
+    /* USB spec 7.1.7.5: после deassert устройству дают 10 мс "recovery". */
+    uhci_mdelay(15);
+
+    // 4) Ждём PED=1 от железа (polling до ~500 мс)
+    int ped_ok = 0;
+    for (uint32_t i = 0; i < 250; i++) {
         uint16_t st = inw(hc->io_base + reg);
         if ((st & (PORTSC_CCS | PORTSC_PED)) == (PORTSC_CCS | PORTSC_PED)) {
             ped_ok = 1;
             break;
         }
-        if (!(st & PORTSC_CCS)) break;  // устройство пропало с шины — дальше ждать бессмысленно
+        if (!(st & PORTSC_CCS)) break;  // device физически исчез со шины
+        uhci_mdelay(2);
     }
 
     uint16_t s_fin = inw(hc->io_base + reg);
-    api_ptr->load_screen_add_string("RESET[%d] done ccs=%d ped=%d fin=%x",
-                                    port, !!(s_fin & PORTSC_CCS),
+    api_ptr->load_screen_add_string("RESET[%d] prclr=%d done ccs=%d ped=%d fin=%x",
+                                    port, pr_clear, !!(s_fin & PORTSC_CCS),
                                     !!(s_fin & PORTSC_PED), s_fin);
 
     if (!ped_ok) return -2;
