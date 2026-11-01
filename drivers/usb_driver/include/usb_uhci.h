@@ -70,12 +70,22 @@
 #define TD_LINK_Q       (1 << 1)   /* QH, не TD */
 #define TD_LINK_VF      (1 << 2)   /* Vertical First — depth-first, нам не нужен */
 
-/* TD Status (bits 16..31, т.к. младшие 16 = actual length) */
+/* TD Status (bits 16..31, т.к. младшие 16 = actual length).
+   Раскладка по UHCI Spec Rev 1.1 §4.3.3 (Точный!):
+     bit31 ISP  bit30 ISC  bit29-28 SPD  bit27-26 C_ERR(2b)
+     bit25 LS   bit24 IOC  bit23 Active
+     bit22 Stalled  bit21 DBufErr  bit20 Babble  bit19 NAK
+     bit18 CRC/Time-out  bit17 BitStuff  bit16 PacketId(err) */
+#define TD_CTRL_ISP         (1u << 31)
+#define TD_CTRL_ISC         (1u << 30)
 #define TD_CTRL_SPD         (1u << 29)
-#define TD_CTRL_C_ERR_MASK  (3u << 27)   // если хотите C_ERR на тех же битах, что в трейсе
-#define TD_CTRL_LS          (1u << 26)
-#define TD_CTRL_IOC         (1u << 25)
-#define TD_CTRL_ACTIVE      (1u << 23)   // ← вернуть
+#define TD_CTRL_C_ERR_SHIFT 26
+#define TD_CTRL_C_ERR_NONE  (0u << 26)
+#define TD_CTRL_C_ERR_3     (3u << 26)   /* 11b = 3 попытки HC сам (как в uhci-hcd Linux) */
+#define TD_CTRL_C_ERR_MASK  TD_CTRL_C_ERR_3
+#define TD_CTRL_LS          (1u << 25)   /* Low Speed Device Attached */
+#define TD_CTRL_IOC         (1u << 24)   /* Interrupt on Complete */
+#define TD_CTRL_ACTIVE      (1u << 23)
 #define TD_CTRL_STALLED     (1u << 22)
 #define TD_CTRL_DBUFERR     (1u << 21)
 #define TD_CTRL_BABBLE      (1u << 20)
@@ -83,12 +93,15 @@
 #define TD_CTRL_CRCTIMEO    (1u << 18)
 #define TD_CTRL_BITSTUFF    (1u << 17)
 
-/* Token */
+/* Token (UHCI Spec Rev 1.1 §4.3.5):
+   bits 0-7 PID | 8-14 ADDR(7b) | 15-18 ENDP(4b) | 19 DATA0/1
+   | 20-30 LEN (0x7FF = max, т.е. поле занимает БИТЫ 20..30!) */
 #define TD_TOKEN_PID_SHIFT  0
 #define TD_TOKEN_ADDR_SHIFT 8
 #define TD_TOKEN_EP_SHIFT   15
-#define TD_TOKEN_TOGGLE     (1 << 19)
-#define TD_TOKEN_LEN_SHIFT  21
+#define TD_TOKEN_TOGGLE     (1u << 19)
+#define TD_TOKEN_LEN_SHIFT  20        // было 21 — на один бит левее, чем надо!
+#define TD_TOKEN_LEN_MASK   (0x7FFu << TD_TOKEN_LEN_SHIFT)
 
 #define PID_SETUP   0x2D
 #define PID_IN      0x69

@@ -211,7 +211,8 @@ int device_usb_start(void) {
     // 3. Зондируем шину PCI и собираем ВСЕ подчиненные Companion-контроллеры UHCI
     probe_all_uhci_controllers();
 
-    if (uhci_hosts_count == 0) {
+    int hosts_n = uhci_get_host_count();
+    if (hosts_n == 0) {
         api_ptr->vid = 0xBAD0;
         return -1;
     }
@@ -219,8 +220,9 @@ int device_usb_start(void) {
     uint8_t next_addr = 1;
 
     // Поочередно инициализируем и обыскиваем КАЖДЫЙ контроллер UHCI из пула
-    for (int u = 0; u < uhci_hosts_count; u++) {
-        uhci_hc_t *hc = &uhci_hosts[u];
+    for (int u = 0; u < hosts_n; u++) {
+        uhci_hc_t *hc = uhci_get_host(u);
+        if (!hc) continue;
 
         api_ptr->load_screen_add_string("U%d: Initializing Companion at IO %x...", u, hc->io_base);
         if (uhci_init(hc) != 0) {

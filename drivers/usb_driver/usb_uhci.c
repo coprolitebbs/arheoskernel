@@ -346,6 +346,13 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
         if (num_data > MAX_CONTROL_TDS - 2) num_data = MAX_CONTROL_TDS - 2;
     }
 
+    /* Готовим ВСЮ цепочку TD до того, как контроллер увидит TD0:
+       глушим IOC на промежуточных TD и чистим статусы от ошибок прошлого
+       транзакта. В прошлой версии у "мусорных" TD оставался старый status
+       без Active-бита — HC обрывал цепочку, а STATUS-TD вообще не участвовал
+       в цикле ожидания (в логе печатался stale 0x1a800000). */
+    for (uint32_t i = 0; i < MAX_CONTROL_TDS; i++) control_tds[i].status = 0;
+
     // Копируем setup-пакет строго в выровненный flat-буфер
     for (int i = 0; i < 8; i++) setup_static[i] = setup_pkt[i];
     uint32_t setup_phys = usb_virt_to_phys((uint32_t)setup_static);
@@ -362,7 +369,11 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     control_tds[0].link   = (td1_phys & ~0x0Fu) | TD_LINK_VF;
     control_tds[0].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK; // C_ERR=11: 3 попытки HC сам
     if (ls_flag) control_tds[0].status |= ls_flag;
-    control_tds[0].token  = (PID_SETUP << TD_TOKEN_PID_SHIFT) | (dev_addr << TD_TOKEN_ADDR_SHIFT) | ((7 << TD_TOKEN_LEN_SHIFT) | 0x800u /* zero-length ok */);
+    /* ТОКЕН SETUP: PID(8b) | ADDR(7b, биты 8-14) | ENDP=0 (биты 15-18) | DATA0 | LEN=7 (биты 20-30).
+       ЭНДПОИНТ В TOKEN ОБЯЗАТЕЛЕН! Без него поле len=7 сдвигалось на бит левее
+       и "засоряло" старший байт токена (setup=0x00085007 вместо 0x002D0007):
+       контроллер отправлял на шину мусор, устройство молчало -> CRC/Time-out. */
+    control_tds[0].token  = (PID_SETUP << TD_TOKEN_PID_SHIFT) | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) | (0u << TD_TOKEN_EP_SHIFT) | (7u << TD_TOKEN_LEN_SHIFT);
     control_tds[0].buffer = setup_phys;
     hc->dbg_td0_token = control_tds[0].token;
 
@@ -380,7 +391,8 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
         control_tds[idx].link = (next_td_phys & ~0x0Fu) | TD_LINK_VF;
         control_tds[idx].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK | ls_flag;
         control_tds[idx].token = ((data_in ? PID_IN : PID_OUT) << TD_TOKEN_PID_SHIFT) |
-                                 (dev_addr << TD_TOKEN_ADDR_SHIFT) |
+                                 ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
+                                 (0u << TD_TOKEN_EP_SHIFT) |
                                  toggle | ((chunk - 1) << TD_TOKEN_LEN_SHIFT);
 
         uint32_t pa = usb_virt_to_phys((uint32_t)((uint8_t *)data_buf + off));
@@ -396,8 +408,9 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     control_tds[sidx].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_MASK | ls_flag;
     // STATUS stage всегда PID_DATA1 (toggle=1), длина 0 => поле length = 0x7FF
     control_tds[sidx].token = (status_pid << TD_TOKEN_PID_SHIFT) |
-                              (dev_addr << TD_TOKEN_ADDR_SHIFT) |
-                              TD_TOKEN_TOGGLE | (0x7FF << TD_TOKEN_LEN_SHIFT);
+                              ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
+                              (0u << TD_TOKEN_EP_SHIFT) |
+                              TD_TOKEN_TOGGLE | (0x7FFu << TD_TOKEN_LEN_SHIFT);
     control_tds[sidx].buffer = setup_phys;
 
     uint32_t status_td_status_off = (uint32_t)&control_tds[sidx].status - (uint32_t)&control_tds[0];
@@ -417,18 +430,30 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     uint32_t spins = 0;
     int result = -3;
 
-    volatile uint32_t *status_slot = (volatile uint32_t *)((uint32_t)&control_tds[0] + status_td_status_off);
+    volatile uint32_t *status_slot = (volatile uint32_t *)&control_tds[sidx].status;
 
     while (timeout--)
     {
         spins++;
-        uint32_t st = *status_slot;
-        if (!(st & TD_CTRL_ACTIVE))
+        /* Ждём ЗАВЕРШЕНИЯ ВСЕЙ транзакции: последний TD цепочки (STATUS stage).
+       Раньше цикл смотрел только на TD0 — при ошибке SETUP он выходил раньше,
+       чем HC успевал пометить ошибкой хвостовой TD. */
+        uint32_t st_tail = *status_slot;
+        if (!(st_tail & TD_CTRL_ACTIVE))
         {
-            int ec = uhci_td_error_code(st);
-            if (ec) result = ec; else result = data_len; // УСПЕХ!
+            /* Хвост завершён без Active — проходим по всей цепочке в поисках
+               реального кода ошибки любого из TD. */
+            int ec = 0;
+            for (uint32_t k = 0; k <= sidx; k++)
+            {
+                ec = uhci_td_error_code(control_tds[k].status);
+                if (ec) break;
+            }
+            result = ec ? ec : (int)data_len; // УСПЕХ!
             break;
         }
+        /* Если TD0 уже упал с ошибкой, а хвост всё ещё Active — HC оборвал
+           цепочку: дождись сброса Active на TD0 или выходи по общему таймауту. */
     }
 
     // Диагностика для лога загрузки: что реально произошло на шине
@@ -438,6 +463,15 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     hc->dbg_portsc     = inw(hc->io_base + UHCI_PORTSC1);
     __asm__ __volatile__("" ::: "memory");
     hc->dbg_td0_status = control_tds[0].status;
+
+    /* Если хвостовой TD так и остался ACTIVE, а TD0 завершён с ошибкой —
+       HC оборвал цепочку на SETUP. Подтягиваем код ошибки с TD0, чтобы
+       upper-слой получил честный результат (-4 STALL / -7 CRC/TO и т.д.). */
+    if (result == -3)
+    {
+        int ec0 = uhci_td_error_code(control_tds[0].status);
+        if (!(control_tds[0].status & TD_CTRL_ACTIVE) && ec0) result = ec0;
+    }
 
     // Если TD0 так и остался ACTIVE — движок не тронул очередь вообще
     // (HC остановлен / FLBASEADD неверен / нет питания порта).
