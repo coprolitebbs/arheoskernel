@@ -12,9 +12,8 @@ usb_stack_driver_api_t *api_ptr;
 description_driver_api_t descr_api;
 description_driver_api_t *descr_api_ptr;
 
-#define UHCI_MAX_HCS 4
-static uhci_hc_t uhci_hosts[UHCI_MAX_HCS];
-static int       uhci_hosts_count = 0;
+/* Пул UHCI-контроллеров переехал в usb_uhci.c (uhci_add_host/get_host/...),
+   чтобы select_host мог останавливать чужие HC без дублирования состояния. */
 
 ehci_hc_t       ehci0;
 usb_hcd_t g_hcd;
@@ -42,34 +41,37 @@ void usb_disable_smm(void)
 
 void probe_all_uhci_controllers(void)
 {
-    uhci_hosts_count = 0;
-    memset(uhci_hosts, 0, sizeof(uhci_hosts));
+    uhci_reset_host_list();
 
-    for (int f = 0; f < 4; f++)
+    /* ICH6 (и совместимые PIIX4-подобные чипсеты Intel):
+       - dev 29 funcs 0..2 — UHCI #1..#3 (порты 0-5)
+       - dev 23 func 1     — UHCI #4 "companion" (порты 6-7)
+       - dev 29 func 7     — EHCI (мы его изолируем выше)
+       Сканируем обе точки, а не только dev 29: на CF-18 флешка может сидеть
+       на портах, принадлежащих companion-контроллеру. */
+    static const struct { uint8_t dev; uint8_t func; } slots[] = {
+        {29, 0}, {29, 1}, {29, 2}, {29, 3}, {23, 1}
+    };
+
+    for (unsigned s = 0; s < sizeof(slots)/sizeof(slots[0]); s++)
     {
-        uint32_t id = pci_read32(0, 29, f, 0x00);
-        if ((id & 0xFFFF) == 0xFFFF) continue;
+        uint8_t dev = slots[s].dev, func = slots[s].func;
+        uint32_t id = pci_read32(0, dev, func, 0x00);
+        if ((id & 0xFFFF) == 0xFFFF || id == 0) continue;
 
-        uint32_t cls = pci_read32(0, 29, f, 0x08);
+        uint32_t cls = pci_read32(0, dev, func, 0x08);
         if (((cls >> 24) & 0xFF) != 0x0C || ((cls >> 16) & 0xFF) != 0x03 || ((cls >> 8) & 0xFF) != 0x00) continue;
 
-        uint32_t bar4 = pci_read32(0, 29, f, 0x20);
+        uint32_t bar4 = pci_read32(0, dev, func, 0x20);
         if (!(bar4 & 0x01)) continue;
-        uint16_t io = bar4 & 0xFFFC;
+        uint16_t io = bar4 & 0xFFF0;   // IO BAR: младшие 4 бита — флаги типа
         if (io == 0) continue;
 
-        uint32_t cmd = pci_read32(0, 29, f, 0x04);
-        pci_write32(0, 29, f, 0x04, (cmd & ~0x7u) | 0x07u);
+        uint32_t cmd = pci_read32(0, dev, func, 0x04);
+        pci_write32(0, dev, func, 0x04, (cmd & ~0x7u) | 0x07u);
 
-        if (uhci_hosts_count < UHCI_MAX_HCS)
-        {
-            uhci_hc_t *hc = &uhci_hosts[uhci_hosts_count++];
-            hc->io_base  = io;
-            hc->pci_bus  = 0;
-            hc->pci_dev  = 29;
-            hc->pci_func = (uint8_t)f;
-            api_ptr->load_screen_add_string("PCI UHCI f=%d mapped at IO %x", f, io);
-        }
+        uhci_add_host(io, 0, dev, func);
+        api_ptr->load_screen_add_string("PCI UHCI d=%d f=%d mapped at IO %x", dev, func, io);
     }
 }
 

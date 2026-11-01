@@ -24,6 +24,9 @@
 #define PCI_CONFIG_ADDR 0xCF8
 #define PCI_CONFIG_DATA 0xCFC
 
+/* Сколько UHCI-контроллеров поддерживаем (ICH6: dev 29 funcs 0..2 + dev 23 companion) */
+#define UHCI_MAX_HCS 4
+
 #define PCI_CLASS_SERIAL_BUS 0x0C
 #define PCI_SUBCLASS_USB     0x03
 #define PCI_PROGIF_UHCI      0x00
@@ -97,17 +100,21 @@
 #define PORTSC_W (PORTSC_CSC | PORTSC_PEDC | PORTSC_PR | PORTSC_SUSPEND)
 
 /* ---------------- Структуры UHCI (все выровнены на 16) ---------------- */
+/* ВАЖНО: поля объявлены как uint32_t (НЕ volatile). TD — это normal memory
+   для процессора и coherent memory для DMA-агента. Compiler barrier
+   ("memory" clobber) обеспечивает порядок записи до/после запуска HC.
+   volatile здесь только мешает оптимизациям и не даёт никаких гарантий DMA. */
 typedef struct {
-    volatile uint32_t link;
-    volatile uint32_t status;
-    volatile uint32_t token;
-    volatile uint32_t buffer;
-} __attribute__((packed, aligned(16))) uhci_td_t;
+    uint32_t link;
+    uint32_t status;
+    uint32_t token;
+    uint32_t buffer;
+} __attribute__((aligned(16))) uhci_td_t;
 
 typedef struct {
-    volatile uint32_t head;
-    volatile uint32_t element;
-} __attribute__((packed, aligned(16))) uhci_qh_t;
+    uint32_t head;
+    uint32_t element;
+} __attribute__((aligned(16))) uhci_qh_t;
 
 typedef struct {
     uint16_t io_base;
@@ -115,6 +122,15 @@ typedef struct {
     uint8_t  pci_dev;
     uint8_t  pci_func;
     uint8_t  current_device_low_speed;   // 1, если устройство на текущем адресе — LS
+    /* Диагностика последнего control/bulk транзакта (для лога загрузки): */
+    uint32_t dbg_td0_status;             // status первого TD (SETUP stage) после транзакта
+    uint32_t dbg_td0_token;              // токен SETUP-TD (проверка ADDR/PID/LEN)
+    uint32_t dbg_last_frame;             // FRNUM в момент завершения/таймаута
+    uint32_t dbg_sts;                    // USBSTS в момент завершения/таймаута
+    uint32_t dbg_portsc;                 // PORTSC активного порта в момент транзакта
+    uint32_t dbg_swstamp;                // программная "метка времени": сколько итераций
+                                         // ожидания потребовалось (0..timeout). Если равно
+                                         // timeout+1 — очередь вообще не двигалась (HC dead).
 } uhci_hc_t;
 
 typedef struct {
@@ -136,12 +152,21 @@ extern uhci_td_t *bulk_tds_ptr;
 extern uhci_queue_t g_control_queue;
 extern uhci_queue_t g_bulk_queue;
 
+/* Синхронизация DMA-памяти.
+   ВАЖНО: на i386 без PAE кэш линейно адресуем — bus-master DMA когерентен
+   с кэшем, инвалидация НЕ требуется. wbinvd же — тяжёлая операция: на
+   ноутбуках она порою обрамляется SMI (System Management Interrupt), который
+   может «съедать» миллисекунды и срывать тайминги USB-транзактов. Поэтому
+   перед записью дескрипторов достаточно compiler barrier, а wbinvd оставлен
+   как явный аварийный инструмент (см. dbg-переменную uhci_force_wbinvd). */
 static inline void usb_dma_sync_before(void) {
-    __asm__ __volatile__("wbinvd" ::: "memory");
+    __asm__ __volatile__("" ::: "memory");
 }
 static inline void usb_dma_sync_after(void) {
-    __asm__ __volatile__("wbinvd" ::: "memory");
+    __asm__ __volatile__("" ::: "memory");
 }
+
+extern int uhci_force_wbinvd;   /* =1 включает режим тотального wbinvd (для A/B теста) */
 
 uint32_t usb_virt_to_phys(uint32_t va);
 
@@ -154,8 +179,24 @@ int  uhci_probe(uhci_hc_t *hc);        /* найти UHCI в PCI, заполни
 void uhci_init_queues(void);
 int  uhci_init(uhci_hc_t *hc);         /* сбросить и запустить HC */
 int  uhci_port_connected(uhci_hc_t *hc, int port);
+/* КОРРЕКТНЫЙ reset по UHCI spec (аналг uhci_hub.c::uhci_port_reset в Linux):
+   PR=1 на >=10ms, затем PR=0 и ждём PED=1 (до ~250мс). Возврат -2 означает,
+   что порт не смог включиться (нет устройства / device D+ pull-up пропал). */
 int  uhci_reset_port(uhci_hc_t *hc, int port);
 uint16_t uhci_port_status(uhci_hc_t *hc, int port);
+
+/* Глобальный «активный» хост-контроллер: все TD/QH — единая статическая
+   память, поэтому одновременно крутить транзакты может только один HC.
+   uhci_select_host() делает текущим контроллер hc (и сбрасывает очереди). */
+void uhci_select_host(uhci_hc_t *hc);
+extern uhci_hc_t *g_uhci_active;
+
+/* Реестр найденных UHCI-контроллеров (живёт в usb_uhci.c) */
+int        uhci_add_host(uint16_t io_base, uint8_t bus, uint8_t dev, uint8_t func);
+uhci_hc_t *uhci_get_host(int idx);
+int        uhci_get_host_count(void);
+void       uhci_reset_host_list(void);
+void       uhci_mdelay(uint32_t ms);
 
 /* Control transfer */
 int  uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr,
