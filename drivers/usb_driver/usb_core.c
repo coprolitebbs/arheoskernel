@@ -209,7 +209,18 @@ int usb_enumerate(usb_hcd_t *hcd, int port, uint8_t new_addr,
     //usb_clear_ep_halt(hcd, 0, 0);
 
     // --- 1) GET_DESCRIPTOR(8) на адресе 0 ---
-    if (usb_get_device_desc(hcd, 0, (void *)dma_buffer, 8, 8) != 0) {
+    /* Ретраи: сразу после port reset часть флешек NAK'ует ep0 ещё несколько
+       сотен миллисекунд (внутренняя инициализация контроллера памяти).
+       Linux в hub_port_init делает до 10 попыток GET_DESCRIPTOR с паузами. */
+    int gd_r = -1;
+    for (int attempt = 0; attempt < 5 && gd_r != 0; attempt++) {
+        gd_r = usb_get_device_desc(hcd, 0, (void *)dma_buffer, 8, 8);
+        if (gd_r != 0) {
+            api_ptr->load_screen_add_string("GET_DESC(8) retry %d r=%d", attempt + 1, gd_r);
+            for (int i = 0; i < 25; i++) usb_hcd_delay_2ms(hcd);   // ~50 мс
+        }
+    }
+    if (gd_r != 0) {
         api_ptr->debug4 = usb_hcd_port_status(hcd, port);
         api_ptr->debug5 = usb_hcd_port_status(hcd, 0);
         //api_ptr->debug6 = hcd->type;

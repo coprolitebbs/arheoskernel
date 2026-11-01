@@ -99,7 +99,7 @@ int ehci_release_to_uhci(void) {
     pci_read32(0, 29, 7, 0x04); // PCI Flush
 
     // Выдерживаем паузу для стабилизации электрических потенциалов на разъемах флешки
-    for (volatile uint32_t i = 0; i < 8000000; i++) outb(0x80, 0);
+    uhci_mdelay(300);   // честные 300 мс по TSC (раньше this цикл давал десятки мс)
     return 0;
 }
 
@@ -204,9 +204,7 @@ int device_usb_start(void) {
     api_ptr->load_screen_add_string("EHCI Hard-Isolated on PCI. Monopolizing bus for UHCI.");
 
     // Даем линиям D+/D- честные 300мс на электрическую стабилизацию под контролем UHCI
-    for (int i = 0; i < 150; i++) {
-        for (volatile int delay = 0; delay < 4000; delay++) outb(0x80, 0);
-    }
+    uhci_mdelay(300);
 
     // 3. Зондируем шину PCI и собираем ВСЕ подчиненные Companion-контроллеры UHCI
     probe_all_uhci_controllers();
