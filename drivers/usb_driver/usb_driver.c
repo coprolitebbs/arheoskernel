@@ -228,6 +228,13 @@ int device_usb_start(void) {
             continue;
         }
 
+        /* Диагностика сразу после инициализации: USBSTS каждого хоста.
+           HCH=1 — планировщик так и не запустился (FLBASEADD/PCI проблема);
+           RESUME/ERR bits — BIOS/SMM снова усыпил HC между handoff и init. */
+        api_ptr->load_screen_add_string("U%d STS=%x CMD=%x after init", u,
+                                        inw(hc->io_base + UHCI_USBSTS),
+                                        inw(hc->io_base + UHCI_USBCMD));
+
         g_hcd.type = HCD_UHCI;
         g_hcd.priv = hc;
 

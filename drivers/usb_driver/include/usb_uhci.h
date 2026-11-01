@@ -57,15 +57,42 @@
 #define USBCMD_EGSM     (1 << 3)   /* Enter Global Suspend Mode */
 #define USBCMD_CF       (1 << 6)
 
-/* PORTSC */
-#define PORTSC_CCS      (1 << 0)   /* Current Connect Status */
-#define PORTSC_CSC      (1 << 1)   /* Connect Status Change */
-#define PORTSC_PED      (1 << 2)   /* Port Enabled */
-#define PORTSC_PEDC     (1 << 3)   /* Port Enable/Disable Change */
-#define PORTSC_LS       (3 << 4)
-#define PORTSC_LSDA     (1 << 8)   /* Low Speed Device Attached */
-#define PORTSC_PR       (1 << 9)   /* Port Reset */
-#define PORTSC_SUSPEND  (1 << 12)
+/* PORTSC (UHCI Spec Rev 1.1 §5.4 / Intel ICH datasheet):
+   bit0  CCS  — Current Connect Status (RO)
+   bit1  CSC  — Connect Status Change  (W1C)
+   bit2  PED  — Port Enable/Disable    (R/W: 1 = порт включён)
+   bit3  PEDC — Port En/Dis Change     (W1C)
+   bit4  LS   — Low Speed              (RO legacy)
+   bit5  LSE  — Low Speed Enable       (RO legacy)
+   bit6  OCI  — Over-current Indicator (RO)
+   bit7  OCIC — Over-current Change    (W1C)
+   bit8  LSDA — Low-Speed Device Attached (RO)
+   bit9  PR   — Port Reset             (ставится софтом, АВТОСБРАСЫВАЕТСЯ самим
+                                       HC через ~10 мс — UHCI spec §4.1!)
+   bit12 SUSP — Suspend of port        (R/W)
+   КРИТИЧЕСКИЙ БАГ ПРЕДЫДУЩИХ ВЕРСИЙ: очистка change-битов делалась записью
+   вида "ps | CSC | PEDC", где ps содержал НЕОБНУЛЁННЫЙ CCS (bit0). На ICH
+   запись 1 в RO-бит CCS при активном порте трактуется как смена состояния
+   порта: ровно поэтому в логе CCS(0x001) и CSC(0x002) гасли одновременно
+   ("pre=91 -> fin=288": сброс даже не начинался, устройство «пропало»).
+   Теперь любое значение PORTSC собирается строго из R/W-бит (PED/PR/SUSP),
+   а W1C-единицы добавляются отдельной маской. */
+#define PORTSC_CCS      (1u << 0)   /* Current Connect Status (RO) */
+#define PORTSC_CSC      (1u << 1)   /* Connect Status Change (W1C) */
+#define PORTSC_PED      (1u << 2)   /* Port Enable/Disable (R/W) */
+#define PORTSC_PEDC     (1u << 3)   /* Port Enable/Disable Change (W1C) */
+#define PORTSC_LS       (1u << 4)   /* Low Speed (RO) */
+#define PORTSC_LSE      (1u << 5)   /* Low Speed Enable (RO) */
+#define PORTSC_OCI      (1u << 6)   /* Over-current Indicator (RO) */
+#define PORTSC_OCIC     (1u << 7)   /* Over-current Change (W1C) */
+#define PORTSC_LSDA     (1u << 8)   /* Low Speed Device Attached (RO) */
+#define PORTSC_PR       (1u << 9)   /* Port Reset (auto-clear by HC) */
+#define PORTSC_SUSPEND  (1u << 12)  /* Suspend (R/W) */
+
+/* Только R/W-биты PORTSC — из них собираем записываемое состояние. */
+#define PORTSC_RW_MASK  (PORTSC_PED | PORTSC_PR | PORTSC_SUSPEND)
+/* Все W1C-биты одной маской: OR к значению для очистки change-флагов. */
+#define PORTSC_W1C_ALL  (PORTSC_CSC | PORTSC_PEDC | PORTSC_OCIC)
 
 /* TD Link Pointer */
 #define TD_LINK_TERM    (1 << 0)   /* Terminate — валидного указателя нет */
@@ -212,6 +239,13 @@ uhci_hc_t *uhci_get_host(int idx);
 int        uhci_get_host_count(void);
 void       uhci_reset_host_list(void);
 void       uhci_mdelay(uint32_t ms);
+/* Точная задержка в МИКРОсекундах (TSC-калибровка). Нужна для корректного
+   ожидания авто-снятия PR: UHCI держит reset ровно ~10 мс, и polling шагом
+   по 2 мс легко «проскакивает» момент. */
+void       uhci_udelay(uint32_t us);
+/* Диагностика root-hub: печатает USBCMD/USBSTS/PORTSC1/PORTSC2/FRNUM +
+   расшифровку битов порта. Вызывается на каждой ключевой фазе сброса. */
+void       uhci_dump_ports(uhci_hc_t *hc, const char *tag);
 
 /* Control transfer */
 int  uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr,

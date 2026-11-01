@@ -47,7 +47,9 @@ void uhci_select_host(uhci_hc_t *hc)
     g_uhci_active = hc;
     /* Останавливаем ВСЕ хост-контроллеры кроме выбранного: их FLBASEADD
        всё ещё указывает на наши же QH — активный чужой HC будет воровать
-       TD из очереди и гонять пакеты по своему (пустому) root-hub. */
+       TD из очереди и гонять пакеты по своему (пустому) root-hub.
+       ВАЖНО: пишем CMD только если RS реально взведён (лишние записи
+       USBCMD на ICH могут смахнуть EGSM/RS состояние). */
     for (int i = 0; i < uhci_hosts_count; i++) {
         uhci_hc_t *other = &uhci_hosts[i];
         if (!other || other == hc) continue;
@@ -57,6 +59,11 @@ void uhci_select_host(uhci_hc_t *hc)
 }
 
 /* ==================== PCI config helpers (ICH6 legacy fix) ==================== */
+/* Прототипы: эти хелперы определены ниже в файле, но используются внутри
+   функций, объявленных выше (uhci_disable_legacy / uhci_add_host). */
+static uint16_t portsc_reg(int port);
+static void uhci_write_port(uhci_hc_t *hc, int port, uint16_t rw_bits, int clear_changes);
+int  uhci_init(uhci_hc_t *hc);   /* реинициализация HC между попытками сброса */
 static uint32_t pci_cfg_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
 {
     outl(0xCF8, 0x80000000u | ((uint32_t)bus << 16) |
@@ -79,7 +86,19 @@ static void pci_cfg_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off,
    EGSM, выключает suspend порта и подаёт resume-посылку >=20 мс (USB spec
    tRS = 10..20 мс), затем W1C-сит USBSTS.RESUME. Возвращает 1, если что-то
    реально пришлось "будить". */
-static uint16_t portsc_reg(int port);   /* прототип: определение ниже в файле */
+/* Запись состояния порта СТРОГО по spec: из текущего значения оставляем
+   только R/W-биты (PED/PR/SUSP), RO-биты (CCS/LSDA/OCI...) при записи
+   ОБЯЗАТЕЛЬНО зануляем — запись 1 в CCS на ICH ломает состояние порта
+   (это и был источник "pre=91 -> fin=288"). W1C-биты ставим единицей,
+   если надо очистить change-флаги. */
+static void uhci_write_port(uhci_hc_t *hc, int port, uint16_t rw_bits, int clear_changes)
+{
+    uint16_t reg = portsc_reg(port);
+    uint16_t cur = inw(hc->io_base + reg);
+    uint16_t val = (uint16_t)((cur & PORTSC_RW_MASK) | (rw_bits & PORTSC_RW_MASK));
+    if (clear_changes) val |= PORTSC_W1C_ALL;
+    outw(hc->io_base + reg, val);
+}
 
 /* ICH6 (и большинство южных мостов Intel) имеют в конфигурационном
    пространстве UHCI на смещении 0xC0 регистр USBLEGSUP (LEG SMIs Enable):
@@ -93,16 +112,48 @@ static uint16_t portsc_reg(int port);   /* прототип: определен�
    Linux (uhci-hcd/pci-quirks: usb_legacy_disable) и Haiku перед работой с
    UHCI пишут сюда 0x0000 (или читают-модифицируют-пишут, сбрасывая SMIEN и
    выставляя HCSEL). Делаем то же самое при регистрации каждого хоста. */
-static void uhci_disable_legacy(uhci_hc_t *hc)
+/* Полная процедура handoff по образцу Linux:
+   drivers/usb/host/uhci-hcd.c: uhci_pci_quirk -> usb_hcd_pci_probe
+   + include/linux/usb.h: usb_disabled()/usb_enable() (LEGSUP),
+   drivers/usb/core/quirks...: usb_ehci_handshake / wait_for_release.
+   Регистр USBLEGSUP (конфиг-смещение 0xC0 для ICH6 UHCI):
+     bit 0   SMIEN  — разрешает SMI на события USB; гасим НАВСЕГДА, иначе
+                      SMM BIOS периодически возвращает HC в Global Suspend
+                      и игнорирует наши записи PORTSC (наш симптом fin=288).
+     bit 1   SMISTAT(SMI Idle) — W1C-подобный флаг «SMI сработал».
+     bit 8   HCSEL  — 1 = ОС просит ownership (SMM-код обязан отпустить).
+     bit 15  BIOSB  — 1 = firmware ДЕРЖИТ контроллер. Linux ждёт снятия
+                      этого бита до 100 мс (usb_hcd_pci quirk), затем пишет
+                      LEGSUP=0 как финальный «release request».
+   ВАЖНО: вызывается ДО первого обращения к IO-портам хоста (в uhci_add_host,
+   сразу после заполнения pci_bus/dev/func) — как early handoff в Linux. */
+static int uhci_disable_legacy(uhci_hc_t *hc)
 {
     uint32_t v = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
-    /* Сбрасываем SMIEN (bit0) и выставляем HCSEL (bit8) + SWRDC (bit9) —
-       просим firmware отдать нам контроллер и не трогать его SMI'ами. */
-    uint32_t nv = (v & ~0x1u) | (1u << 8);
+
+    /* Шаг 1: гасим SMI и выставляем запрос ownership HCSEL. */
+    uint32_t nv = (v & ~0x3u) | (1u << 8);   /* чистим SMIEN+SMISTAT, ставим HCSEL */
     pci_cfg_write32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0, nv);
-    uint32_t chk = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
-    api_ptr->load_screen_add_string("UHCImem f=%d LEGSUP %x->%x (chk=%x)",
-                                    hc->pci_func, v, nv, chk);
+
+    /* Шаг 2: ждём, пока firmware САМ снимет бит 15 (BIOS ownership).
+       До 500 мс шагом 10 мс (Linux берёт 100 мс; CF-18 местами медлит). */
+    int bios_released = 0;
+    uint32_t chk = nv;
+    for (int i = 0; i < 50; i++) {
+        uhci_mdelay(10);
+        chk = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
+        if (!(chk & (1u << 15))) { bios_released = 1; break; }
+    }
+
+    /* Шаг 3: финальная запись — просим полностью снять legacy-семафоры
+       (аналог outl(LEGSUP, 0) из usbcore early_handoff). */
+    pci_cfg_write32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0, 0u);
+    uint32_t fin = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
+
+    api_ptr->load_screen_add_string("LEGACY f=%d LEGSUP %x->%x rel=%d fin=%x %s",
+                                    hc->pci_func, v, chk, bios_released, fin,
+                                    bios_released ? "OK" : "BIOS-HOLD");
+    return bios_released;
 }
 
 static int uhci_resume_port(uhci_hc_t *hc, int port)
@@ -128,13 +179,12 @@ static int uhci_resume_port(uhci_hc_t *hc, int port)
 
     uint16_t ps = inw(hc->io_base + reg);
     if (ps & PORTSC_SUSPEND) {               /* suspend конкретного порта */
-        ps &= ~(uint16_t)PORTSC_SUSPEND;     /* deassert SUSPEND -> HC начнёт
-                                                J-state (resume) на линии */
-        outw(hc->io_base + reg, ps | PORTSC_CSC | PORTSC_PEDC); /* W1C change */
+        /* deassert SUSPEND -> HC начнёт J-state (resume) на линии.
+           Запись собирается ТОЛЬКО из R/W-бит: CCS/LSDA при записи обязаны
+           быть 0 (см. uhci_write_port). Change-биты чистим единицами W1C. */
+        uhci_write_port(hc, port, 0, 1);
         uhci_mdelay(25);                     /* hold resume >= 20 мс */
-        ps = inw(hc->io_base + reg);
-        ps &= ~(uint16_t)PORTSC_SUSPEND;
-        outw(hc->io_base + reg, ps);
+        uhci_write_port(hc, port, 0, 0);     /* гарантируем SUSP=0 */
         woke = 1;
     }
 
@@ -298,6 +348,59 @@ void uhci_mdelay(uint32_t ms)
     }
 }
 
+/* Точная задержка в микросекундах. udelays нужны для ожидания авто-снятия
+   PR: UHCI держит reset ровно ~10 мс и снимает PR сам; polling шагом 2+ мс
+   легко проскочить момент или, наоборот, ждать лишние секунды.
+   Всё 32-битное: cpu_us = hz[Гц] / 1e6 <= 4000 (int-div константой gcc
+   разворачивает в imul+shift, вызовов libgcc нет). */
+void uhci_udelay(uint32_t us)
+{
+    uint32_t cpu_us = uhci_tsc_hz() / 1000000u;
+    if (cpu_us == 0) cpu_us = 1;
+    uint64_t cycles = (uint64_t)cpu_us * (uint64_t)us;
+    uint64_t start  = uhci_rdtsc();
+    while (uhci_rdtsc() - start < cycles) {
+        uhci_io_wait();
+    }
+}
+
+/* Подробный дамп root-hub: регистры + пофлагровая расшифровка обоих портов.
+   Формат строки: "DUMP tag CMD STS PORT1 PORT2 FR" и далее побитовые флаги
+   порта 1 и порта 2: C(connect) c(CSC-change) E(PED) e(PEDC) o(OCI) O(OCIC)
+   L(LSDA) R(PR) S(SUSP). Плюс отдельная проверка живости I/O-портов HC. */
+void uhci_dump_ports(uhci_hc_t *hc, const char *tag)
+{
+    if (!hc || !api_ptr || !api_ptr->load_screen_add_string) return;
+    uint16_t cmd = inw(hc->io_base + UHCI_USBCMD);
+    uint16_t sts = inw(hc->io_base + UHCI_USBSTS);
+    uint16_t p1  = inw(hc->io_base + UHCI_PORTSC1);
+    uint16_t p2  = inw(hc->io_base + UHCI_PORTSC2);
+    uint16_t fr  = inw(hc->io_base + UHCI_FRNUM);
+    api_ptr->load_screen_add_string("DUMP %s CMD=%x STS=%x P1=%x P2=%x FR=%x",
+                                    tag, cmd, sts, p1, p2, fr);
+    api_ptr->load_screen_add_string("  P1[%c%c%c%c%c%c%c%c%c] P2[%c%c%c%c%c%c%c%c%c]",
+        (p1 & PORTSC_CCS)     ? 'C':'-', (p1 & PORTSC_CSC)    ? 'c':'-',
+        (p1 & PORTSC_PED)     ? 'E':'-', (p1 & PORTSC_PEDC)   ? 'e':'-',
+        (p1 & PORTSC_OCI)     ? 'o':'-', (p1 & PORTSC_OCIC)   ? 'O':'-',
+        (p1 & PORTSC_LSDA)    ? 'L':'-', (p1 & PORTSC_PR)     ? 'R':'-',
+        (p1 & PORTSC_SUSPEND) ? 'S':'-',
+        (p2 & PORTSC_CCS)     ? 'C':'-', (p2 & PORTSC_CSC)    ? 'c':'-',
+        (p2 & PORTSC_PED)     ? 'E':'-', (p2 & PORTSC_PEDC)   ? 'e':'-',
+        (p2 & PORTSC_OCI)     ? 'o':'-', (p2 & PORTSC_OCIC)   ? 'O':'-',
+        (p2 & PORTSC_LSDA)    ? 'L':'-', (p2 & PORTSC_PR)     ? 'R':'-',
+        (p2 & PORTSC_SUSPEND) ? 'S':'-');
+    /* Живость планировщика: FRNUM обязан меняться при RS=1. Если не меняется
+       — контроллер остановлен (HCH) или PCI I/O вообще не доходит. */
+    if (cmd & USBCMD_RS) {
+        uhci_udelay(2500);          /* >2 кадров: счётчик обязан подвинуться */
+        uint16_t fr2 = inw(hc->io_base + UHCI_FRNUM);
+        if (fr2 == fr)
+            api_ptr->load_screen_add_string("DUMP %s DEAD! FR stuck at %x HCH=%d",
+                                            tag, fr, !!(sts & USBSTS_HCH));
+    }
+}
+
+
 /* Регистрирует UHCI-контроллер по данным PCI-зонда (массив — наверху файла).
    Возвращает 0/-1. */
 int uhci_add_host(uint16_t io_base, uint8_t bus, uint8_t dev, uint8_t func)
@@ -315,6 +418,12 @@ int uhci_add_host(uint16_t io_base, uint8_t bus, uint8_t dev, uint8_t func)
     hc->current_device_low_speed = 0;
     hc->dbg_td0_status = 0; hc->dbg_td0_token = 0;
     hc->dbg_last_frame = 0; hc->dbg_sts = 0; hc->dbg_portsc = 0; hc->dbg_swstamp = 0;
+
+    /* EARLY HANDOFF (порядок как в Linux: usb core делает legacy handoff ДО
+       регистрации хоста и до первого обращения к IO-портам HC). Гасим SMI и
+       отбираем ownership у firmware, пока никто ещё не дёргал PORTSC. */
+    uhci_disable_legacy(hc);
+    uhci_mdelay(20);   /* tPSCTORSTRIP-ish: дать шине стабилизироваться после handoff */
     return 0;
 }
 
@@ -334,11 +443,10 @@ int uhci_init(uhci_hc_t *hc)
     uint32_t pci_cmd = pci_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0x04);
     pci_write32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0x04, (pci_cmd & ~0x7u) | 0x07u);
 
-    // 1b) КРИТИЧНО для CF-18/ICH6: отбираем контроллер у firmware.
-    //     USBLEGSUP(0xC0): SMIEN=0 — BIOS-EMI больше не сможет загонять HC
-    //     обратно в Global Suspend между нашими операциями (это и есть
-    //     причина "prclr=0 ccs=0 ped=0 fin=288": PR физически игнорируется,
-    //     пока SMM держит ownership). HCSEL=1 + SWRDC — просьба отдать HC ОС.
+    // 1b) EARLY HANDOFF уже выполнен в uhci_add_host() ДО первого обращения
+    //     к IO-портам (как usb legacy handoff в Linux). Здесь — повторная
+    //     страховка прямо перед HCRESET: убеждаемся, что SMIEN по-прежнему
+    //     выключен и firmware не вернул ownership за время PCI-зонда.
     uhci_disable_legacy(hc);
 
     // 2) ПОЛНЫЙ аппаратный сброс контроллера (HCRESET), как делает uhci-hcd в Linux:
@@ -383,17 +491,19 @@ int uhci_init(uhci_hc_t *hc)
     outl(hc->io_base + UHCI_FLBASEADD, fl_phys);
     outw(hc->io_base + UHCI_SOFMOD, 64);
 
-    // 4) После HCRESET все PORTSC чистые: просто включаем питание портов (bit0=1)
-    //    и снимаем ложные change-биты (W1C), которые могут появиться от дребезга.
+    // 4) После HCRESET все PORTSC чистые. Включаем порты (PED=1, bit2!) и
+    //    снимаем ложные change-биты. ПРЕЖДЕ ЗДЕСЬ БЫЛ ФАТАЛЬНЫЙ БАГ:
+    //      ps |= 0x0001   /* "Port Select / power-on" */
+    // что ставило CCS (bit0) — а это READ-ONLY бит текущего подключения!
+    // Его запись на ICH ломает состояние порта (в паре с "ps|CSC|PEDC" без
+    // обнуления RO-битов это и есть причина "pre=91 -> fin=288": порт после
+    // наших же записей терял CCS/CSC, сброс не запускался). Теперь пишем
+    // строго PED через helper, оставляющий в значении только R/W-биты.
     for (int port = 0; port < 2; port++)
     {
-        uint16_t reg = (port == 0) ? UHCI_PORTSC1 : UHCI_PORTSC2;
-        uint16_t ps  = inw(hc->io_base + reg);
-        ps |= 0x0001;                       /* Port Select / power-on */
-        ps &= ~(PORTSC_SUSPEND);            /* не оставлять порт в suspend */
-        outw(hc->io_base + reg, ps);
-        outw(hc->io_base + reg, ps | PORTSC_CSC | PORTSC_PEDC); /* W1C change bits */
+        uhci_write_port(hc, port, PORTSC_PED, 1);   /* enable + W1C change */
     }
+    uhci_mdelay(100);   /* spec: до 100 мс на подтверждение connect после HC reset */
 
     outw(hc->io_base + UHCI_USBSTS, 0x003F); // W1C всех статусных флагов
     outw(hc->io_base + UHCI_USBINTR, 0);     // polling-режим, прерывания не нужны
@@ -425,6 +535,7 @@ int uhci_init(uhci_hc_t *hc)
     // 6) Даём root-hub осмыслить подключение: ждём CCS/PED по UHCI spec до 300мс.
     //    Возвращаем 0 даже если ничего не подключено — решение о порте принимает upper.
     uhci_mdelay(50);
+    uhci_dump_ports(hc, "init");
     return 0;
 }
 
@@ -468,59 +579,72 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
 
     // 0) КРИТИЧНО для CF-18: BIOS часто оставляет контроллер в Global
     //    Suspend (EGSM=1) и порт в suspend (SUSPEND=1). В этом состоянии
-    //    PR игнорируется железом: сброс "не начинается", PR автосброса нет
-    //    (prclr=0), CCS гаснет, PED не поднимается (fin=0x288). Сначала —
-    //    полный resume root-hub'а (снятие EGSM/SUSPEND + J-state >=20 мс).
+    //    PR игнорируется железом. Сначала — полный resume root-hub'а.
     if (uhci_resume_port(hc, port)) {
         api_ptr->load_screen_add_string("RESET[%d] resumed from suspend/smi", port);
     }
 
-    // 1) Читаем текущий PORTSC, чистим W1C change-биты, снимаем suspend.
-    //    Прагматика ICH: перед сбросом порт обязан быть включён (PED=1),
-    //    иначе HC может не начать генерацию reset-последовательности.
+    // 1) Порт ДОЛЖЕН быть включён (PED=1) перед сбросом. Записываем строго
+    //    R/W-биты (см. helper): раньше сюда попадали CCS/LSDA из прочитанного
+    //    значения — запись 1 в эти RO-биты на ICH выключает порт.
     uint16_t ps = inw(hc->io_base + reg);
-    ps &= ~(PORTSC_SUSPEND | PORTSC_PR);
-    outw(hc->io_base + reg, ps | PORTSC_CSC | PORTSC_PEDC); /* W1C */
-    uhci_mdelay(20);
+    api_ptr->load_screen_add_string("RESET[%d] pre=%x", port, ps);
+    uhci_write_port(hc, port, PORTSC_PED, 1);      /* PED=1, SUSP=0, W1C */
+    uhci_mdelay(50);
     ps = inw(hc->io_base + reg);
     if (!(ps & PORTSC_PED)) {
-        outw(hc->io_base + reg, ps | PORTSC_PED);   /* форсируем enable порта */
+        /* Некоторые ICH требуют второй прогон enable после connect-change */
+        uhci_write_port(hc, port, PORTSC_PED, 1);
         uhci_mdelay(50);
+        ps = inw(hc->io_base + reg);
+    }
+    if (!(ps & PORTSC_PED)) {
+        api_ptr->load_screen_add_string("RESET[%d] no-PED before reset! ps=%x", port, ps);
     }
 
-    // 2) Assert reset: PR=1. НЕ трогаем PR afterwards — пусть HC сам его
-    //    сбросит через ~10 мс (USB spec tRSM держим запасом в 20 мс).
-    ps = inw(hc->io_base + reg);
-    outw(hc->io_base + reg, (ps & ~PORTSC_SUSPEND) | PORTSC_PR);
+    // 2) Assert reset: PR=1. UHCI Rev1.1 §4.1: бит PR автосбрасывается САМ
+    //    контроллер через ~10 мс. Софт НЕ должен трогать PR после установки
+    //    (прежняя запись PR=0 раньше срока обрывала сброс на середине).
+    uhci_write_port(hc, port, PORTSC_PED | PORTSC_PR, 0);
+    uhci_udelay(100);
+    uint16_t ps_asserted = inw(hc->io_base + reg);
+    api_ptr->load_screen_add_string("RESET[%d] asserted=%x (PR=%d)",
+                                    port, ps_asserted, !!(ps_asserted & PORTSC_PR));
 
-    // 3) Ждём авто-снятия PR контроллером (до 500 мс на медленных HC)
+    // 3) Ждём авто-снятия PR контроллером: polling каждые 200 мкс до 500 мс.
+    //    Микросекундный шаг принципиален: PR висит ровно ~10 мс, при шаге
+    //    2 мс мы стабильно фиксировали "prclr=0" просто не замечая события.
     int pr_clear = 0;
-    for (uint32_t i = 0; i < 250; i++) {
-        uhci_mdelay(2);
+    uint32_t pr_us = 0;
+    for (uint32_t i = 0; i < 2500; i++) {          /* 2500 * 200us = 500 ms */
         uint16_t st = inw(hc->io_base + reg);
-        if (!(st & PORTSC_PR)) { pr_clear = 1; break; }
-        if (!(st & PORTSC_CCS)) break;  // устройство пропало — ждать нечего
+        if (!(st & PORTSC_PR)) { pr_clear = 1; pr_us = i * 200u; break; }
+        if (!(st & PORTSC_CCS)) { pr_us = i * 200u; break; }  /* device пропал */
+        uhci_udelay(200);
     }
+    api_ptr->load_screen_add_string("RESET[%d] PR auto-clear=%d after %d us",
+                                    port, pr_clear, pr_us);
 
-    /* USB spec 7.1.7.5: после deassert устройству дают 10 мс "recovery". */
-    uhci_mdelay(15);
+    /* USB spec 7.1.7.5: reset-recovery. Linux ждёт 10 мс + до 100 мс PED. */
+    uhci_mdelay(10);
 
-    // 4) Ждём PED=1 от железа (polling до ~500 мс)
+    // 4) Ждём PED=1 от железа (polling шагом 1 мс до 300 мс)
     int ped_ok = 0;
-    for (uint32_t i = 0; i < 250; i++) {
+    uint32_t ped_ms = 0;
+    for (uint32_t i = 0; i < 300; i++) {
         uint16_t st = inw(hc->io_base + reg);
         if ((st & (PORTSC_CCS | PORTSC_PED)) == (PORTSC_CCS | PORTSC_PED)) {
-            ped_ok = 1;
-            break;
+            ped_ok = 1; ped_ms = i; break;
         }
         if (!(st & PORTSC_CCS)) break;  // device физически исчез со шины
-        uhci_mdelay(2);
+        uhci_mdelay(1);
     }
 
     uint16_t s_fin = inw(hc->io_base + reg);
-    api_ptr->load_screen_add_string("RESET[%d] prclr=%d done ccs=%d ped=%d fin=%x",
+    api_ptr->load_screen_add_string("RESET[%d] prclr=%d ccs=%d ped=%d(%dms) fin=%x",
                                     port, pr_clear, !!(s_fin & PORTSC_CCS),
-                                    !!(s_fin & PORTSC_PED), s_fin);
+                                    !!(s_fin & PORTSC_PED), ped_ms, s_fin);
+    uhci_dump_ports(hc, "reset");
 
     if (!ped_ok) return -2;
 
@@ -530,20 +654,45 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
     return 0;
 }
 
-/* Публичная обёртка: до 3 попыток сброса. По USB spec hub/HC после deassert
+/* Публичная обёртка: до 4 попыток сброса. По USB spec hub/HC после deassert
    даёт устройству 10 мс «recovery», и часть флешек активируются только со
    второго-третьего reset'а (особенно если BIOS уже общался с ними и они
-   остались в подвешенном состоянии). */
+   остались в подвешенном состоянии).
+   Лестница эскалации (по образцу Linux hub_port_init/hub_reset_port и
+   Haiku USBAbsolutHostController::ResetPort):
+     1) мягкий повтор сброса;
+     2) power-cycle порта: disable (PED=0) -> пауза -> enable (PED=1) ->
+        ожидание CCS/PED — это единственный способ "оживить" зависший
+        трансивер ICH без сброса всего HC;
+     3) полный HCRESET контроллера (uhci_init), как uhci_restart() в Linux. */
 int uhci_reset_port(uhci_hc_t *hc, int port)
 {
-    for (int attempt = 0; attempt < 3; attempt++) {
+    if (!hc) return -1;
+    for (int attempt = 0; attempt < 4; attempt++) {
         if (uhci_reset_port_once(hc, port) == 0)
             return 0;
-        api_ptr->load_screen_add_string("RESET[%d]: attempt %d failed, retry...",
-                                        port, attempt + 1);
-        uhci_mdelay(200);   // reset-recovery + время на «остыть» контроллеру
-        // Если порт совсем потерял CCS — device физически невидим, ретраи бессмысленны
-        if (!(uhci_port_status(hc, port) & PORTSC_CCS)) return -3;
+        api_ptr->load_screen_add_string("RESET[%d]: attempt %d failed, escalation %d",
+                                        port, attempt + 1, attempt);
+        uhci_mdelay(100);
+
+        if (attempt == 0) {
+            /* мягкий retry без вмешательства */
+            continue;
+        }
+        if (attempt == 1) {
+            /* Power-cycle порта: запись PED=0 глушит порт, запись PED=1
+               включает; RO-биты при этом занулены (helper). */
+            uhci_write_port(hc, port, 0, 1);          /* disable */
+            uhci_mdelay(100);                          /* spec tPSCTORSTRIP... запас */
+            uhci_write_port(hc, port, PORTSC_PED, 1);  /* enable */
+            uhci_dump_ports(hc, "pcyc");
+            continue;
+        }
+        /* attempt >= 2: полный ре-инит контроллера (HCRESET+RS+порты) */
+        if (uhci_init(hc) != 0) return -4;
+        uhci_mdelay(100);   /* CCS должен вернуться сам: pull-up устройства никуда делся не мог */
+        if (!(uhci_port_status(hc, port) & PORTSC_CCS))
+            api_ptr->load_screen_add_string("RESET[%d]: CCS lost after reinit", port);
     }
     return -2;
 }
@@ -690,6 +839,13 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     uint32_t spins = 0;
     int result = -3;
 
+    /* КРИТИЧЕСКАЯ СЕКЦИЯ: блокируем планировщик задач ядра на время всей
+       транзакции (аналог того, как ext2_disk.c оборачивает DMA-операции).
+       Контекст по таймеру (IRQ 0/32) может увести выполнение в другую задачу
+       посреди polling-цикла TD; само по себе это не ломает HC (DMA асинхронен),
+       но удваивает латентность обработки и мешает честному замеру spins. */
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+
     volatile uint32_t *status_slot = (volatile uint32_t *)&control_tds[sidx].status;
 
     while (timeout--)
@@ -716,11 +872,18 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
            цепочку: дождись сброса Active на TD0 или выходи по общему таймауту. */
     }
 
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+
     // Диагностика для лога загрузки: что реально произошло на шине
     hc->dbg_swstamp    = spins;
     hc->dbg_last_frame = inw(hc->io_base + UHCI_FRNUM);
     hc->dbg_sts        = inw(hc->io_base + UHCI_USBSTS);
     hc->dbg_portsc     = inw(hc->io_base + UHCI_PORTSC1);
+    api_ptr->load_screen_add_string("XFER done spins=%d sts=%x p1=%x p2=%x td0=%x tdt=%x",
+                                    spins, hc->dbg_sts,
+                                    inw(hc->io_base + UHCI_PORTSC1),
+                                    inw(hc->io_base + UHCI_PORTSC2),
+                                    control_tds[0].status, control_tds[sidx].status);
     __asm__ __volatile__("" ::: "memory");
     hc->dbg_td0_status = control_tds[0].status;
 
@@ -834,6 +997,9 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr, uint16_
     g_bulk_queue.tail_td = &bulk_tds[num_tds - 1];
     uint32_t timeout = 5000000;
     int result = -3;
+    /* Bulk-транзакции (MSC read/write) идут длинными цепочками TD — тоже
+       держим планировщик заблокированным на время polling'а. */
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
     while (timeout--)
     {
         __asm__ __volatile__("" ::: "memory");
@@ -859,6 +1025,7 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr, uint16_
             break;
         }
     }
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
     if (result == -3) {
         hc->dbg_swstamp = timeout;
         hc->dbg_sts = inw(hc->io_base + UHCI_USBSTS);
