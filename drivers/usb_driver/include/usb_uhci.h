@@ -112,6 +112,14 @@
 #define TD_CTRL_C_ERR_NONE  (0u << 26)
 #define TD_CTRL_C_ERR_3     (3u << 26)   /* 11b = 3 попытки HC сам (как в uhci-hcd Linux) */
 #define TD_CTRL_C_ERR_MASK  TD_CTRL_C_ERR_3
+/* SPD (bits 29:28): скорость, с которой HC ОБРАЩАЕТСЯ к устройству.
+   00 = Full-Speed, 01 = Low-Speed, 10 = Full-Speed через Low-Speed hub.
+   КРИТИЧНО для CF-18/ICH6: значение 11b зарезервировано; если оно случайно
+   окажется в статусе TD при записи, контроллер ICH может вести себя некор-
+   ректно. При инициализации TD всегда пишем явный SPD=00 (LS-устройства на
+   root-hub — только клавиатуры; LS флаг ставится отдельно битом 25). */
+#define TD_CTRL_SPD_FS      (0u << 28)
+#define TD_CTRL_SPD_MASK    (3u << 28)
 #define TD_CTRL_LS          (1u << 25)   /* Low Speed Device Attached */
 #define TD_CTRL_IOC         (1u << 24)   /* Interrupt on Complete */
 #define TD_CTRL_ACTIVE      (1u << 23)
@@ -139,9 +147,23 @@
 #define TD_ERR_ANY          (TD_CTRL_STALLED | TD_CTRL_DBUFERR | TD_CTRL_BABBLE | \
                              TD_CTRL_CRCTIMEO | TD_CTRL_BITSTUFF)
 
+/* Полные байты PID КАК ИХ ГЕНЕРИРУЕТ ХОСТ НА ПРОВОДЕ (UHCI Spec Rev 1.1
+   §4.3.5 / USB 1.1 Table 8-1): PID = 4-bit tag, повторенный инверсным
+   дубликатом в старших битах (LSB first):
+     SETUP = 0101b -> 0x2D | IN = 1001b -> 0x69 | OUT = 0001b -> 0xE1
+     DATA0 = 1100b -> 0xC3 | DATA1 = 1011b -> 0x4B
+   В TD token поля PID/DATA0/1 задаются именно этими значениями (так же,
+   как кладет их в память Linux uhci-hcd и что ожидает модель QEMU
+   hw/usb/hcd-uhci.c). Значения ниже — ЭТАЛОННЫЕ; если после сборки в
+   логе «TD token» окажется их дополнение (~0x2D=0xD2 и т.п.) — значит
+   где-то в цепочке применяется ложная инверсия, и именно она даёт
+   статусы вида 0xC4000000/0xD8000000 (транзакция не принята устройством)
+   при полностью исправном порте (CCS=1 PED=1). */
 #define PID_SETUP   0x2D
 #define PID_IN      0x69
 #define PID_OUT     0xE1
+#define PID_DATA0   0xC3
+#define PID_DATA1   0x4B
 
 #define MAX_CONTROL_TDS   16
 #define MAX_BULK_TDS      64
