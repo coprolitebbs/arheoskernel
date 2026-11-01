@@ -112,16 +112,48 @@ static void uhci_write_port(uhci_hc_t *hc, int port, uint16_t rw_bits, int clear
    Linux (uhci-hcd/pci-quirks: usb_legacy_disable) и Haiku перед работой с
    UHCI пишут сюда 0x0000 (или читают-модифицируют-пишут, сбрасывая SMIEN и
    выставляя HCSEL). Делаем то же самое при регистрации каждого хоста. */
-static void uhci_disable_legacy(uhci_hc_t *hc)
+/* Полная процедура handoff по образцу Linux:
+   drivers/usb/host/uhci-hcd.c: uhci_pci_quirk -> usb_hcd_pci_probe
+   + include/linux/usb.h: usb_disabled()/usb_enable() (LEGSUP),
+   drivers/usb/core/quirks...: usb_ehci_handshake / wait_for_release.
+   Регистр USBLEGSUP (конфиг-смещение 0xC0 для ICH6 UHCI):
+     bit 0   SMIEN  — разрешает SMI на события USB; гасим НАВСЕГДА, иначе
+                      SMM BIOS периодически возвращает HC в Global Suspend
+                      и игнорирует наши записи PORTSC (наш симптом fin=288).
+     bit 1   SMISTAT(SMI Idle) — W1C-подобный флаг «SMI сработал».
+     bit 8   HCSEL  — 1 = ОС просит ownership (SMM-код обязан отпустить).
+     bit 15  BIOSB  — 1 = firmware ДЕРЖИТ контроллер. Linux ждёт снятия
+                      этого бита до 100 мс (usb_hcd_pci quirk), затем пишет
+                      LEGSUP=0 как финальный «release request».
+   ВАЖНО: вызывается ДО первого обращения к IO-портам хоста (в uhci_add_host,
+   сразу после заполнения pci_bus/dev/func) — как early handoff в Linux. */
+static int uhci_disable_legacy(uhci_hc_t *hc)
 {
     uint32_t v = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
-    /* Сбрасываем SMIEN (bit0) и выставляем HCSEL (bit8) + SWRDC (bit9) —
-       просим firmware отдать нам контроллер и не трогать его SMI'ами. */
-    uint32_t nv = (v & ~0x1u) | (1u << 8);
+
+    /* Шаг 1: гасим SMI и выставляем запрос ownership HCSEL. */
+    uint32_t nv = (v & ~0x3u) | (1u << 8);   /* чистим SMIEN+SMISTAT, ставим HCSEL */
     pci_cfg_write32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0, nv);
-    uint32_t chk = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
-    api_ptr->load_screen_add_string("UHCImem f=%d LEGSUP %x->%x (chk=%x)",
-                                    hc->pci_func, v, nv, chk);
+
+    /* Шаг 2: ждём, пока firmware САМ снимет бит 15 (BIOS ownership).
+       До 500 мс шагом 10 мс (Linux берёт 100 мс; CF-18 местами медлит). */
+    int bios_released = 0;
+    uint32_t chk = nv;
+    for (int i = 0; i < 50; i++) {
+        uhci_mdelay(10);
+        chk = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
+        if (!(chk & (1u << 15))) { bios_released = 1; break; }
+    }
+
+    /* Шаг 3: финальная запись — просим полностью снять legacy-семафоры
+       (аналог outl(LEGSUP, 0) из usbcore early_handoff). */
+    pci_cfg_write32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0, 0u);
+    uint32_t fin = pci_cfg_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0xC0);
+
+    api_ptr->load_screen_add_string("LEGACY f=%d LEGSUP %x->%x rel=%d fin=%x %s",
+                                    hc->pci_func, v, chk, bios_released, fin,
+                                    bios_released ? "OK" : "BIOS-HOLD");
+    return bios_released;
 }
 
 static int uhci_resume_port(uhci_hc_t *hc, int port)
@@ -386,6 +418,12 @@ int uhci_add_host(uint16_t io_base, uint8_t bus, uint8_t dev, uint8_t func)
     hc->current_device_low_speed = 0;
     hc->dbg_td0_status = 0; hc->dbg_td0_token = 0;
     hc->dbg_last_frame = 0; hc->dbg_sts = 0; hc->dbg_portsc = 0; hc->dbg_swstamp = 0;
+
+    /* EARLY HANDOFF (порядок как в Linux: usb core делает legacy handoff ДО
+       регистрации хоста и до первого обращения к IO-портам HC). Гасим SMI и
+       отбираем ownership у firmware, пока никто ещё не дёргал PORTSC. */
+    uhci_disable_legacy(hc);
+    uhci_mdelay(20);   /* tPSCTORSTRIP-ish: дать шине стабилизироваться после handoff */
     return 0;
 }
 
@@ -405,11 +443,10 @@ int uhci_init(uhci_hc_t *hc)
     uint32_t pci_cmd = pci_read32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0x04);
     pci_write32(hc->pci_bus, hc->pci_dev, hc->pci_func, 0x04, (pci_cmd & ~0x7u) | 0x07u);
 
-    // 1b) КРИТИЧНО для CF-18/ICH6: отбираем контроллер у firmware.
-    //     USBLEGSUP(0xC0): SMIEN=0 — BIOS-EMI больше не сможет загонять HC
-    //     обратно в Global Suspend между нашими операциями (это и есть
-    //     причина "prclr=0 ccs=0 ped=0 fin=288": PR физически игнорируется,
-    //     пока SMM держит ownership). HCSEL=1 + SWRDC — просьба отдать HC ОС.
+    // 1b) EARLY HANDOFF уже выполнен в uhci_add_host() ДО первого обращения
+    //     к IO-портам (как usb legacy handoff в Linux). Здесь — повторная
+    //     страховка прямо перед HCRESET: убеждаемся, что SMIEN по-прежнему
+    //     выключен и firmware не вернул ownership за время PCI-зонда.
     uhci_disable_legacy(hc);
 
     // 2) ПОЛНЫЙ аппаратный сброс контроллера (HCRESET), как делает uhci-hcd в Linux:
@@ -802,6 +839,13 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     uint32_t spins = 0;
     int result = -3;
 
+    /* КРИТИЧЕСКАЯ СЕКЦИЯ: блокируем планировщик задач ядра на время всей
+       транзакции (аналог того, как ext2_disk.c оборачивает DMA-операции).
+       Контекст по таймеру (IRQ 0/32) может увести выполнение в другую задачу
+       посреди polling-цикла TD; само по себе это не ломает HC (DMA асинхронен),
+       но удваивает латентность обработки и мешает честному замеру spins. */
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+
     volatile uint32_t *status_slot = (volatile uint32_t *)&control_tds[sidx].status;
 
     while (timeout--)
@@ -827,6 +871,8 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
         /* Если TD0 уже упал с ошибкой, а хвост всё ещё Active — HC оборвал
            цепочку: дождись сброса Active на TD0 или выходи по общему таймауту. */
     }
+
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
 
     // Диагностика для лога загрузки: что реально произошло на шине
     hc->dbg_swstamp    = spins;
@@ -951,6 +997,9 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr, uint16_
     g_bulk_queue.tail_td = &bulk_tds[num_tds - 1];
     uint32_t timeout = 5000000;
     int result = -3;
+    /* Bulk-транзакции (MSC read/write) идут длинными цепочками TD — тоже
+       держим планировщик заблокированным на время polling'а. */
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
     while (timeout--)
     {
         __asm__ __volatile__("" ::: "memory");
@@ -976,6 +1025,7 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr, uint16_
             break;
         }
     }
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
     if (result == -3) {
         hc->dbg_swstamp = timeout;
         hc->dbg_sts = inw(hc->io_base + UHCI_USBSTS);
