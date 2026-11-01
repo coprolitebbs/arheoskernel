@@ -93,7 +93,6 @@ static const char *uhci_pci_id_name(uint16_t vid, uint16_t did)
     if (did >= 0x2830u && did <= 0x2836u) return "ICH7 USB";
     return "Intel USB";
 }
-
 static uint32_t pci_cfg_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
 {
     outl(0xCF8, 0x80000000u | ((uint32_t)bus << 16) |
@@ -117,8 +116,7 @@ static void pci_cfg_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off,
    tRS = 10..20 мс), затем W1C-сит USBSTS.RESUME. Возвращает 1, если что-то
    реально пришлось "будить". */
 /* Запись состояния порта СТРОГО по spec: из текущего значения оставляем
-   только R/W-биты (PED/PR/SUSP), RO-биты (CCS/LSDA/OCI...) при записи
-   ОБЯЗАТЕЛЬНО зануляем — запись 1 в CCS на ICH ломает состояние порта
+   только R/W-биты (PED/PR/SUSP), RO-биты (CCS/LSDA/OCI...) при записе ОБЯЗАТЕЛЬНО зануляем — запись 1 в CCS на ICH ломает состояние порта
    (это и был источник "pre=91 -> fin=288"). W1C-биты ставим единицей,
    если надо очистить change-флаги. */
 static void uhci_write_port(uhci_hc_t *hc, int port, uint16_t rw_bits, int clear_changes)
@@ -150,8 +148,7 @@ static void uhci_clear_changes(uhci_hc_t *hc, int port)
    пространстве UHCI на смещении 0xC0 регистр USBLEGSUP (LEG SMIs Enable):
      бит 0      SMIEN  — разрешает SMI на события USB (connect/disconnect,
                          suspend/resume). Пока он взведён, BIOS-смущающий
-                         SMI-код может ВСЕГДА возвращать хост-контроллер в
-                         Global Suspend между нашими операциями: PR игнори-
+                         SMI-код может ВСЕГДА возвращать хост-контроллер в Global Suspend между нашими операциями: PR игнори-
                          руется железом, PED не поднимается (fin=0x288).
      бит 8      HCSEL  — ownership: 0 = HC принадлежит SMM/BIOS!
      бит 9      OSRSTCTL/SYSRSTCTL, бит 10 ECP select и т.д.
@@ -413,8 +410,7 @@ void uhci_udelay(uint32_t us)
     }
 }
 
-/* Подробный дамп root-hub: регистры + пофлагровая расшифровка обоих портов.
-   Формат строки: "DUMP tag CMD STS PORT1 PORT2 FR" и далее побитовые флаги.
+/* Подробный дамп root-hub: регистры + побитовая расшифровка обоих портов.
 
    ВАЖНО про читаемость с экрана: раньше использовались похожие латинские
    буквы ('o'/'O', 'c'/'e'), которые при ручном переписывании лога неотличимы
@@ -693,7 +689,7 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
        "-5 write ignored by HW"). Теперь факт сброса проверяется КОМБИНАЦИЕЙ
        двух независимых признаков: (а) взведённый USBSTS.RESET (Host Reset
        Occurred, W1C) — его HC выставляет сам факт завершения 10-мс сброса;
-       (б) последующее авто-снятие PR в polling-цикле шаге 200 мкс. */
+       (б) последующее авто-снятие PR в polling-цикле шагом 200 мкс. */
     uhci_udelay(100);
     uint16_t ps_asserted   = inw(hc->io_base + reg);
     uint16_t sts_asserted  = inw(hc->io_base + UHCI_USBSTS);
@@ -818,4 +814,236 @@ int uhci_reset_port(uhci_hc_t *hc, int port)
             api_ptr->load_screen_add_string("RESET[%d]: CCS lost after reinit", port);
     }
     return -2;
+}
+
+
+
+
+
+
+/* Разобрать status-слова TD в человекочитаемый код ошибки.
+   Возвращает: 0 = OK; иначе — отрицательный код, по которому upper-слой
+   решает, что делать (NAK -> retry, STALL -> halt, CRC/timeout -> reset). */
+static int uhci_td_error_code(uint32_t st)
+{
+    if (st & TD_CTRL_ACTIVE)   return -10; // всё ещё активно (не должно быть на выходе)
+    if (st & TD_CTRL_STALLED)  return -4;  // device STALL (endpoint halted)
+    if (st & TD_CTRL_DBUFERR)  return -5;  // host-side data buffer error
+    if (st & TD_CTRL_BABBLE)   return -6;  // babble — устройство «болтает» по шине
+    if (st & TD_CTRL_CRCTIMEO) return -7;  // CRC/Time-out — аппаратный таймаут фазы
+    if (st & TD_CTRL_BITSTUFF) return -8;  // bit-stuffing ошибка на линии
+    return 0;
+}
+
+int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_pkt, void *data_buf, uint16_t data_len, int data_in, uint16_t max_pkt)
+{
+    if (!hc || !setup_pkt) return -1;
+    if (max_pkt == 0 || max_pkt > 64) max_pkt = 8;
+
+    /* Транзакты крутим только через ОДИН контроллер за раз (общие TD/QH). */
+    uhci_select_host(hc);
+
+    /* CF-18/ICH6: BIOS или SMI могут оставить HC в Global Suspend / порт в
+       suspend между транзактами. На "спящей" линии D+ любой SETUP уходит в
+       CRC/Time-out даже при ped=1. Перед КАЖДОЙ цепочкой TD проверяем
+       USBSTS.RESUME и бит SUSPEND порта и при необходимости будим root-hub
+       (снятие EGSM, deassert SUSPEND, resume >=20 мс, W1C RESUME). */
+    {
+        uint16_t regp = portsc_reg(0), regp2 = portsc_reg(1);
+        uint16_t psx  = inw(hc->io_base + regp) | inw(hc->io_base + regp2);
+        uint16_t stsx = inw(hc->io_base + UHCI_USBSTS);
+        uint16_t cmdx = inw(hc->io_base + UHCI_USBCMD);
+        if ((stsx & USBSTS_RESUME) || (psx & PORTSC_SUSPEND) || (cmdx & USBCMD_EGSM)) {
+            /* Определяем suspend-порт для точечного resume; если непонятно —
+               будим оба (resume-посылка на свободном порту безвредна). */
+            int woke = 0;
+            if (inw(hc->io_base + regp)  & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 0);
+            if (inw(hc->io_base + regp2) & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 1);
+            woke |= uhci_resume_port(hc, 0);   /* снимает EGSM + W1C RESUME */
+            if (woke)
+                api_ptr->load_screen_add_string("UHCI resumed before xfer sts=%x cmd=%x",
+                                                stsx, cmdx);
+        }
+    }
+
+    uint32_t num_data = 0;
+    int has_data = (data_len > 0 && data_buf != NULL);
+    if (has_data)
+    {
+        num_data = (data_len + max_pkt - 1) / max_pkt;
+        if (num_data > MAX_CONTROL_TDS - 2) num_data = MAX_CONTROL_TDS - 2;
+    }
+
+    /* Готовим ВСЮ цепочку TD до того, как контроллер увидит TD0:
+       глушим IOC на промежуточных TD и чистим статусы от ошибок прошлого
+       транзакта. В прошлой версии у "мусорных" TD оставался старый status
+       без Active-бита — HC обрывал цепочку, а STATUS-TD вообще не участвовал
+       в цикле ожидания (в логе печатался stale 0x1a800000). */
+    for (uint32_t i = 0; i < MAX_CONTROL_TDS; i++) control_tds[i].status = 0;
+
+    // Копируем setup-пакет строго в выровненный flat-буфер
+    for (int i = 0; i < 8; i++) setup_static[i] = setup_pkt[i];
+    uint32_t setup_phys = usb_virt_to_phys((uint32_t)setup_static);
+
+    uint32_t td0_phys   = usb_virt_to_phys((uint32_t)&control_tds[0]);
+    uint32_t td1_phys   = usb_virt_to_phys((uint32_t)&control_tds[1]);
+    uint32_t qh_phys    = usb_virt_to_phys((uint32_t)&g_control_queue.qh);
+    uint32_t dummy_phys = usb_virt_to_phys((uint32_t)&g_control_queue.dummy_td);
+
+    uint32_t ls_flag = hc->current_device_low_speed ? TD_CTRL_LS : 0u;
+
+    // --- TD0: SETUP Stage ---
+    // VF (bit2) в link — корректный depth-first обход цепочки TD внутри QH.
+    control_tds[0].link   = (td1_phys & ~0x0Fu) | TD_LINK_VF;
+    control_tds[0].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK; // C_ERR=11: 3 попытки HC сам
+    if (ls_flag) control_tds[0].status |= ls_flag;
+    /* ТОКЕН SETUP: PID(8b) | ADDR(7b, биты 8-14) | ENDP=0 (биты 15-18) | DATA0 | LEN=7 (биты 20-30).
+       ЭНДПОИНТ В TOKEN ОБЯЗАТЕЛЕН! Без него поле len=7 сдвигалось на бит левее
+       и "засоряло" старший байт токена (setup=0x00085007 вместо 0x002D0007):
+       контроллер отправлял на шину мусор, устройство молчало -> CRC/Time-out. */
+    control_tds[0].token  = (PID_SETUP << TD_TOKEN_PID_SHIFT) | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) | (0u << TD_TOKEN_EP_SHIFT) | (7u << TD_TOKEN_LEN_SHIFT);
+    control_tds[0].buffer = setup_phys;
+    hc->dbg_td0_token = control_tds[0].token;
+
+    // --- TD[1..num_data]: DATA Stage ---
+    for (uint32_t i = 0; i < num_data; i++)
+    {
+        uint32_t idx = 1 + i;
+        uint32_t off = i * max_pkt;
+        uint32_t chunk = (data_len - off > max_pkt) ? max_pkt : (data_len - off);
+        uint32_t toggle = ((i & 1) == 0) ? TD_TOKEN_TOGGLE : 0u; // ep0 DATA: первый пакет PID_DATA1
+
+        uint32_t next_idx = (i + 1 < num_data) ? (idx + 1) : (1 + num_data);
+        uint32_t next_td_phys = usb_virt_to_phys((uint32_t)&control_tds[next_idx]);
+
+        control_tds[idx].link = (next_td_phys & ~0x0Fu) | TD_LINK_VF;
+        control_tds[idx].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK | ls_flag;
+        control_tds[idx].token = ((data_in ? PID_IN : PID_OUT) << TD_TOKEN_PID_SHIFT) |
+                                 ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
+                                 (0u << TD_TOKEN_EP_SHIFT) |
+                                 toggle | ((chunk - 1) << TD_TOKEN_LEN_SHIFT);
+
+        uint32_t pa = usb_virt_to_phys((uint32_t)((uint8_t *)data_buf + off));
+        if (pa == 0) return -1;
+        control_tds[idx].buffer = pa;
+    }
+
+    // --- TD[sidx]: STATUS Stage ---
+    uint32_t sidx = 1 + num_data;
+    uint32_t status_pid = has_data ? (data_in ? PID_OUT : PID_IN) : PID_IN;
+
+    control_tds[sidx].link   = TD_LINK_TERM;
+    control_tds[sidx].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_MASK | ls_flag;
+    // STATUS stage всегда PID_DATA1 (toggle=1), длина 0 => поле length = 0x7FF
+    control_tds[sidx].token = (status_pid << TD_TOKEN_PID_SHIFT) |
+                              ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
+                              (0u << TD_TOKEN_EP_SHIFT) |
+                              TD_TOKEN_TOGGLE | (0x7FFu << TD_TOKEN_LEN_SHIFT);
+    control_tds[sidx].buffer = setup_phys;
+
+    uint32_t status_td_status_off = (uint32_t)&control_tds[sidx].status - (uint32_t)&control_tds[0];
+
+    api_ptr->load_screen_add_string("UHCI DMA Map: QH=%x TD0=%x TD_stat_off=%x", qh_phys, td0_phys, status_td_status_off);
+
+    // Синхронизация записи дескрипторов перед тем, как HC их увидит
+    usb_dma_sync_before();
+    if (uhci_force_wbinvd) __asm__ __volatile__("wbinvd" ::: "memory");
+
+    // Сбрасываем хвост очереди и врезаем транзакцию в асинхронный планировщик
+    g_control_queue.tail_td = &g_control_queue.dummy_td;
+    g_control_queue.qh.element = td0_phys & ~0x0Fu;
+    __asm__ __volatile__("" ::: "memory");
+
+    uint32_t timeout = 5000000;   // ~несколько секунд даже на медленном CPU
+    uint32_t spins = 0;
+    int result = -3;
+
+    /* КРИТИЧЕСКАЯ СЕКЦИЯ: блокируем планировщик задач ядра на время всей
+       транзакции (аналог того, как ext2_disk.c оборачивает DMA-операции).
+       Контекст по таймеру (IRQ 0/32) может увести выполнение в другую задачу
+       посреди polling-цикла TD; само по себе это не ломает HC (DMA асинхронен),
+       но удваивает латентность обработки и мешает честному замеру spins. */
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+
+    volatile uint32_t *status_slot = (volatile uint32_t *)&control_tds[sidx].status;
+
+    while (timeout--)
+    {
+        spins++;
+        /* Ждём ЗАВЕРШЕНИЯ ВСЕЙ транзакции: последний TD цепочки (STATUS stage).
+           Раньше цикл смотрел только на TD0 — при ошибке SETUP он выходил раньше,
+           чем HC успевал пометить ошибкой хвостовой TD. */
+        uint32_t st_tail = *status_slot;
+        if (!(st_tail & TD_CTRL_ACTIVE))
+        {
+            /* Хвост завершён без Active — проходим по всей цепочке в поисках
+               реального кода ошибки любого из TD. */
+            int ec = 0;
+            for (uint32_t k = 0; k <= sidx; k++)
+            {
+                ec = uhci_td_error_code(control_tds[k].status);
+                if (ec) break;
+            }
+            result = ec ? ec : (int)data_len; // УСПЕХ!
+            break;
+        }
+        /* Если TD0 уже упал с ошибкой, а хвост всё ещё Active — HC оборвал
+           цепочку: дождись сброса Active на TD0 или выходи по общему таймауту. */
+    }
+
+    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+
+    // Диагностика для лога загрузки: что реально произошло на шине
+    hc->dbg_swstamp    = spins;
+    hc->dbg_last_frame = inw(hc->io_base + UHCI_FRNUM);
+    hc->dbg_sts        = inw(hc->io_base + UHCI_USBSTS);
+    hc->dbg_portsc     = inw(hc->io_base + UHCI_PORTSC1);
+    api_ptr->load_screen_add_string("XFER done spins=%d sts=%x p1=%x p2=%x td0=%x tdt=%x",
+                                    spins, hc->dbg_sts,
+                                    inw(hc->io_base + UHCI_PORTSC1),
+                                    inw(hc->io_base + UHCI_PORTSC2),
+                                    control_tds[0].status, control_tds[sidx].status);
+    __asm__ __volatile__("" ::: "memory");
+    hc->dbg_td0_status = control_tds[0].status;
+
+    /* Если хвостовой TD так и остался ACTIVE, а TD0 завершён с ошибкой —
+       HC оборвал цепочку на SETUP. Подтягиваем код ошибки с TD0, чтобы
+       upper-слой получил честный результат (-4 STALL / -7 CRC/TO и т.д.). */
+    if (result == -3)
+    {
+        int ec0 = uhci_td_error_code(control_tds[0].status);
+        if (!(control_tds[0].status & TD_CTRL_ACTIVE) && ec0) result = ec0;
+    }
+
+    // Если TD0 так и остался ACTIVE — движок не тронул очередь вообще
+    // (HC остановлен / FLBASEADD неверен / нет питания порта).
+    if (result == -3 && (hc->dbg_td0_status & TD_CTRL_ACTIVE)) {
+        api_ptr->load_screen_add_string("UHCI DEAD? RS=%x STS=%x FR=%x",
+                                        inw(hc->io_base + UHCI_USBCMD) & 1,
+                                        hc->dbg_sts, hc->dbg_last_frame);
+        // Глубокая реанимация: полный HCRESET + перезапуск движка
+        outw(hc->io_base + UHCI_USBCMD, USBCMD_HCRESET);
+        for (uint32_t i = 0; i < 100000 && (inw(hc->io_base + UHCI_USBCMD) & USBCMD_HCRESET); i++);
+        outw(hc->io_base + UHCI_USBSTS, 0x003F);
+        outw(hc->io_base + UHCI_USBCMD, USBCMD_RS);
+    }
+
+    // Восстанавливаем исходный пустой элемент очереди QH
+    g_control_queue.qh.element = dummy_phys & ~0x0Fu;
+    g_control_queue.tail_td = &g_control_queue.dummy_td;
+
+    // Тотальный сброс кэша для синхронизации входящих данных флешки
+    usb_dma_sync_after();
+    if (uhci_force_wbinvd) __asm__ __volatile__("wbinvd" ::: "memory");
+
+    if (result > 0 && data_in && data_buf)
+    {
+        volatile uint8_t *cp = (volatile uint8_t *)data_buf;
+        api_ptr->load_screen_add_string("USB DATA READ OK! Bytes: %x %x %x %x | %x %x %x %x",
+                                        cp[0], cp[1], cp[2], cp[3], cp[4], cp[5], cp[6], cp[7]);
+    }
+
+    api_ptr->debug8 = control_tds[0].status;
+    api_ptr->debug9 = control_tds[sidx].status;
+    return result;
 }
