@@ -1,0 +1,247 @@
+ ; Copyright (C) 2026 ARHeOS by Dmitry H
+ ;
+ ; This program is free software: you can redistribute it and/or modify
+ ; it under the terms of the GNU General Public License as published by
+ ; the Free Software Foundation, either version 3 of the License, or
+ ; (at your option) any later version.
+ ;
+ ; This program is distributed in the hope that it will be useful,
+ ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+ ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ ; GNU General Public License for more details.
+ ;
+ ; You should have received a copy of the GNU General Public License
+ ; along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+;build_boot_info
+
+build_boot_info:
+
+	push edi
+	push esi
+	push ecx
+	push edx
+	push eax
+
+    mov edi,BOOTINFO_ADDR
+
+    mov dword [edi+BOOT_MAGIC],BOOTINFO_MAGIC
+    mov dword [edi+BOOT_VERSION],BOOTINFO_VERSION
+    mov dword [edi+BOOT_SIZE],BOOT_TOTAL_SIZE
+
+    mov eax,[lfb_addr]
+    mov [edi+BOOT_FRAMEBUFFER],eax
+
+    xor eax,eax
+    mov ax,[pitch]
+    mov [edi+BOOT_PITCH],eax
+
+    xor eax,eax
+    mov ax,[screen_width]
+    mov dword [edi+BOOT_WIDTH],eax
+    ;call debug_hex_dword
+    ;call newline
+
+    xor eax,eax
+    mov ax,[screen_height]
+    mov dword [edi+BOOT_HEIGHT],eax
+    ;call debug_hex_dword
+    ;call newline
+
+    xor eax,eax
+    mov al,[bytes_pp]
+    ;call debug_hex_byte
+    shl eax,3
+    mov [edi+BOOT_BPP],eax
+
+    xor eax,eax
+    mov eax,[graphics_flags]
+    mov [edi+BOOT_GRAPHICS_FLAG],eax
+
+
+    mov dword [edi+BOOT_E820_ADDR],0x6002
+
+    xor eax,eax
+    mov ax,[0x6000]
+    mov [edi+BOOT_E820_COUNT],eax
+
+    mov dword [edi+BOOT_FS_INFO],FSINFO_ADDR
+
+    mov dword [edi+BOOT_MODULE_COUNT],5
+    mov dword [edi+BOOT_MODULE_TABLE],MODULES_ADDR
+
+    mov dword [edi+BOOT_CMDLINE],0
+    mov dword [edi+BOOT_LOADER_NAME],loader_name
+
+    xor eax,eax
+    mov al,[drive]
+    mov [edi+BOOT_DRIVE],eax
+
+	pop eax
+	pop edx
+	pop ecx
+	pop esi
+    pop edi
+
+    ;mov eax,BOOTINFO_ADDR
+    ret
+
+
+;build_modules_info
+
+;build_modules_info
+
+build_modules_info:
+    push ds
+    push es
+    push si
+    push di
+
+    xor ax,ax
+    mov es,ax
+
+
+
+    ;Модуль 0 : драйвер framebuffer
+    mov di,MODULES_ADDR
+
+    xor eax,eax
+    mov ax,[fb_driver_seg]
+    shl eax,4
+    mov [es:di + MODULE_START],eax
+
+    mov eax,[fb_driver_size]
+    mov [es:di + MODULE_SIZE],eax
+
+    mov dword [es:di + MODULE_TYPE],MODULE_TYPE_DRIVER
+
+    mov di,MODULES_ADDR + MODULE_NAME
+    mov si,fb_driver_filename
+    call copy_string
+
+
+
+    ;Модуль 1 : драйвер блочных устройств
+    mov di,MODULES_ADDR + MODULE_INFO_SIZE
+
+    xor eax,eax
+    mov ax,[block_driver_seg]
+    shl eax,4
+    mov [es:di + MODULE_START],eax
+
+    mov eax,[block_driver_size]
+    mov [es:di + MODULE_SIZE],eax
+
+    mov dword [es:di + MODULE_TYPE],MODULE_BLOCKDEVICE_DRIVER
+
+    lea di,[di + MODULE_NAME]
+    mov si,block_driver_filename
+    call copy_string
+
+
+
+    ;Модуль 2 : драйвер USB
+    mov di,MODULES_ADDR + MODULE_INFO_SIZE + MODULE_INFO_SIZE
+
+    xor eax,eax
+    mov ax,[usb_driver_seg]
+    shl eax,4
+    mov [es:di + MODULE_START],eax
+
+    mov eax,[usb_driver_size]
+    mov [es:di + MODULE_SIZE],eax
+
+    mov dword [es:di + MODULE_TYPE],MODULE_USB_DRIVER
+
+    lea di,[di + MODULE_NAME]
+    mov si,usb_driver_filename
+    call copy_string
+
+
+
+    ;Модуль 3 : драйвер файловой системы FAT12
+    mov di,MODULES_ADDR + MODULE_INFO_SIZE + MODULE_INFO_SIZE + MODULE_INFO_SIZE
+
+    xor eax,eax
+    mov ax,[fat12_driver_seg]
+    shl eax,4
+    mov [es:di + MODULE_START],eax
+
+    mov eax,[fat12_driver_size]
+    mov [es:di + MODULE_SIZE],eax
+
+    mov dword [es:di + MODULE_TYPE],MODULE_TYPE_FILESYSTEM
+
+    lea di,[di + MODULE_NAME]
+    mov si,fat12_driver_filename
+    call copy_string
+
+
+
+    ;Модуль 4 : драйвер файловой системы EXT2
+    mov di,MODULES_ADDR + MODULE_INFO_SIZE + MODULE_INFO_SIZE + MODULE_INFO_SIZE + MODULE_INFO_SIZE
+
+    xor eax,eax
+    mov ax,[ext2_driver_seg]
+    shl eax,4
+    mov [es:di + MODULE_START],eax
+
+    mov eax,[ext2_driver_size]
+    mov [es:di + MODULE_SIZE],eax
+
+    mov dword [es:di + MODULE_TYPE],MODULE_TYPE_FILESYSTEM
+
+    lea di,[di + MODULE_NAME]
+    mov si,ext2_driver_filename
+    call copy_string
+
+    pop di
+    pop si
+    pop es
+    pop ds
+
+    ret
+
+
+
+copy_string:
+
+.next:
+    lodsb
+    stosb
+    test al,al
+    jz .done
+    jmp .next
+
+.done:
+
+    ret
+
+
+
+
+
+
+;Variables
+
+fb_driver_size     dd 0
+fat12_driver_size  dd 0
+ext2_driver_size   dd 0
+block_driver_size  dd 0
+usb_driver_size    dd 0
+
+;kernel_size_pm       dd 0
+;kernel_inode         dw 0
+;fb_inode             dw 0
+;block_inode          dw 0
+;fat12_inode          dw 0
+;ext2_inode           dw 0
+;drive                db 0
+;cluster              dw 0
+
+;Динамическое размещение модулей (единица = параграф, 16 байт)
+;module_next_segment  dd 0x3000       ; стартовый сегмент fb_driver (phys 0x30000)
+;fb_driver_seg        dw 0
+;block_driver_seg     dw 0
+;fat12_driver_seg     dw 0
+;ext2_driver_seg      dw 0

@@ -1,0 +1,70 @@
+ ; Copyright (C) 2026 ARHeOS by Dmitry H
+ ;
+ ; This program is free software: you can redistribute it and/or modify
+ ; it under the terms of the GNU General Public License as published by
+ ; the Free Software Foundation, either version 3 of the License, or
+ ; (at your option) any later version.
+ ;
+ ; This program is distributed in the hope that it will be useful,
+ ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+ ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ ; GNU General Public License for more details.
+ ;
+ ; You should have received a copy of the GNU General Public License
+ ; along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+;Функции вспомогательные
+
+BITS 16
+SUPER_SEG equ 0x1000
+
+;константы файловой системы по build.sh
+EXT2_BLOCK_SIZE_CONST     equ 1024
+EXT2_INODE_SIZE_CONST     equ 128
+EXT2_INODES_PER_GRP_CONST equ 8192
+
+ext2_init:
+    mov ax,SUPER_SEG
+    mov es,ax
+    xor bx,bx
+    mov ax,2
+    xor dx,dx
+    mov cx,2
+    call ext2_read_sectors
+    jc .error
+    call ext2_parse_super
+    clc
+    ret
+
+.error:
+    stc
+    ret
+
+ext2_parse_super:
+    push ax
+    push bx
+    push ds
+    mov ax, SUPER_SEG
+    mov ds, ax
+
+    ;Проверяем только MAGIC CHECK по смещению 56 байт (0xEF53) для безопасности
+    mov ax, [56]
+    cmp ax, 0EF53h
+    jne .bad_magic
+
+    pop ds
+    pop bx
+    pop ax
+    ret
+
+.bad_magic:
+    pop ds
+    pop bx
+    pop ax
+    stc
+    ret
+
+;Variables
+
+msg_ext2_error db "EXT2 ERROR",13,10,0
+msg_bad_magic  db "BAD EXT2 MAGIC",13,10,0

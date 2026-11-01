@@ -1,0 +1,512 @@
+#!/bin/bash
+set -e
+
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+
+echo -e "${GREEN}=== Building bootloader stages and kernel ===${NC}"
+
+# ---- Компиляция загрузчиков ----
+nasm -f bin boot_720.asm -o bin/boot_720.bin
+nasm -f bin boot_1440.asm -o bin/boot_1440.bin
+nasm -f bin boot_hdd.asm -o bin/boot_hdd.bin
+nasm -f bin f12ld.asm -o bin/f12ld.bin
+nasm -f bin hddld.asm -o bin/hddld.bin
+
+#xxd -l 16 bin/f12ld.bin
+
+# ---- Дополнение Stage2 до 8 КБ ----
+#STAGE2_SIZE=8192
+echo "STAGE2 SIZE $STAGE2_SIZE"
+#dd if=bin/f12ld.bin of=bin/f12ld.pad bs=1 count=8192 conv=sync
+
+#mv bin/f12ld.pad bin/f12ld.bin
+
+#dd if=bin/hddld.bin of=bin/hddld.pad bs=1 count=8192 conv=sync
+#mv bin/hddld.pad bin/hddld.bin
+STAGE2_SIZE=32256   # 63 сектора
+
+#for F in bin/f12ld.bin bin/hddld.bin; do
+#    sz=$(stat -f%z "$F" 2>/dev/null || stat -c%s "$F")
+#    if [ "$sz" -gt "$STAGE2_SIZE" ]; then
+#        echo "ERROR: $F is $sz bytes, exceeds $STAGE2_SIZE"
+#        exit 1
+#    fi
+#    dd if="$F" of="$F.pad" bs=1 count="$STAGE2_SIZE" conv=sync 2>/dev/null
+#    mv "$F.pad" "$F"
+#done
+
+
+# ---- Флаги компиляции ----
+if command -v i686-elf-gcc &> /dev/null; then
+    CC=i686-elf-gcc
+    LD=i686-elf-ld
+    OBJCOPY=i686-elf-objcopy
+
+    # -march=i386 принудительно запрещает компилятору использовать инструкции Pentium Pro (включая cmov)
+    KERNEL_CCFLAGS="-m32 -march=i386 -ffreestanding -nostdlib"
+    DRVFLAGS="-m32 -march=i386 -ffreestanding -fno-common -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables"
+    #USER_CCFLAGS="-m32 -march=i386 -ffreestanding -nostdlib -fno-stack-protector -fno-pie -mstringop-strategy=loop -fno-builtin"
+    USER_CCFLAGS="-m32 -march=i386 -ffreestanding -nostdlib -Os -fno-stack-protector -fno-toplevel-reorder -fno-pie -fno-common -mstringop-strategy=loop -fno-builtin -DCOMPILE_BIN -DARHEOS_OS"
+    USER_CCFLAGS_ELF="-m32 -march=i386 -ffreestanding -fPIE -fno-stack-protector -fno-builtin -DARHEOS_OS"
+    USER_LDFLAGS_ELF="-m elf_i386 -pie -e _start"
+
+else
+    echo "Error: i686-elf-gcc not found."
+    exit 1
+fi
+
+$CC $KERNEL_CCFLAGS -static -c kernel.c -o bin/kernel.o
+$CC $KERNEL_CCFLAGS -static -c draw.c -o bin/draw.o
+$CC $KERNEL_CCFLAGS -Iinclude -c isr.c -o bin/isr.o
+$CC $KERNEL_CCFLAGS -Iinclude -c syscalls.c -o bin/syscall.o
+$CC $KERNEL_CCFLAGS -Iinclude -c font_data.c -o bin/font_data.o
+$CC $KERNEL_CCFLAGS -Iinclude -c gdt.c -o bin/gdt.o
+$CC $KERNEL_CCFLAGS -Iinclude -c task.c -o bin/task.o
+$CC $KERNEL_CCFLAGS -Iinclude -c kernel_heap.c -o bin/kernel_heap.o
+$CC $KERNEL_CCFLAGS -Iinclude -c pmm.c -o bin/pmm.o
+$CC $KERNEL_CCFLAGS -Iinclude -c vmm.c -o bin/vmm.o
+$CC $KERNEL_CCFLAGS -Iinclude -c lib.c -o bin/lib.o
+$CC $KERNEL_CCFLAGS -Iinclude -c debug.c -o bin/debug.o
+$CC $KERNEL_CCFLAGS -Iinclude -c bootinfo.c -o bin/bootinfo.o
+#$CC $KERNEL_CCFLAGS -Iinclude -c driver.c -o bin/driver.o
+$CC $KERNEL_CCFLAGS -Iinclude -c driver_elf.c -o bin/driver_elf.o
+#$CC $KERNEL_CCFLAGS -Iinclude -c kernel_symbols.c -o bin/kernel_symbols.o
+$CC $KERNEL_CCFLAGS -Iinclude -c use_drivers.c -o bin/use_drivers.o
+$CC $KERNEL_CCFLAGS -Iinclude -c ports_io.c -o bin/ports_io.o
+$CC $KERNEL_CCFLAGS -Iinclude -c comdebug.c -o bin/comdebug.o
+$CC $KERNEL_CCFLAGS -Iinclude -c hardware.c -o bin/hardware.o
+$CC $KERNEL_CCFLAGS -Iinclude -c vfs.c -o bin/vfs.o
+$CC $KERNEL_CCFLAGS -Iinclude -c kconsole.c -o bin/kconsole.o
+$CC $KERNEL_CCFLAGS -Iinclude -c config.c -o bin/config.o
+$CC $KERNEL_CCFLAGS -Iinclude -c kbd_translate.c -o bin/kbd_translate.o
+$CC $KERNEL_CCFLAGS -Iinclude -c font.c -o bin/font.o
+$CC $KERNEL_CCFLAGS -Iinclude -c locale.c -o bin/locale.o
+$CC $KERNEL_CCFLAGS -Iinclude -c font_vga.c -o bin/font_vga.o
+$CC $KERNEL_CCFLAGS -Iinclude -c kpanic.c -o bin/kpanic.o
+$CC $KERNEL_CCFLAGS -Iinclude -c kload_screen.c -o bin/kload_screen.o
+$CC $KERNEL_CCFLAGS -Iinclude -c usb_registry.c -o bin/usb_registry.o
+
+nasm -f elf32 isr.asm -o bin/isr_asm.o
+#nasm -f elf32 switch.asm -o bin/switch.o
+#nasm -f elf32 idle_loop.asm -o bin/idle_loop.o
+#nasm -f elf32 font_data.asm -o bin/font_data.o
+
+#   -----   Драйвера   -----
+$CC $DRVFLAGS -fno-pie -c lib.c  -o bin/dlib.o
+# framebuffer driver
+$CC $DRVFLAGS -fno-pie -c drivers/fb_driver/fb_driver.c  -o bin/fb_driver.o
+#$CC $DRVFLAGS -fno-pie -c drivers/fb_driver/font_data_driver.c -o bin/font_data_driver.o
+$CC $DRVFLAGS -fno-pie -c font.c -o bin/d_font.o
+#$CC $DRVFLAGS -fno-pie -c locale.c -o bin/d_locale.o
+nasm -f elf32 drivers/fb_driver/fb_start.asm -o bin/fb_start.o
+
+# fat12 filesystem driver
+$CC $DRVFLAGS -fno-pie -c drivers/fat12_driver/fat12_driver.c  -o bin/fat12_driver.o
+#$CC $DRVFLAGS -fno-pie -c drivers/fat12_driver/fat12_cluster.c  -o bin/fat12_cluster.o
+$CC $DRVFLAGS -fno-pie -c drivers/fat12_driver/fat12_disk.c  -o bin/fat12_disk.o
+$CC $DRVFLAGS -fno-pie -c drivers/fat12_driver/fat12_boot.c  -o bin/fat12_boot.o
+$CC $DRVFLAGS -fno-pie -c drivers/fat12_driver/fat12_fdc.c  -o bin/fat12_fdc.o
+$CC $DRVFLAGS -fno-pie -c drivers/fat12_driver/fat12_dma.c  -o bin/fat12_dma.o
+$CC $DRVFLAGS -fno-pie -c ports_io.c  -o bin/drv_ports_io.o
+nasm -f elf32 drivers/fat12_driver/fat12_start.asm -o bin/fat12_start.o
+
+# ext2 filesystem driver
+$CC $DRVFLAGS -fno-pie -c drivers/ext2_driver/ext2_driver.c  -o bin/ext2_driver.o
+$CC $DRVFLAGS -fno-pie -c drivers/ext2_driver/ext2_disk.c  -o bin/ext2_disk.o
+nasm -f elf32 drivers/ext2_driver/ext2_start.asm -o bin/ext2_start.o
+
+# keyboard ps/2 driver
+$CC $DRVFLAGS -fno-pie -c drivers/kbd_driver/kbd_driver.c  -o bin/kbd_driver.o
+nasm -f elf32 drivers/kbd_driver/kbd_start.asm -o bin/kbd_start.o
+
+# block device driver
+$CC $DRVFLAGS -fno-pie -c drivers/block_driver/block_driver.c  -o bin/block_driver.o
+nasm -f elf32 drivers/block_driver/block_start.asm -o bin/block_start.o
+
+# usb layer driver
+$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_core.c  -o bin/usb_core.o
+$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_uhci.c  -o bin/usb_uhci.o
+$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_msc.c  -o bin/usb_msc.o
+$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_hub.c  -o bin/usb_hub.o
+$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_hcd.c  -o bin/usb_hcd.o
+$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/ehci_core.c  -o bin/ehci_core.o
+$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_driver.c  -o bin/usb_driver.o
+nasm -f elf32 drivers/usb_driver/usb_start.asm -o bin/usb_start.o
+
+#Линковка драйверов
+$LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld bin/fb_start.o \
+bin/fb_driver.o bin/dlib.o bin/d_font.o -o bin/fb_driver.elf
+
+$LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
+bin/fat12_start.o bin/fat12_driver.o bin/dlib.o bin/fat12_disk.o \
+bin/fat12_boot.o bin/fat12_fdc.o bin/fat12_dma.o bin/drv_ports_io.o -o bin/fat12_driver.elf
+
+$LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld bin/ext2_start.o bin/ext2_driver.o \
+bin/ext2_disk.o bin/drv_ports_io.o bin/dlib.o -o bin/ext2_driver.elf
+#$OBJCOPY -O binary bin/fb_driver.elf bin/fb_driver.bin
+
+$LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld bin/kbd_start.o bin/kbd_driver.o \
+bin/drv_ports_io.o bin/dlib.o -o bin/kbd_driver.elf
+
+$LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
+bin/block_start.o bin/block_driver.o bin/drv_ports_io.o bin/dlib.o -o bin/block_driver.elf
+
+$LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
+bin/usb_start.o bin/usb_core.o bin/usb_uhci.o bin/usb_msc.o bin/usb_hub.o bin/usb_hcd.o \
+bin/ehci_core.o bin/usb_driver.o bin/drv_ports_io.o bin/dlib.o -o bin/usb_driver.elf
+
+#Линковка ядра
+$LD -m elf_i386 -T kernel.ld -o bin/kernel.bin bin/kernel.o bin/lib.o bin/draw.o \
+bin/pmm.o bin/vmm.o bin/isr.o bin/syscall.o bin/isr_asm.o bin/font_data.o bin/gdt.o \
+bin/task.o bin/debug.o bin/bootinfo.o bin/driver_elf.o bin/use_drivers.o bin/kernel_heap.o \
+bin/comdebug.o bin/ports_io.o bin/hardware.o bin/vfs.o bin/kconsole.o bin/config.o \
+bin/kbd_translate.o bin/font.o bin/locale.o bin/font_vga.o bin/kpanic.o bin/kload_screen.o \
+bin/usb_registry.o
+
+#Сборка отладочного ELF-файла ядра для lldb
+$LD -m elf_i386 -T kernel_elf.ld -o bin/kernel.elf bin/kernel.o bin/lib.o bin/draw.o \
+bin/pmm.o bin/vmm.o bin/isr.o bin/syscall.o bin/isr_asm.o bin/font_data.o bin/gdt.o \
+bin/task.o bin/debug.o bin/bootinfo.o bin/driver_elf.o bin/use_drivers.o bin/kernel_heap.o \
+bin/comdebug.o bin/ports_io.o bin/hardware.o bin/vfs.o bin/kconsole.o bin/config.o \
+bin/kbd_translate.o bin/font.o bin/locale.o bin/font_vga.o bin/kpanic.o bin/kload_screen.o \
+bin/usb_registry.o
+
+
+# Сборка USERSPACE
+
+echo -e "${GREEN}=== Building userspace libraries and applications ===${NC}"
+# Рантайм-заглушка точки входа (entry.asm)
+#nasm -f elf32 userspace/lib/entry.asm -o bin/u_entry.o
+
+# Си-библиотека пользовательских оберток (ustd.c)
+$CC $USER_CCFLAGS -c userspace/lib/ustd.c -o bin/u_std.o
+$CC $USER_CCFLAGS_ELF -c userspace/lib/ustd.c -o bin/u_std_elf.o
+#Библиотека работы с памятью для пользовательских приложений
+$CC $USER_CCFLAGS -c userspace/lib/umemory.c -o bin/u_memory.o
+$CC $USER_CCFLAGS_ELF -c userspace/lib/umemory.c -o bin/u_memory_elf.o
+#Библиотечка стандартных функций
+$CC $USER_CCFLAGS -c lib.c -o bin/u_lib.o
+$CC $USER_CCFLAGS_ELF -c lib.c -o bin/u_lib_elf.o
+#Библиотечка чтения секционированных конфигов
+$CC $USER_CCFLAGS -c userspace/lib/uconfig.c -o bin/u_uconfig.o
+$CC $USER_CCFLAGS_ELF -c userspace/lib/uconfig.c -o bin/u_uconfig_elf.o
+#Библиотечка работы с изображениями
+$CC $USER_CCFLAGS -c userspace/lib/uimage.c -o bin/u_uimage.o
+$CC $USER_CCFLAGS_ELF -c userspace/lib/uimage.c -o bin/u_uimage_elf.o
+#Библиотечка работы с устройствами
+$CC $USER_CCFLAGS -c userspace/lib/udevices.c -o bin/u_udevices.o
+$CC $USER_CCFLAGS_ELF -c userspace/lib/udevices.c -o bin/u_udevices_elf.o
+
+# Тестовые программы
+# hello.c
+$CC $USER_CCFLAGS -c userspace/examples/hello/hello.c -o bin/u_hello.o
+#vfs_test.c
+$CC $USER_CCFLAGS -c userspace/examples/vfs_test/vfs_test.c -o bin/u_vfs_test.o
+#cat test
+$CC $USER_CCFLAGS -c userspace/examples/cat/ucat.c -o bin/u_ucat.o
+#kbd test
+$CC $USER_CCFLAGS -c userspace/examples/kb_check/kb_check.c -o bin/u_kb_check.o
+#memory test
+$CC $USER_CCFLAGS -c userspace/examples/allocram/allocram.c -o bin/u_allocram.o
+#array test
+$CC $USER_CCFLAGS_ELF -c userspace/examples/arr_test/arr_test.c -o bin/u_arr_test.o
+#kbd test
+$CC $USER_CCFLAGS_ELF -c userspace/examples/scanf_check/scanf_check.c -o bin/u_scanf_check.o
+
+
+#Утилиты
+#Командный процессор sekhmet
+$CC $USER_CCFLAGS -c "userspace/system procs/sekhmet/sekhmet.c" -o bin/u_sekhmet.o
+#horus
+$CC $USER_CCFLAGS -c "userspace/system procs/chorus/chorus.c" -o bin/u_chorus.o
+#halt
+$CC $USER_CCFLAGS -c "userspace/system procs/halt/halt.c" -o bin/u_halt.o
+#cat
+$CC $USER_CCFLAGS -c "userspace/system procs/cat/cat.c" -o bin/u_cat.o
+#ls
+$CC $USER_CCFLAGS -c "userspace/system procs/ls/ls.c" -o bin/u_ls.o
+#free
+$CC $USER_CCFLAGS -c "userspace/system procs/free/free.c" -o bin/u_free.o
+#touch
+$CC $USER_CCFLAGS -c "userspace/system procs/touch/touch.c" -o bin/u_touch.o
+#rm
+$CC $USER_CCFLAGS -c "userspace/system procs/rm/rm.c" -o bin/u_rm.o
+#mkdir
+$CC $USER_CCFLAGS -c "userspace/system procs/mkdir/mkdir.c" -o bin/u_mkdir.o
+#rmdir
+$CC $USER_CCFLAGS -c "userspace/system procs/rmdir/rmdir.c" -o bin/u_rmdir.o
+#setbg
+$CC $USER_CCFLAGS -c "userspace/system procs/setbg/setbg.c" -o bin/u_setbg.o
+#thoth - текстовый редактор
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/thoth/thoth.c" -o bin/u_thoth.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/thoth/platform_arheos.c" -o bin/u_thoth_platform.o
+#lsusb
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/lsusb/lsusb.c" -o bin/u_lsusb.o
+#arfetch
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arfetch/arfetch.c" -o bin/u_arfetch.o
+
+# Линк flat-бинарника без ELF-заголовков
+# Базовый адрес -Ttext 0x40000000 совпадает с картой памяти процессов.
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_hello.o -o bin/hello.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_vfs_test.o -o bin/vfs_test.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_ucat.o -o bin/ucat.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_memory.o bin/u_kb_check.o -o bin/kb_check.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_memory.o bin/u_allocram.o -o bin/allocram.bin
+#$LD -m elf_i386 -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_memory.o bin/u_arr_test.o -o bin/arr_test.elf
+#Линковка elf-файлов
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_arr_test.o -o bin/arr_test.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_scanf_check.o -o bin/sc_test.elf
+
+
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 \
+-e _start bin/u_std.o bin/u_memory.o bin/u_lib.o bin/u_uconfig.o bin/u_sekhmet.o \
+bin/u_uimage.o -o bin/sekhmet.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_chorus.o -o bin/chorus.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_halt.o -o bin/halt.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_cat.o bin/u_lib.o -o bin/cat.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_ls.o bin/u_lib.o -o bin/ls.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_memory.o bin/u_free.o -o bin/free.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_touch.o -o bin/touch.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_rm.o -o bin/rm.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_mkdir.o -o bin/mkdir.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_rmdir.o -o bin/rmdir.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_lib.o bin/u_memory.o bin/u_uimage.o bin/u_setbg.o -o bin/setbg.bin
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_thoth.o bin/u_thoth_platform.o -o bin/thoth.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lsusb.o -o bin/lsusb.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_uimage_elf.o bin/u_arfetch.o -o bin/arfetch.elf
+
+#clear
+#rm -f bin/*.o
+
+# ---- Подготовка содержимого для дискет ----
+
+# ---- FAT-образы (дискеты) ----
+create_fat_image() {
+    local IMG=$1
+    local SIZE=$2
+    local BOOT_BIN=$3
+
+    echo -e "${GREEN}Creating FAT12 image: $IMG (${SIZE}K) with $BOOT_BIN${NC}"
+
+    dd if=/dev/zero of="$IMG" bs=1024 count="$SIZE" 2>/dev/null
+	if [ "$SIZE" -eq 1440 ]; then
+        mkfs.fat -F 12 -f 2 -s 1 -r 224 -R 1 -v "$IMG" 2>/dev/null
+    else
+		mkfs.fat -F 12 -f 2 -s 2 -r 224 -R 1 -v "$IMG" 2>/dev/null
+	fi
+    # Копируем файлы в образ
+    #Загрузчик stage2
+    mcopy -i "$IMG" bin/f12ld.bin ::/F12.LD
+    #само ядро
+    mcopy -i "$IMG" bin/kernel.bin ::/KERNEL
+    #основные драйвера фреймбуффера и файловых систем FAT12 и EXT2
+    mcopy -i "$IMG" bin/fb_driver.elf ::/FB_DR.DRV
+    mcopy -i "$IMG" bin/block_driver.elf ::/BLOCK.DRV
+    mcopy -i "$IMG" bin/usb_driver.elf ::/USB.DRV
+    mcopy -i "$IMG" bin/fat12_driver.elf ::/F12_DR.DRV
+    mcopy -i "$IMG" bin/ext2_driver.elf ::/EXT2_DR.DRV
+    mmd -i "$IMG" ::/ADRV
+    mcopy -i "$IMG" bin/kbd_driver.elf ::/ADRV/KBDPS2.DRV
+    #пользовательские программы
+    mmd -i "$IMG" ::/USBIN
+    #mcopy -i "$IMG" bin/hello.bin ::/USBIN/
+    #mcopy -i "$IMG" bin/vfs_test.bin ::/USBIN/
+    #mcopy -i "$IMG" bin/ucat.bin ::/USBIN/
+    #mcopy -i "$IMG" bin/kb_check.bin ::/USBIN/
+    #mcopy -i "$IMG" bin/allocram.bin ::/USBIN/
+    mmd -i "$IMG" ::/BIN
+    mcopy -i "$IMG" bin/sekhmet.bin ::/BIN/
+    mcopy -i "$IMG" bin/halt.bin ::/BIN/
+    #mcopy -i "$IMG" bin/hello.bin ::/BIN/
+    mcopy -i "$IMG" bin/chorus.bin ::/BIN/
+    mcopy -i "$IMG" bin/cat.bin ::/BIN/
+    mcopy -i "$IMG" bin/ls.bin ::/BIN/
+    mcopy -i "$IMG" bin/free.bin ::/BIN/
+    mcopy -i "$IMG" bin/touch.bin ::/BIN/
+    mcopy -i "$IMG" bin/rm.bin ::/BIN/
+    mcopy -i "$IMG" bin/mkdir.bin ::/BIN/
+    mcopy -i "$IMG" bin/rmdir.bin ::/BIN/
+    mcopy -i "$IMG" bin/setbg.bin ::/BIN/
+    mcopy -i "$IMG" bin/thoth.elf ::/BIN/
+    mcopy -i "$IMG" bin/lsusb.elf ::/BIN/
+    mcopy -i "$IMG" bin/arfetch.elf ::/BIN/
+
+    mmd -i "$IMG" ::/CONFIG
+    mmd -i "$IMG" ::/CONFIG/BOOT
+    mmd -i "$IMG" ::/CONFIG/SEKHMET
+    mmd -i "$IMG" ::/CONFIG/IMG
+    mmd -i "$IMG" ::/CONFIG/LOCALES
+
+    mcopy -i "$IMG" userspace/filesystem/config/boot/boot.cfg ::/CONFIG/BOOT/BOOT.CFG
+    mcopy -i "$IMG" userspace/filesystem/config/sekhmet/config.cfg ::/CONFIG/SEKHMET/CONFIG.CFG
+    mcopy -i "$IMG" userspace/filesystem/config/sekhmet/sekhmet.hlp ::/CONFIG/SEKHMET/SEKHMET.HLP
+    mcopy -i "$IMG" userspace/filesystem/config/locales/en.cfg ::/CONFIG/LOCALES/EN.CFG
+    mcopy -i "$IMG" userspace/filesystem/config/locales/ru.cfg ::/CONFIG/LOCALES/RU.CFG
+    #mcopy -i "$IMG" userspace/filesystem/config/img/sekhmet.tga ::/CONFIG/IMG/SEKHMET.TGA
+
+
+    # ---- Перезаписываем загрузочный сектор ----
+    dd if="$BOOT_BIN" of="$IMG" conv=notrunc 2>/dev/null
+
+}
+
+create_fat_image output/fat12_720.img 720 bin/boot_720.bin
+create_fat_image output/fat12_1440.img 1440 bin/boot_1440.bin
+
+#rm -rf tmp_fat12
+
+# ---- Подготовка содержимого для HDD (EXT2) ----
+
+sync
+sleep 1
+
+# ---- Создание HDD образа (EXT2 + LBA) ----
+echo -e "${GREEN}Creating HDD image (64M) with EXT2 and LBA...${NC}"
+HDD_IMG="output/hdd_ext2.img"
+rm -f "$HDD_IMG"
+dd if=/dev/zero of="$HDD_IMG" bs=1M count=64 2>/dev/null
+
+
+# ---- Создание HDD образа для USB ----
+USB_IMG="output/usb_image.img"
+
+
+
+if [ -f "/opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/mkfs.ext2" ]; then
+    MKFS_EXT2="/opt/homebrew/Cellar/e2fsprogs/1.47.4/sbin/mkfs.ext2"
+elif [ -f "/usr/local/sbin/mkfs.ext2" ]; then
+    MKFS_EXT2="/usr/local/sbin/mkfs.ext2"
+else
+    echo "Ошибка: e2fsprogs не найден. Установите: brew install e2fsprogs"
+    exit 1
+fi
+
+if ! command -v e2cp &> /dev/null; then
+    echo "Ошибка: e2tools не найден. Установите: brew install e2tools"
+    exit 1
+fi
+
+rm -f "$HDD_IMG"
+rm -f "$USB_IMG"
+rm -f tmp_ext2.img
+#rm -f usb_ext2.img
+dd if=/dev/zero of=tmp_ext2.img bs=512 count=131008 2>/dev/null
+$MKFS_EXT2 -T small -b 1024 -I 128 -O ^filetype,^dir_index,^ext_attr -F tmp_ext2.img
+#cp tmp_ext2.img usb_ext2.img
+
+
+#EXT_SIZE=65536
+EXT2_START_LBA=64
+
+e2cp bin/kernel.bin tmp_ext2.img:/kernel
+e2cp bin/fb_driver.elf tmp_ext2.img:/fb_dr.drv
+e2cp bin/block_driver.elf tmp_ext2.img:/block.drv
+e2cp bin/usb_driver.elf tmp_ext2.img:/usb.drv
+e2cp bin/fat12_driver.elf tmp_ext2.img:/f12_dr.drv
+e2cp bin/ext2_driver.elf tmp_ext2.img:/ext2_dr.drv
+
+e2mkdir tmp_ext2.img:/adrv
+e2cp bin/kbd_driver.elf tmp_ext2.img:/adrv/kbdps2.drv
+e2cp bin/usb_driver.elf tmp_ext2.img:/adrv/usb.drv
+
+
+e2mkdir tmp_ext2.img:/usbin
+e2mkdir tmp_ext2.img:/bin
+
+#e2cp bin/hello.bin tmp_ext2.img:/usbin/hello.bin
+e2cp bin/kb_check.bin tmp_ext2.img:/usbin/kb_check.bin
+#e2cp bin/vfs_test.bin tmp_ext2.img:/usbin/vfs_test.bin
+#e2cp bin/allocram.bin tmp_ext2.img:/usbin/allocram.bin
+#e2cp bin/ucat.bin tmp_ext2.img:/usbin/ucat.bin
+e2cp bin/arr_test.elf tmp_ext2.img:/usbin/arr_test.elf
+e2cp bin/sc_test.elf tmp_ext2.img:/usbin/sc_test.elf
+
+e2cp bin/sekhmet.bin tmp_ext2.img:/bin/sekhmet.bin
+e2cp bin/halt.bin tmp_ext2.img:/bin/halt.bin
+e2cp bin/hello.bin tmp_ext2.img:/bin/hello.bin
+e2cp bin/chorus.bin tmp_ext2.img:/bin/chorus.bin
+e2cp bin/cat.bin tmp_ext2.img:/bin/cat.bin
+e2cp bin/ls.bin tmp_ext2.img:/bin/ls.bin
+e2cp bin/free.bin tmp_ext2.img:/bin/free.bin
+e2cp bin/touch.bin tmp_ext2.img:/bin/touch.bin
+e2cp bin/rm.bin tmp_ext2.img:/bin/rm.bin
+e2cp bin/mkdir.bin tmp_ext2.img:/bin/mkdir.bin
+e2cp bin/rmdir.bin tmp_ext2.img:/bin/rmdir.bin
+e2cp bin/setbg.bin tmp_ext2.img:/bin/setbg.bin
+e2cp bin/thoth.elf tmp_ext2.img:/bin/thoth.elf
+e2cp bin/lsusb.elf tmp_ext2.img:/bin/lsusb.elf
+e2cp bin/arfetch.elf tmp_ext2.img:/bin/arfetch.elf
+
+e2mkdir tmp_ext2.img:/config
+e2mkdir tmp_ext2.img:/config/boot
+e2mkdir tmp_ext2.img:/config/sekhmet
+e2mkdir tmp_ext2.img:/config/img
+e2mkdir tmp_ext2.img:/config/locales
+
+e2cp userspace/filesystem/config/boot/boot.cfg tmp_ext2.img:/config/boot/boot.cfg
+e2cp userspace/filesystem/config/sekhmet/config.cfg tmp_ext2.img:/config/sekhmet/config.cfg
+e2cp userspace/filesystem/config/sekhmet/sekhmet.hlp tmp_ext2.img:/config/sekhmet/sekhmet.hlp
+e2cp userspace/filesystem/config/img/sekhmet.tga tmp_ext2.img:/config/img/sekhmet.tga
+e2cp userspace/filesystem/config/img/ewall.tga tmp_ext2.img:/config/img/ewall.tga
+e2cp userspace/filesystem/config/locales/en.cfg tmp_ext2.img:/config/locales/en.cfg
+e2cp userspace/filesystem/config/locales/ru.cfg tmp_ext2.img:/config/locales/ru.cfg
+
+
+
+
+# ---- Запись загрузчиков в HDD ----
+dd if=bin/boot_hdd.bin of="$HDD_IMG" conv=notrunc
+dd if=bin/hddld.bin of="$HDD_IMG" bs=512 seek=1 conv=notrunc
+dd if=tmp_ext2.img of="$HDD_IMG" bs=512 seek=$EXT2_START_LBA conv=notrunc
+
+cp output/hdd_ext2.img output/usbimage.img
+cp output/fat12_1440.img output/fat12_1440_usb.img
+mcopy -o -i output/fat12_1440_usb.img userspace/filesystem/config/boot/boot_usbtest.cfg ::/CONFIG/BOOT/BOOT.CFG
+#dd if=/dev/zero of=output/usbimage.img bs=1M count=16
+
+#rm -rf tmp_hdd
+rm tmp_ext2.img
+rm -f bin/*.bin
+
+
+echo -e "${GREEN}Все образы собраны в output/${NC}"
+
+#objdump -D bin/fb_driver.elf | head -80
+#objdump -R bin/fb_driver.elf
+
+# ---- Запуск QEMU с дискетой или hdd ----
+#qemu-system-i386 -drive file=output/fat12_720.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+#qemu-system-i386 -drive file=output/fat12_1440.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+#qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+
+
+#USB FLOPPY drive
+#qemu-system-i386 -boot order=a -drive file=output/fat12_1440.img,format=raw,if=floppy -device piix3-usb-uhci -drive id=usbdisk,file=output/fat12_1440_usb.img,if=none,format=raw -device usb-storage,drive=usbdisk -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+
+#USB hard drive UHCI
+#qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+
+#USB EHCI
+#qemu-system-i386 -device usb-ehci,id=ehci -device usb-hub,bus=ehci.0,port=1,usb_version=2,id=hub2 -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-bot,bus=hub2.0,port=2,id=bot -device scsi-hd,bus=bot.0,drive=usbdisk,channel=0,scsi-id=0,lun=0 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+
+
+#EHCI USB
+#qemu-system-i386 -M pc -drive if=none,id=usbstick,format=raw,file=output/usbimage.img -device usb-ehci,id=ehci -device usb-storage,bus=ehci.0,drive=usbstick,port=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+
+#EHCI-UHCI USB -- не запускается
+#qemu-system-i386 -M pc -readconfig docs/config/ich9-ehci-uhci.cfg -drive if=none,id=usbstick,format=raw,file=output/usbimage.img -device usb-storage,bus=ehci.0,drive=usbstick -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+
+
+#qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9 -trace enable=usb_uhci* -trace enable=usb_desc* -D ./uhci.log
+#sudo qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+sudo qemu-system-i386 -device ich9-usb-ehci1,id=ehci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,bus=ehci.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+#sudo qemu-system-i386 -device qemu-xhci,id=xhci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,bus=xhci.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+
+
+#file bin/kernel.elf
+#target symbols add bin/kernel.elf
+#gdb-remote 1234
+#breakpoint set --name idle_loop
+#/opt/homebrew/opt/binutils/bin/greadelf -S bin/fat12_driver.elf
