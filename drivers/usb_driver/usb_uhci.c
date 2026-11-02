@@ -908,43 +908,52 @@ static inline uint32_t uhci_td_actlen(uint32_t st)
 {
     return st & TD_ACTLEN_MASK;
 }
-/* «Нет ответа» по received-PID считаем ТОЛЬКО когда взведён официальный
-   бит PIDERR(16) ИЛИ pid==ERR/NONE И при этом actual length нулевой.
-   Прежняя версия принимала любой ненулевой actlen за err-pid (поле 8..15
-   пересекалось с actlen 0..9) и браковала КАЖДЫЙ успешный TD кодом -9 —
-   ровно поэтому лог «не менялся»: устройство отвечало нормально, а драйвер
-   сам себе выдумывал ошибку. */
+/* DIAGNOSTIKA v4: diagnosis строится ТОЛЬКО по официальным флагам TD
+   (биты 16..22 status-слова), как в Linux uhci-hcd (uhci_result_common) и
+   QEMU (hw/usb/hcd-uhci.c). Эвристики по полю received-PID (10..15) и
+   actual-length (0..9) ПОЛНОСТЬЮ удалены:
+     - при «тишине на шине» HC оставляет в поле received-PID инверсный тег
+       ОТПРАВЛЕННОГО токена (SETUP->0x0A, IN->0x06, OUT->0x0E), а не 0x00;
+     - любое сравнение actlen с масками битов 8..15 гарантированно ловит
+       пересечения и бракует успешные TD.
+   Оба предыдущих набора эвристик по очереди порождали ложные -9/-1 и
+   скрывали реальный диагноз. now: чистые флаги. */
+
+/* ==================== КАРТА ДИАГНОСТИКИ TD (главный вывод этого цикла) ======
+   ВНИМАТЕЛЬНОЕ изучение логов обеих машин даёт ОДНУ и ту же сигнатуру:
+      TD0 status = 0x0D800000 = ISP(31)|ISC(30)|CRC-TIMEOUT(18)|BITSTUFF(17)
+   При этом C_ERR (27:26) обнулился — значит HC реально СХОДИЛ на шину все
+   три попытки. Что означает каждый из этих двух битов на UHCI:
+     - BITSTUFF выставляется, когда принятый пакет нарушает правило вставки
+       нулей, т.е. линия НЕ была в тишине — на ней был сигнал;
+     - CRC/TIME-OUT — контрольная сумма принятого пакета не сошлась ИЛИ
+       ответ не уложился в таймаут.
+   Комбинация обоих — это классический «мусор вместо ответа»: устройство
+   отвечает, но данные искажаются. Типичная аппаратная причина ровно такой
+   сигнатуры на ICH6 — трансивер работает в неправильном скоростном режиме
+   (полная скорость там, где линия низкоскоростная, или наоборот): хост
+   принимает FS-кодировку LS-ответа как bit-stuff + CRC error. Прежний код
+   ставил SPD (биты 29:28) ВСЕГДА в 00=Full-Speed и полагался на то, что
+   «LS флаг бита 25 достаточно». Это неверно: для root-hub именно SPD=01
+   говорит контроллеру использовать LS-пакетование/тайминги, а бит 25 —
+   всего лишь отражение состояния порта. Поэтому ниже SPD берётся из
+   РЕАЛЬНОГО бита LowSpeed-attached активного порта PORTSC (bit 9), а не из
+   кэшированного флага. */
 static inline int uhci_td_is_err_pid(uint32_t st)
 {
-    if (st & TD_CTRL_PIDERR) return 1;
-    uint8_t p = uhci_td_recv_pid(st);
-    if ((p == TD_PID_ERR_INV || p == TD_PID_NONE) && uhci_td_actlen(st) == 0)
-        return 1;
-    return 0;
+    return (st & TD_CTRL_PIDERR) ? 1 : 0;   /* только официальный bit16 */
 }
 
 static int uhci_td_error_code(uint32_t st)
 {
-    if (st & TD_CTRL_ACTIVE)   return -10; // всё ещё активно (не должно быть на выходе)
-    if (st & TD_CTRL_STALLED)  return -4;  // device STALL (endpoint halted)
-    if (st & TD_CTRL_DBUFERR)  return -5;  // host-side data buffer error
-    if (st & TD_CTRL_BABBLE)   return -6;  // babble — устройство «болтает» по шине
-    if (st & TD_CTRL_CRCTIMEO) return -7;  // CRC/Time-out — аппаратный таймаут фазы
-    if (st & TD_CTRL_BITSTUFF) return -8;  // bit-stuffing ошибка на линии
-    /* FIX (главный симптом лога): статус 0xD800000 = CRCTIMEO|BITSTUFF, а
-       статус 0xD400000 = PIDERR(bit16)+CRCTIMEO(bit18)+BITSTUFF(bit17)...
-       Но в QEMU при "device not responding" HC выставляет ТОЛЬКО error-PID
-       (биты 18/17 молчат!) — прежняя функция такое за УСПЕХ и принимала.
-       Теперь: если взведён бит 16 ИЛИ received-PID равен ERR/0 — это
-       No-Response устройства (например флешка сидит на другом адресе,
-       который BIOS назначил при legacy-загрузке). Код -9 — временная
-       ошибка, upper-слой должен ретраить после сброса порта. */
-    if ((st & TD_CTRL_PIDERR) || uhci_td_is_err_pid(st)) {
-        /* Но не считаем ошибкой полностью успешный TD: у успешного TD
-           received PID = ACK(0x?) и ни одного из флагов 16..22. */
-        if (st & (TD_CTRL_PIDERR | TD_ERR_ANY)) return -9;
-    }
-    return 0;                              /* NAK/ISC/ISP — НЕ ошибки */
+    if (st & TD_CTRL_ACTIVE)   return -10;  // всё ещё активно (не должно быть)
+    if (st & TD_CTRL_STALLED)  return -4;   // device STALL (endpoint halted)
+    if (st & TD_CTRL_BABBLE)   return -6;   // babble — устройство «болтает»
+    if (st & TD_CTRL_DBUFERR)  return -5;   // host-side data buffer error
+    if (st & TD_CTRL_CRCTIMEO) return -7;   // CRC/Time-out — нет ответа/шум
+    if (st & TD_CTRL_BITSTUFF) return -8;   // bit-stuffing ошибка на линии
+    if (st & TD_CTRL_PIDERR)   return -9;   // принят нераспознанный PID
+    return 0;                               /* OK либо NAK/ISC/ISP — не ошибки */
 }
 
 /* Побайтово перечитать TD из ПАМЯТИ (не из регистра) и собрать 32-битное
