@@ -990,6 +990,59 @@ static inline uint32_t uhci_token_status(uint8_t addr, uint8_t ep, int in)
    памяти (см. USBVER ниже). */
 #define UHCI_CODE_REV 0xA116u   /* A116: PID-ERR detection (-9), 4-port resume, active_port */
 
+/* ==================== Компактный лог (экономия буфера экрана) ================
+   Буфер лога загрузки ~30 строк, начало уплывало за 5 ретраев x 3 строки.
+   Реализация без sprintf: транзактные отладочные строки переводятся в
+   ФИКСИРОВАННЫЕ коды (int), повтор одного кода схлопывается в счётчик, а
+   человекочитаемый текст печатает ОДИН декодер на выходе. Это гарантирует
+   совместимость с freestanding-сборкой (в ядре нет vsprintf для драйверов)
+   и экономит до 15 строк лога на одну серию ретраев. */
+static int      g_log_last_code = 0x7FFFFFFF;   /* "ничего не печатали" */
+static uint32_t g_log_repeat    = 0;
+
+const char *uhci_xfer_code_text(int code)
+{
+    switch (code) {
+        case ULOG_XFER_TIMEOUT: return "XFER timeout (TD active forever)";
+        case ULOG_XFER_NORESP:  return "XFER no-response (err-PID/none)";
+        case ULOG_XFER_STALL:   return "XFER device STALL";
+        case ULOG_XFER_CRC:     return "XFER CRC/bitstuff on wire";
+        case ULOG_XFER_SHORT:   return "XFER short packet";
+        default:                return NULL;
+    }
+}
+
+void uhci_log_code(int code)
+{
+    if (code == 0) return;                  /* успех — молча, без строк */
+    if (code == g_log_last_code) {          /* дубль серии — НЕ тратим строку */
+        g_log_repeat++;
+        return;
+    }
+    if (g_log_repeat > 1 && uhci_xfer_code_text(g_log_last_code)) {
+        api_ptr->load_screen_add_string("XFER %s (x%d)",
+                                        uhci_xfer_code_text(g_log_last_code),
+                                        (int)g_log_repeat);
+    }
+    g_log_last_code = code;
+    g_log_repeat    = 1;
+}
+
+/* Завершение серии: печатает последний код ровно один раз. Вызывается из
+   put_state/put_status после сбора всей диагностики транзакта. */
+void uhci_log_flush(void)
+{
+    const char *txt = uhci_xfer_code_text(g_log_last_code);
+    if (txt) {
+        if (g_log_repeat > 1)
+            api_ptr->load_screen_add_string("XFER %s (x%d)", txt, (int)g_log_repeat);
+        else
+            api_ptr->load_screen_add_string("XFER %s", txt);
+    }
+    g_log_last_code = 0x7FFFFFFF;
+    g_log_repeat    = 0;
+}
+
 /* ==================== Кольцо адресов USB-устройств ====================
    ГЛАВНЫЙ БАГ ПРЕДЫДУЩИХ СБОРОК: контроллер завершал SETUP-TD со статусом
    вида 0xD800000 / 0x??00000 с error-PID — это НЕ «злая воля железа», а
@@ -1125,24 +1178,14 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     control_tds[sidx].buffer = setup_phys;
 
     uint32_t status_td_status_off = (uint32_t)&control_tds[sidx].status - (uint32_t)&control_tds[0];
-
-    api_ptr->load_screen_add_string("UHCI DMA Map: QH=%x TD0=%x TD_stat_off=%x", qh_phys, td0_phys, status_td_status_off);
-    /* Проверка сборки токена SETUP-TD: ожидаем 0x0080072D для addr=0
-       (LEN=7<<20 | EP=0 | ADDR=0 | PID=0x2D, toggle=0). Если видно другое —
-       в памяти ДРУГАЯ сборка драйвера (см. метку REV ниже). */
-    api_ptr->load_screen_add_string("UHCI TD0 tok=%x sts=%x lnk=%x buf=%x rev=%x",
-                                    control_tds[0].token, control_tds[0].status,
-                                    control_tds[0].link, control_tds[0].buffer,
-                                    (uint32_t)UHCI_CODE_REV);
-    /* Побайтовый дамп первых двух TD прямо из памяти — если байты не
-       соответствуют полям структуры, мы пишем НЕ в ту память, из которой HC
-       читает дескрипторы (двойная трансляция / устаревший образ в RAM). */
-    {
-        const volatile uint8_t *tb = (const volatile uint8_t *)&control_tds[0];
-        api_ptr->load_screen_add_string("UHCI TDraw %x %x %x %x | %x %x %x %x",
-                                        tb[0], tb[1], tb[2], tb[3],
-                                        tb[4], tb[5], tb[6], tb[7]);
-    }
+    /* КОМПАКТНЫЙ ЛОГ: раньше здесь печатались 3 строки на КАЖДУЮ попытку
+       ("DMA Map", "TD0 tok", "TDraw") — 5 ретраев съедали весь 30-строчный
+       буфер лога, и начало загрузки уплывало. Теперь в потоке НЕ печатается
+       ничего однотипного: код результата запоминается через uhci_log_code(),
+       серии схлопываются в "XFER <диагноз> (xN)". Сырые значения (токен/
+       статусы TD) доступны через hc->dbg_* и api debug8/9 — верхний слой
+       печатает их ОДИН раз при финальном отказе. */
+    (void)qh_phys; (void)td0_phys; (void)status_td_status_off;
 
     // Синхронизация записи дескрипторов перед тем, как HC их увидит
     usb_dma_sync_before();
@@ -1197,9 +1240,14 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     hc->dbg_swstamp    = spins;
     hc->dbg_last_frame = inw(hc->io_base + UHCI_FRNUM);
     hc->dbg_sts        = inw(hc->io_base + UHCI_USBSTS);
-    hc->dbg_portsc     = inw(hc->io_base + UHCI_PORTSC1);
+    /* ПОЧИНКА ДИАГНОСТИКИ (двоякий смысл в прежнем логе): здесь ВСЕГДА
+       читался PORTSC1, даже когда активен порт 2/3 — поэтому d4 и d5 в логах
+       были одинаковы и нельзя было отличить «порт умер» от «будит не тот
+       порт». Теперь читаем фактический active_port. */
+    hc->dbg_portsc     = inw(hc->io_base + portsc_reg(hc->active_port <= 3 ? hc->active_port : 0));
     __asm__ __volatile__("" ::: "memory");
     hc->dbg_td0_status = control_tds[0].status;
+    hc->dbg_td0_token  = control_tds[0].token;
 
     /* Если хвостовой TD так и остался ACTIVE, а TD0 завершён с ошибкой —
        HC оборвал цепочку на SETUP. Подтягиваем честный код ошибки. */
@@ -1221,6 +1269,19 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
             fr_pre, fr_now, cmd_pre, sts_pre,
             (fr_now != fr_pre) ? 1 : 0,
             !!(sts_pre & USBSTS_HCH), !!(cmd_pre & USBCMD_RS));
+    }
+
+    /* Компактный лог: классифицируем исход ОДНИМ кодом вместо потока
+       однотипных строк (см. uhci_log_code). */
+    switch (result) {
+        case -3:  uhci_log_code(ULOG_XFER_TIMEOUT); break;
+        case -9:  uhci_log_code(ULOG_XFER_NORESP);  break;
+        case -4:  uhci_log_code(ULOG_XFER_STALL);   break;
+        case -7:
+        case -8:
+        case -6:  uhci_log_code(ULOG_XFER_CRC);     break;
+        case -5:  uhci_log_code(ULOG_XFER_SHORT);   break;
+        default:  if (result >= 0) uhci_log_code(0); else uhci_log_code(ULOG_XFER_TIMEOUT); break;
     }
 
     // Восстанавливаем исходный пустой элемент очереди QH

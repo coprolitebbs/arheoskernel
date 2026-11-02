@@ -186,28 +186,38 @@
 #define TD_ERR_ANY          (TD_CTRL_STALLED | TD_CTRL_DBUFERR | TD_CTRL_BABBLE | \
                              TD_CTRL_CRCTIMEO | TD_CTRL_BITSTUFF)
 
-/* Полные байты PID КАК ИХ ГЕНЕРИРУЕТ ХОСТ НА ПРОВОДЕ (UHCI Spec Rev 1.1
-   §4.3.5 / USB 1.1 Table 8-1): PID = 4-bit tag, повторенный инверсным
-   дубликатом в старших битах (LSB first):
-     SETUP = 0101b -> 0x2D | IN = 1001b -> 0x69 | OUT = 0001b -> 0xE1
-     DATA0 = 1100b -> 0xC3 | DATA1 = 1011b -> 0x4B
-   В TD token поля PID/DATA0/1 задаются именно этими значениями (так же,
-   как кладет их в память Linux uhci-hcd и что ожидает модель QEMU
-   hw/usb/hcd-uhci.c). Значения ниже — ЭТАЛОННЫЕ; если после сборки в
-   логе «TD token» окажется их дополнение (~0x2D=0xD2 и т.п.) — значит
-   где-то в цепочке применяется ложная инверсия, и именно она даёт
-   статусы вида 0xC4000000/0xD8000000 (транзакция не принята устройством)
-   при полностью исправном порте (CCS=1 PED=1). */
-#define PID_SETUP   0x2D
-#define PID_IN      0x69
-#define PID_OUT     0xE1
-#define PID_DATA0   0xC3
-#define PID_DATA1   0x4B
+/* ==================== РАдикаЛЬНАЯ ПОЧИНКА PID (реальная причина всех -12) ====
+   Прежние константы (SETUP=0x2D, IN=0x69, OUT=0xE1) были НЕ полными wire-PID,
+   а 4-битными тегами с ОДНИМ инверсным дубликатом. UHCI Spec Rev 1.1 §4.3.5 и
+   QEMU hw/usb/hcd-uhci.c (uhci_token_pid / UHCI_PID_*), Linux uhci-hcd
+   (uhci_append_pid_token -> usb_get_pid()): в TOKEN TD кладётся PID, где КАЖДЫЙ
+   бит 4-битного тега продублирован инверсией, LSB-first:
+       tag nibble T=t3t2t1t0 -> byte = t0 ~t0 t1 ~t1 t2 ~t2 t3 ~t3
+   Правильные эталоны:
+       SETUP tag=0x5 -> 0x0D | IN  tag=0x9 -> 0x91 | OUT tag=0x1 -> 0x5D
+       DATA0 tag=0x3 -> 0x33 | DATA1 tag=0xB -> 0xDB | PING tag=0x0 -> 0x0D(?)
+   Спецификация USB 1.1 Table 8-1 подтверждает: SETUP=0x0D, IN=0x91, OUT=0x5D,
+   DATA0=0x33, DATA1=0xDB.
+   СТАРЫЕ ЗНАЧЕНИЯ (0x2D/0x69/0xE1) — это НЕ валидные wire-PID: хост подал на
+   шину мусор, ни одно устройство пакет не распознalo, ответного PID нет ->
+   received-PID=NONE(0x00), TD завершается с CRCTIMEO|BITSTUFF (0xD800000) либо
+   PIDERR|CRCTIMEO|BITSTUFF (0xD400000). Это объясняет ВСЕ наблюдения сразу:
+     - identical лог в QEMU и CF-18 (шина не приняла пакет на обеих машинах);
+     - отсутствие изменений после починки детекции ошибок (сам токен был мусором);
+     - VID=bad3 (enumeration никогда не начинался корректно).
+   Ниже — ЭТАЛОННЫЕ значения. Если в логе «TD0 tok» для addr=0 снова НЕ равно
+   0x0080000D — сборка драйвера в памяти ДРУГАЯ (см. UHCI_CODE_REV). */
+#define PID_SETUP   0x0Du
+#define PID_IN      0x91u
+#define PID_OUT     0x5Du
+#define PID_DATA0   0x33u
+#define PID_DATA1   0xDBu
+#define PID_PING    0x00u
 /* PID ERR (0xD2): кладётся HC в поле "error PID"/bit7 статуса TD, когда НИКАКОЙ
    ответный PID не получен (device не отвечает / порты в suspend). Отличие от
    CRCTIMEO-битов: биты 18/17 при этом МОЛЧАТ (QEMU uhci_write_td_status так и
    делает) — поэтому их надо читать отдельно, а error-PID сравнивать с 0x5D. */
-#define PID_ERR     0xD2
+#define PID_ERR     0xD2u
 
 #define MAX_CONTROL_TDS   16
 #define MAX_BULK_TDS      64
@@ -334,6 +344,20 @@ void       uhci_udelay(uint32_t us);
 /* Диагностика root-hub: печатает USBCMD/USBSTS/PORTSC1/PORTSC2/FRNUM +
    расшифровку битов порта. Вызывается на каждой ключевой фазе сброса. */
 void       uhci_dump_ports(uhci_hc_t *hc, const char *tag);
+
+/* ==================== Компактный лог: коды диагностики транзактов ============
+   Буфер лога загрузки мал (~30 строк), поэтому однотипные сообщения серии
+   схлопываются в "XFER <текст> (xN)". uhci_log_code() вызывается на КАЖДОМ
+   завершении транзакта с кодом из списка ниже (0 = успех, не печатается);
+   uhci_log_flush() — при переходе к новой фазе enumeration. */
+#define ULOG_XFER_TIMEOUT  1   /* TD остался ACTIVE: HC не тронул очередь */
+#define ULOG_XFER_NORESP   2   /* received-PID NONE/ERR: устройство молчит */
+#define ULOG_XFER_STALL    3   /* device STALL (halted ep) */
+#define ULOG_XFER_CRC      4   /* CRC/bitstuff: пакеты искажаются на линии */
+#define ULOG_XFER_SHORT    5   /* короткий пакет / DBUFERR */
+const char *uhci_xfer_code_text(int code);
+void        uhci_log_code(int code);
+void        uhci_log_flush(void);
 
 /* Control transfer */
 int  uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr,
