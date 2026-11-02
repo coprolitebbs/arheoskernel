@@ -129,9 +129,9 @@ nasm -f elf32 drivers/block_driver/block_start.asm -o bin/block_start.o
 $CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_core.c  -o bin/usb_core.o
 $CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_uhci.c  -o bin/usb_uhci.o
 $CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_msc.c  -o bin/usb_msc.o
-$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_hub.c  -o bin/usb_hub.o
-$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_hcd.c  -o bin/usb_hcd.o
-$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/ehci_core.c  -o bin/ehci_core.o
+#$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_hub.c  -o bin/usb_hub.o
+#$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_hcd.c  -o bin/usb_hcd.o
+#$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/ehci_core.c  -o bin/ehci_core.o
 $CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_driver.c  -o bin/usb_driver.o
 nasm -f elf32 drivers/usb_driver/usb_start.asm -o bin/usb_start.o
 
@@ -153,9 +153,14 @@ bin/drv_ports_io.o bin/dlib.o -o bin/kbd_driver.elf
 $LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
 bin/block_start.o bin/block_driver.o bin/drv_ports_io.o bin/dlib.o -o bin/block_driver.elf
 
+#$LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
+#bin/usb_start.o bin/usb_core.o bin/usb_uhci.o bin/usb_msc.o bin/usb_hub.o bin/usb_hcd.o \
+#bin/ehci_core.o bin/usb_driver.o bin/drv_ports_io.o bin/dlib.o -o bin/usb_driver.elf
+
 $LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
-bin/usb_start.o bin/usb_core.o bin/usb_uhci.o bin/usb_msc.o bin/usb_hub.o bin/usb_hcd.o \
-bin/ehci_core.o bin/usb_driver.o bin/drv_ports_io.o bin/dlib.o -o bin/usb_driver.elf
+bin/usb_start.o bin/usb_core.o bin/usb_uhci.o bin/usb_msc.o bin/usb_driver.o \
+ bin/drv_ports_io.o bin/dlib.o -o bin/usb_driver.elf
+
 
 #Линковка ядра
 $LD -m elf_i386 -T kernel.ld -o bin/kernel.bin bin/kernel.o bin/lib.o bin/draw.o \
@@ -486,7 +491,7 @@ echo -e "${GREEN}Все образы собраны в output/${NC}"
 #qemu-system-i386 -boot order=a -drive file=output/fat12_1440.img,format=raw,if=floppy -device piix3-usb-uhci -drive id=usbdisk,file=output/fat12_1440_usb.img,if=none,format=raw -device usb-storage,drive=usbdisk -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 #USB hard drive UHCI
-#qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 #USB EHCI
 #qemu-system-i386 -device usb-ehci,id=ehci -device usb-hub,bus=ehci.0,port=1,usb_version=2,id=hub2 -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-bot,bus=hub2.0,port=2,id=bot -device scsi-hd,bus=bot.0,drive=usbdisk,channel=0,scsi-id=0,lun=0 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
@@ -500,8 +505,8 @@ echo -e "${GREEN}Все образы собраны в output/${NC}"
 
 
 #qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9 -trace enable=usb_uhci* -trace enable=usb_desc* -D ./uhci.log
-#sudo qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
-sudo qemu-system-i386 -device ich9-usb-ehci1,id=ehci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,bus=ehci.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+sudo qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+#sudo qemu-system-i386 -device ich9-usb-ehci1,id=ehci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,bus=ehci.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 #sudo qemu-system-i386 -device qemu-xhci,id=xhci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,bus=xhci.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 

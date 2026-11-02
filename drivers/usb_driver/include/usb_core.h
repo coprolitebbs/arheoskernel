@@ -20,7 +20,6 @@
 
 #include <stdint.h>
 #include "usb_uhci.h"
-#include "usb_hcd.h"
 
 /* bRequest */
 #define USB_REQ_GET_DESCRIPTOR   0x06
@@ -106,29 +105,13 @@ typedef struct {
 
 
 /* Прототипы */
-int usb_enumerate(usb_hcd_t *hcd, int port, uint8_t new_addr,
+int usb_enumerate(uhci_hc_t *hc, int port,
                   usb_device_desc_t *out_desc, uint8_t *out_addr);
 
-int usb_get_config_desc(usb_hcd_t *hcd, uint8_t addr, void *buf,
+int usb_get_config_desc(uhci_hc_t *hc, uint8_t addr, void *buf,
                         uint16_t want_len, uint16_t max_pkt);
-int usb_set_configuration(usb_hcd_t *hcd, uint8_t addr, uint8_t cfg_val);
+int usb_set_configuration(uhci_hc_t *hc, uint8_t addr, uint8_t cfg_val);
 int usb_parse_mass_storage(const void *config_buf, uint16_t total_len,
                            usb_msc_iface_t *out);
-
-int usb_get_string_desc(usb_hcd_t *hcd, uint8_t addr, uint8_t index,
-                        uint16_t lang_id, char *out, uint16_t max_len,
-                        uint16_t max_pkt);
-
-int usb_probe_device_at_addr(usb_hcd_t *hcd, int port, uint8_t addr,
-                             usb_device_desc_t *out_desc);
-
-int usb_clear_ep_halt(usb_hcd_t *hcd, uint8_t addr, uint8_t ep);
-
-
-/*int usb_control_msg(usb_hcd_t *hcd, uint8_t addr, uint16_t ep0_max_pkt,
-                    uint8_t request_type, uint8_t request,
-                    uint16_t value, uint16_t index, void *data,
-                    uint16_t len, int data_in);
-*/
 
 #endif
