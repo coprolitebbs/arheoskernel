@@ -3,7 +3,14 @@
 #include "../../include-kernel/lib.h"
 #include "../../include-kernel/ports_io.h"
 
-static uint8_t raw_frame_buffer[4096 * 2] __attribute__((aligned(16)));
+/* КРИТИЧНО (UHCI spec §5.5, FLBASEADD): таблица кадров должна быть выровнена
+   на 4096 байт — контроллер использует МЛАДШИЕ 12 БИТ адреса как индекс
+   (frame_number * 4). При aligned(16) HC читает dword'ы со смещением до
+   4080 байт за концом буфера и ПИСАЕТ туда свои actual-length'ы, затирая
+   соседние статические TD/QH (в логе это выглядело как "TD_status=d8000000"
+   — мусор вместо статуса). Поэтому: отдельный массив ровно 1024 entry +
+   явное aligned(4096), без ручного сдвига адреса. */
+static uint32_t uhci_frame_list[1024] __attribute__((aligned(4096)));
 uint32_t *frame_list_ptr = NULL;
 uhci_qh_t control_qh __attribute__((aligned(16)));
 uhci_qh_t *control_qh_ptr;
@@ -17,8 +24,10 @@ uhci_qh_t *bulk_qh_ptr;
 uhci_td_t bulk_tds[MAX_BULK_TDS] __attribute__((aligned(16)));
 uhci_td_t *bulk_tds_ptr;
 
-uhci_queue_t g_control_queue;
-uhci_queue_t g_bulk_queue;
+/* Очереди тоже участвуют в DMA (HC пишет status dummy-TD, actual length),
+   поэтому их адрес обязан быть кратен 16 — garantируем явно. */
+uhci_queue_t g_control_queue __attribute__((aligned(16)));
+uhci_queue_t g_bulk_queue    __attribute__((aligned(16)));
 
 /* A/B-флаг: если 1 — возвращаем старое поведение «wbinvd перед каждым DMA».
    По умолчанию 0: на i386 (non-PAE) DMA когерентен с кэшем, а wbinvd на
@@ -581,11 +590,15 @@ int uhci_init(uhci_hc_t *hc)
     g_bulk_queue.qh.head    = TD_LINK_TERM;
 
     // ==================== FLBASEADD: адрес, кратный 4096 (UHCI spec) ====================
-    uint32_t raw_addr = (uint32_t)raw_frame_buffer;
-    uint32_t aligned_addr = (raw_addr + 4095u) & ~4095u; // Ручной сдвиг на начало чистой страницы
+    /* Буфер объявлен как aligned(4096), поэтому его адрес УЖЕ выровнен —
+       никакой ручной коррекции "(addr+4095)&~4095" не нужно (она лишь
+       скрывала баг выравнивания). Проверяем инвариант и аварийно выходим,
+       если линкер/загрузчик его нарушил. */
+    uint32_t fl_virt = (uint32_t)uhci_frame_list;
+    if (fl_virt & 0xFFFu) return -5;
 
-    frame_list_ptr = (uint32_t *)aligned_addr;
-    uint32_t fl_phys = usb_virt_to_phys(aligned_addr);
+    frame_list_ptr = (uint32_t *)fl_virt;
+    uint32_t fl_phys = usb_virt_to_phys(fl_virt);
 
     if (!fl_phys || (fl_phys & 0xFFFu)) {
         return -5; // Аварийный выход, если физический адрес имеет смещение
@@ -594,10 +607,16 @@ int uhci_init(uhci_hc_t *hc)
     // Заполняем выровненную таблицу кадров ссылками на нашу Control-очередь
     uint32_t fl_link_val = (control_qh_phys & ~0x0Fu) | TD_LINK_Q;
     for (int i = 0; i < 1024; i++) {
-        frame_list_ptr[i] = fl_link_val;
+        uhci_frame_list[i] = fl_link_val;
     }
 
     outl(hc->io_base + UHCI_FLBASEADD, fl_phys);
+    /* Страховка: перечитали FLBASEADD — на ICH запись может игнорироваться,
+       если BME/legacy ownership не установлены. */
+    if ((inl(hc->io_base + UHCI_FLBASEADD) & 0xFFFFF000u) != (fl_phys & 0xFFFFF000u)) {
+        api_ptr->load_screen_add_string("UHCI FLBASEADD readback mismatch %x!=%x",
+                                        inl(hc->io_base + UHCI_FLBASEADD), fl_phys);
+    }
     outw(hc->io_base + UHCI_SOFMOD, 64);
 
     // 4a) Снять возможный latched over-current от BIOS ДО включения портов
@@ -911,9 +930,17 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
         if (num_data > MAX_CONTROL_TDS - 2) num_data = MAX_CONTROL_TDS - 2;
     }
 
-    /* Готовим ВСЮ цепочку TD до того, как контроллер увидит TD0: глушим IOC
-       на промежуточных TD и чистим статусы от ошибок прошлого транзакта. */
-    for (uint32_t i = 0; i < MAX_CONTROL_TDS; i++) control_tds[i].status = 0;
+    /* Готовим ВСЮ цепочку TD до того, как контроллер увидит TD0: чистим
+       статусы от ошибок прошлого транзакта. Статус каждого TD потом
+       собирается ЯВНО из всех полей (включая SPD=00), чтобы в него не
+       протёк мусор от предыдущего использования или от записи за конец
+       frame list. */
+    for (uint32_t i = 0; i < MAX_CONTROL_TDS; i++) {
+        control_tds[i].status = 0;
+        control_tds[i].link   = TD_LINK_TERM;
+        control_tds[i].token  = 0;
+        control_tds[i].buffer = 0;
+    }
 
     // Копируем setup-пакет строго в выровненный flat-буфер
     for (int i = 0; i < 8; i++) setup_static[i] = setup_pkt[i];
@@ -925,11 +952,21 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     uint32_t dummy_phys = usb_virt_to_phys((uint32_t)&g_control_queue.dummy_td);
 
     uint32_t ls_flag = hc->current_device_low_speed ? TD_CTRL_LS : 0u;
+    /* SPD (биты 29:28) — ЯВНО 00 = Full-Speed (или 01 для LS на root hub).
+       Никогда не оставляем здесь случайные значения: 11b зарезервировано. */
+    uint32_t spd_field = hc->current_device_low_speed ? (1u << 28) : TD_CTRL_SPD_FS;
 
     // --- TD0: SETUP Stage ---
-    control_tds[0].link   = (td1_phys & ~0x0Fu) | TD_LINK_VF;
-    control_tds[0].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK; // C_ERR=11: 3 попытки HC сам
-    if (ls_flag) control_tds[0].status |= ls_flag;
+    /* VF (bit2) в link НЕ ставим: при depth-first обходе (USBCMD.CF=0) он
+       лишь добавляет HC лишних состояний; горизонтальная связь TD0->TD1
+       работает и без него (так делает uhci-hcd Linux). */
+    control_tds[0].link   = (td1_phys & ~0x0Fu);
+    /* IOC теперь на КАЖДОМ TD цепочки, включая SETUP: эмуляция QEMU
+       piix3-usb-uhci при отсутствии IOC на первом TD некорректно
+       «схлопывала» цепочку и поднимала ложный STALLED (r=-4). На реальном
+       ICH6 это безвредно — USBINTR замаскирован в 0. */
+    control_tds[0].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_3 |
+                            spd_field | ls_flag;
     control_tds[0].token  = (PID_SETUP << TD_TOKEN_PID_SHIFT) | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) | (0u << TD_TOKEN_EP_SHIFT) | (7u << TD_TOKEN_LEN_SHIFT);
     control_tds[0].buffer = setup_phys;
     hc->dbg_td0_token = control_tds[0].token;
@@ -945,13 +982,9 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
         uint32_t next_idx = (i + 1 < num_data) ? (idx + 1) : (1 + num_data);
         uint32_t next_td_phys = usb_virt_to_phys((uint32_t)&control_tds[next_idx]);
 
-        control_tds[idx].link = (next_td_phys & ~0x0Fu) | TD_LINK_VF;
-        /* ВАЖНО (фикс ложного STALL в QEMU): у ПРОМЕЖУТОЧНЫХ TD тоже ставим
-           IOC. В реальном железе это безвредно (прерывания маскированы), но
-           эмуляция piix3-usb-uhci в QEMU при отсутствии IOC на DATA-TD
-           некорректно «схлопывала» цепочку и выставляла STALLED на TD0 —
-           получался вечный r=-4. Теперь все TD помечены на completion. */
-        control_tds[idx].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_MASK | ls_flag;
+        control_tds[idx].link = (next_td_phys & ~0x0Fu);
+        control_tds[idx].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_3 |
+                                  spd_field | ls_flag;
         control_tds[idx].token = ((data_in ? PID_IN : PID_OUT) << TD_TOKEN_PID_SHIFT) |
                                  ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
                                  (0u << TD_TOKEN_EP_SHIFT) |
@@ -967,7 +1000,8 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     uint32_t status_pid = has_data ? (data_in ? PID_OUT : PID_IN) : PID_IN;
 
     control_tds[sidx].link   = TD_LINK_TERM;
-    control_tds[sidx].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_MASK | ls_flag;
+    control_tds[sidx].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_3 |
+                               spd_field | ls_flag;
     // STATUS stage всегда PID_DATA1 (toggle=1), длина 0 => поле length = 0x7FF
     control_tds[sidx].token = (status_pid << TD_TOKEN_PID_SHIFT) |
                               ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
@@ -978,6 +1012,12 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     uint32_t status_td_status_off = (uint32_t)&control_tds[sidx].status - (uint32_t)&control_tds[0];
 
     api_ptr->load_screen_add_string("UHCI DMA Map: QH=%x TD0=%x TD_stat_off=%x", qh_phys, td0_phys, status_td_status_off);
+    /* Проверка сборки токена SETUP-TD: ожидаем 0x0000072D для addr=0
+       (LEN=7<<20 | EP=0 | ADDR=0 | PID=0x2D). Если в логе видно другое —
+       сдвиг/маска LEN или PID неверны, и именно это даёт CRC/timeouts. */
+    api_ptr->load_screen_add_string("UHCI TD0 tok=%x sts=%x lnk=%x buf=%x",
+                                    control_tds[0].token, control_tds[0].status,
+                                    control_tds[0].link, control_tds[0].buffer);
 
     // Синхронизация записи дескрипторов перед тем, как HC их увидит
     usb_dma_sync_before();
@@ -997,6 +1037,14 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     uint32_t timeout = 5000000;   // ~несколько секунд даже на медленном CPU
     uint32_t spins = 0;
     int result = -3;
+
+    /* Живость планировщика ДО ожидания: при RS=1 счётчик FRNUM обязан
+       меняться (1 кадр/мс). Если стоит — HC остановлен (HCH) или PCI I/O не
+       доходит, и ждать завершения TD бессмысленно: после таймаута выводим
+       точный диагноз. */
+    uint16_t fr_pre  = inw(hc->io_base + UHCI_FRNUM);
+    uint16_t cmd_pre = inw(hc->io_base + UHCI_USBCMD);
+    uint16_t sts_pre = inw(hc->io_base + UHCI_USBSTS);
 
     while (timeout--)
     {
@@ -1034,6 +1082,20 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     {
         int ec0 = uhci_td_error_code(control_tds[0].status);
         if (!(control_tds[0].status & TD_CTRL_ACTIVE) && ec0) result = ec0;
+    }
+
+    /* Диагноз таймаута: FRNUM обязан был сдвинуться за время ожидания
+       (~5 млн спинов >> 1 мс). moved=0 => планировщик мёртв (RS/HCH/PCI),
+       moved=1 при незавершённом TD => HC не видит нашу очередь (адреса
+       TD/QH/FLBASEADD или link-биты). */
+    if (result == -3)
+    {
+        uint16_t fr_now = inw(hc->io_base + UHCI_FRNUM);
+        api_ptr->load_screen_add_string(
+            "UHCI xfer TIMEOUT: FR %x->%x CMD=%x STS=%x moved=%d HCH=%d RS=%d",
+            fr_pre, fr_now, cmd_pre, sts_pre,
+            (fr_now != fr_pre) ? 1 : 0,
+            !!(sts_pre & USBSTS_HCH), !!(cmd_pre & USBCMD_RS));
     }
 
     // Восстанавливаем исходный пустой элемент очереди QH
@@ -1091,6 +1153,8 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
     uint8_t cur_toggle = *toggle ? 1 : 0;
     uint8_t *b = (uint8_t *)buf;
     uint32_t ls_flag = hc->current_device_low_speed ? TD_CTRL_LS : 0u;
+    /* Явный SPD=00 (Full-Speed): MSC-устройство на root-hub всегда FS. */
+    uint32_t spd_field = hc->current_device_low_speed ? (1u << 28) : TD_CTRL_SPD_FS;
 
     for (uint32_t i = 0; i < num_tds; i++)
     {
@@ -1101,8 +1165,8 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
                                 ? (usb_virt_to_phys((uint32_t)&bulk_tds[i + 1]) & ~0x0Fu)
                                 : TD_LINK_TERM;
         bulk_tds[i].link   = next_td_phys;
-        bulk_tds[i].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK | ls_flag |
-                             (i == num_tds - 1 ? TD_CTRL_IOC : 0u);
+        bulk_tds[i].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_3 |
+                             spd_field | ls_flag;
         bulk_tds[i].token  = ((uint32_t)(dir_in ? PID_IN : PID_OUT) << TD_TOKEN_PID_SHIFT) |
                              ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
                              ((uint32_t)ep_num << TD_TOKEN_EP_SHIFT) |
@@ -1117,7 +1181,8 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
     uint32_t dummy_td_phys      = usb_virt_to_phys((uint32_t)&g_bulk_queue.dummy_td);
     if (!first_bulk_td_phys || !dummy_td_phys) return -1;
 
-        bulk_tds[num_tds - 1].link = (dummy_td_phys & ~0x0Fu) | TD_LINK_VF;
+    /* Хвост цепочки замыкаем на dummy TD БЕЗ VF: горизонтальная связь. */
+    bulk_tds[num_tds - 1].link = (dummy_td_phys & ~0x0Fu);
 
     /* Цикл попыток, аналогично control: MSC-устройство NAK'ует bulk-IN при
        подготовке сектора. При временной ошибке — W1C USBSTS, рестарт RS,
@@ -1133,8 +1198,8 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
         cur_toggle = start_toggle;
         for (uint32_t i = 0; i < num_tds; i++)
         {
-            bulk_tds[i].status = TD_CTRL_ACTIVE | TD_CTRL_C_ERR_MASK | ls_flag |
-                                 (i == num_tds - 1 ? TD_CTRL_IOC : 0u);
+            bulk_tds[i].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_3 |
+                                 spd_field | ls_flag;
             uint32_t toggle_bit = cur_toggle ? TD_TOKEN_TOGGLE : 0u;
             bulk_tds[i].token = (bulk_tds[i].token & ~TD_TOKEN_TOGGLE) | toggle_bit;
             cur_toggle ^= 1;
@@ -1143,7 +1208,7 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
         if (uhci_force_wbinvd) __asm__ __volatile__("wbinvd" ::: "memory");
 
         g_bulk_queue.tail_td = &g_bulk_queue.dummy_td;
-        g_bulk_queue.tail_td->link = (first_bulk_td_phys & ~0x0Fu) | TD_LINK_VF;
+        g_bulk_queue.tail_td->link = (first_bulk_td_phys & ~0x0Fu);
         g_bulk_queue.tail_td = &bulk_tds[num_tds - 1];
         __asm__ __volatile__("" ::: "memory");
 
@@ -1155,6 +1220,7 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
 
         uint32_t timeout = 1000000;   /* крупным bulk-чтениям нужно больше бюджета */
         int done = 0;
+        uint16_t fr_pre_b = inw(hc->io_base + UHCI_FRNUM);
         while (timeout--)
         {
             __asm__ __volatile__("" ::: "memory");
@@ -1184,8 +1250,9 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
         }
         uhci_mdelay(attempt < 5 ? 10 : 50);
         if (attempt == 0 || attempt == 9 || attempt == 29)
-            api_ptr->load_screen_add_string("BULK retry %d r=%d td0=%x",
-                                            attempt, result, bulk_tds[0].status);
+            api_ptr->load_screen_add_string("BULK retry %d r=%d td0=%x FR=%x->%x",
+                                            attempt, result, bulk_tds[0].status,
+                                            fr_pre_b, inw(hc->io_base + UHCI_FRNUM));
     }
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
     if (result == -3) {
@@ -1199,7 +1266,7 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
 
 void uhci_register_ptrs(void)
 {
-    frame_list_ptr    = (uint32_t *)raw_frame_buffer;
+    frame_list_ptr    = uhci_frame_list;
     control_qh_ptr    = &control_qh;
     control_tds_ptr   = control_tds;
     setup_static_ptr  = setup_static;
