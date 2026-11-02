@@ -238,6 +238,13 @@ int device_usb_start(void) {
             continue;
         }
 
+       uint16_t f0 = inw(hc->io_base + UHCI_FRNUM);
+      uhci_mdelay(10);
+      uint16_t f1 = inw(hc->io_base + UHCI_FRNUM);
+      api_ptr->load_screen_add_string("U%d SCHED %x->%x %s", u, f0, f1,
+                                (f0 != f1) ? "ALIVE" : "DEAD");
+      if (f0 == f1) { uhci_init(hc); }   /* один повтор */
+
         /* Диагностика сразу после инициализации: USBSTS каждого хоста.
            HCH=1 — планировщик так и не запустился (FLBASEADD/PCI проблема);
            RESUME/ERR bits — BIOS/SMM снова усыпил HC между handoff и init. */
