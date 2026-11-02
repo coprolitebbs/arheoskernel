@@ -897,18 +897,30 @@ int uhci_reset_port(uhci_hc_t *hc, int port)
    ретраи всей цепочки SETUP->DATA->STATUS после каждого NAK приводили к
    гарантированному двойному DATA-пакету на ep0 (нарушение протокола -> реальный
    STALL). Поэтому NAK здесь возвращает 0. */
-/* Извлекает "received PID" из status-слова TD (bits 15:8). QEMU и реальные
-   ICH кладут сюда PID принятого пакета; когда ответа нет вообще — 0x00 или
-   PID_ERR(0xD2)/его инверсия. Сравнение делаем с обоими комплементарными
-   значениями, т.к. порядок бит на проводе LSB-first трактуется по-разному. */
+/* received PID — bits 10..15 status-слова TD (НЕ 15:8! см. комментарий в
+   usb_uhci.h). HC/QEMU кладут сюда 6-битный ИНВЕРТИРОВАННЫЙ tag принятого
+   пакета; когда ответа нет вообще — 0x00, при нераспознанном PID — 0x0D. */
 static inline uint8_t uhci_td_recv_pid(uint32_t st)
 {
-    return (uint8_t)((st & TD_STATUS_PID_MASK) >> TD_STATUS_PID_SHIFT);
+    return (uint8_t)((st & TD_RECV_PID_MASK) >> TD_RECV_PID_SHIFT);
 }
+static inline uint32_t uhci_td_actlen(uint32_t st)
+{
+    return st & TD_ACTLEN_MASK;
+}
+/* «Нет ответа» по received-PID считаем ТОЛЬКО когда взведён официальный
+   бит PIDERR(16) ИЛИ pid==ERR/NONE И при этом actual length нулевой.
+   Прежняя версия принимала любой ненулевой actlen за err-pid (поле 8..15
+   пересекалось с actlen 0..9) и браковала КАЖДЫЙ успешный TD кодом -9 —
+   ровно поэтому лог «не менялся»: устройство отвечало нормально, а драйвер
+   сам себе выдумывал ошибку. */
 static inline int uhci_td_is_err_pid(uint32_t st)
 {
+    if (st & TD_CTRL_PIDERR) return 1;
     uint8_t p = uhci_td_recv_pid(st);
-    return (p == PID_ERR || p == (uint8_t)~PID_ERR || p == 0x00);
+    if ((p == TD_PID_ERR_INV || p == TD_PID_NONE) && uhci_td_actlen(st) == 0)
+        return 1;
+    return 0;
 }
 
 static int uhci_td_error_code(uint32_t st)

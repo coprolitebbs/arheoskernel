@@ -27,6 +27,12 @@
 /* Сколько UHCI-контроллеров поддерживаем (ICH6: dev 29 funcs 0..2 + dev 23 companion) */
 #define UHCI_MAX_HCS 8
 
+/* Число root-портов на ОДИН UHCI HC. По spec — до 2; на ICH6 каждая UHCI
+   функция = ровно 2 порта, в QEMU piix3-usb-uhci — тоже 2. Константа
+   единая для probe/init/reset/enumeration, чтобы нигде не осталось
+   расхождения «сканируем 4, инициализируем 2». */
+#define UHCI_ROOT_PORTS 2
+
 #define PCI_CLASS_SERIAL_BUS 0x0C
 #define PCI_SUBCLASS_USB     0x03
 #define PCI_PROGIF_UHCI      0x00
@@ -136,10 +142,23 @@
 #define TD_CTRL_CRCTIMEO    (1u << 18)
 #define TD_CTRL_BITSTUFF    (1u << 17)
 #define TD_CTRL_PIDERR      (1u << 16)   /* bit16: received PID не распознан / ответа нет */
-/* Маска извлечения "received PID" из status-слова TD (UHCI Rev1.1 §4.3.3,
-   QEMU hw/usb/hcd-uhci.c делает ровно также): bits 15:8 в word1 статуса. */
-#define TD_STATUS_PID_SHIFT 8
-#define TD_STATUS_PID_MASK  (0xFFu << TD_STATUS_PID_SHIFT)
+/* КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ РАСКЛАДКИ (перепроверено по QEMU hw/usb/hcd-uhci.c:
+   UHCI_TD_STALL=(1<<22), UHCI_PIDERR=(1<<16), UHCI_CRC_TMO=(1<<18),
+   UHCI_BITSTUFF=(1<<17) — это БИТЫ ВСЕГО 32-битного status-слова TD, а не
+   «word1». Младшие 16 бит слова занимают actual length (bits 0..9) и
+   RECEIVED PID (bits 10..15, 6 бит = инвертированный tag принятого пакета).
+   Прежние TD_STATUS_PID_SHIFT=8 / MASK=0xFF<<8 захватывали actual length —
+   на УСПЕШНОМ TD (pid_bits==0, len>0) uhci_td_is_err_pid() ложно возвращал
+   истину, и каждая успешная транзакция браковалась кодом -9. Именно поэтому
+   «лог не изменился»: GET_DESC(8) r=-1 при TD0=d400000 был самообманом
+   драйвера, а не отказом устройства. */
+#define TD_ACTLEN_MASK      0x3FFu          /* bits 0..9  */
+#define TD_RECV_PID_SHIFT   10              /* bits 10..15 */
+#define TD_RECV_PID_MASK    (0x3Fu << TD_RECV_PID_SHIFT)
+/* Инвертированные 6-битные теги PID, как их кладёт HC/QEMU (uhci_decode_pid):
+   SETUP=0x0A IN=0x06 OUT=0x0E DATA0=0x0C DATA1=0x05 MDATA=0x07 ERR=0x0D */
+#define TD_PID_ERR_INV      0x0Du
+#define TD_PID_NONE         0x00u           /* ответа не было вовсе */
 
 /* Token (UHCI Spec Rev 1.1 §4.3.5):
    bits 0-7 PID | 8-14 ADDR(7b) | 15-18 ENDP(4b) | 19 DATA0/1
@@ -227,14 +246,15 @@ typedef struct {
     uint32_t dbg_swstamp;                // программная "метка времени": сколько итераций
                                          // ожидания потребовалось (0..timeout). Если равно
                                          // timeout+1 — очередь вообще не двигалась (HC dead).
-    /* Диагностика ПОСЛЕДНЕГО заведомо-холостого транзакта ("ping" на адресе,
-       где устройства нет). Если ping завершается мгновенно с PID ERR +
-       Timeouts, а рабочий GET_DESCRIPTOR висит ACTIVE до таймаута — значит
-       HC физически общивает ДРУГОЙ порт (на ICH6 флешка сидит на портах
-       companion-контроллера dev 23 func 1, а не dev 29 func 0): */
-    uint32_t dbg_ping_status;            // status TD ping-цепочки целиком
-    uint32_t dbg_ping_spins;             // итерации ожидания ping (малы = HC жив)
-    int      dbg_ping_result;            // код возврата ping
+    /* Диагностика ПОСЛЕДНЕГО заведомо-холостого транзакта (см. ниже):
+       раньше здесь был «ping» на несуществующем адресе 15 — но по UHCI spec
+       PID ERR при отсутствии ответа НЕ выставляется (биты 16..22 молчат),
+       поэтому ping давал ложный «успех len=0» и ничего не различал. Удалён
+       как метод; поля сохранены только для бинарной совместимости структуры
+       с уже собранными образами ядра. */
+    uint32_t dbg_ping_status;            // (не используется, reserved)
+    uint32_t dbg_ping_spins;             // (не используется, reserved)
+    int      dbg_ping_result;            // (не используется, reserved)
     /* Порт, на котором HC физически общивается с текущим устройством
        (заполняется в uhci_reset_port после успешного PED). 0xFF = не задан.
        Нужен для корректного resume-кода перед каждой транзакцией: раньше
