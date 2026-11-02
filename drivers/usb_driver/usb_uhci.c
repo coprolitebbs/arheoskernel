@@ -684,7 +684,12 @@ int uhci_init(uhci_hc_t *hc)
 
 static uint16_t portsc_reg(int port)
 {
-    return (port == 0) ? UHCI_PORTSC1 : UHCI_PORTSC2;
+    switch (port) {
+        case 0:  return UHCI_PORTSC1;
+        case 1:  return UHCI_PORTSC2;
+        case 2:  return UHCI_PORTSC3;
+        default: return UHCI_PORTSC4;
+    }
 }
 uint16_t uhci_port_status(uhci_hc_t *hc, int port)
 {
@@ -892,6 +897,20 @@ int uhci_reset_port(uhci_hc_t *hc, int port)
    ретраи всей цепочки SETUP->DATA->STATUS после каждого NAK приводили к
    гарантированному двойному DATA-пакету на ep0 (нарушение протокола -> реальный
    STALL). Поэтому NAK здесь возвращает 0. */
+/* Извлекает "received PID" из status-слова TD (bits 15:8). QEMU и реальные
+   ICH кладут сюда PID принятого пакета; когда ответа нет вообще — 0x00 или
+   PID_ERR(0xD2)/его инверсия. Сравнение делаем с обоими комплементарными
+   значениями, т.к. порядок бит на проводе LSB-first трактуется по-разному. */
+static inline uint8_t uhci_td_recv_pid(uint32_t st)
+{
+    return (uint8_t)((st & TD_STATUS_PID_MASK) >> TD_STATUS_PID_SHIFT);
+}
+static inline int uhci_td_is_err_pid(uint32_t st)
+{
+    uint8_t p = uhci_td_recv_pid(st);
+    return (p == PID_ERR || p == (uint8_t)~PID_ERR || p == 0x00);
+}
+
 static int uhci_td_error_code(uint32_t st)
 {
     if (st & TD_CTRL_ACTIVE)   return -10; // всё ещё активно (не должно быть на выходе)
@@ -900,6 +919,19 @@ static int uhci_td_error_code(uint32_t st)
     if (st & TD_CTRL_BABBLE)   return -6;  // babble — устройство «болтает» по шине
     if (st & TD_CTRL_CRCTIMEO) return -7;  // CRC/Time-out — аппаратный таймаут фазы
     if (st & TD_CTRL_BITSTUFF) return -8;  // bit-stuffing ошибка на линии
+    /* FIX (главный симптом лога): статус 0xD800000 = CRCTIMEO|BITSTUFF, а
+       статус 0xD400000 = PIDERR(bit16)+CRCTIMEO(bit18)+BITSTUFF(bit17)...
+       Но в QEMU при "device not responding" HC выставляет ТОЛЬКО error-PID
+       (биты 18/17 молчат!) — прежняя функция такое за УСПЕХ и принимала.
+       Теперь: если взведён бит 16 ИЛИ received-PID равен ERR/0 — это
+       No-Response устройства (например флешка сидит на другом адресе,
+       который BIOS назначил при legacy-загрузке). Код -9 — временная
+       ошибка, upper-слой должен ретраить после сброса порта. */
+    if ((st & TD_CTRL_PIDERR) || uhci_td_is_err_pid(st)) {
+        /* Но не считаем ошибкой полностью успешный TD: у успешного TD
+           received PID = ACK(0x?) и ни одного из флагов 16..22. */
+        if (st & (TD_CTRL_PIDERR | TD_ERR_ANY)) return -9;
+    }
     return 0;                              /* NAK/ISC/ISP — НЕ ошибки */
 }
 
@@ -944,7 +976,28 @@ static inline uint32_t uhci_token_status(uint8_t addr, uint8_t ep, int in)
 /* Версия компоновки токенов — печатается в каждом транзите, чтобы по логу
    можно было ОДНОЗНАЧНО установить, какая СБОРКА драйвера реально крутится в
    памяти (см. USBVER ниже). */
-#define UHCI_CODE_REV 0xA115u
+#define UHCI_CODE_REV 0xA116u   /* A116: PID-ERR detection (-9), 4-port resume, active_port */
+
+/* ==================== Кольцо адресов USB-устройств ====================
+   ГЛАВНЫЙ БАГ ПРЕДЫДУЩИХ СБОРОК: контроллер завершал SETUP-TD со статусом
+   вида 0xD800000 / 0x??00000 с error-PID — это НЕ «злая воля железа», а
+   корректный ответ шины на токен DEVICE-адреса, которому НИКТО не отвечает.
+   При legacy-загрузке BIOS сам присваивает адрес подключённому устройству
+   (обычно 1..7). Наш же драйвер после HCRESET назначал новый адрес только
+   через SET_ADDRESS, но ПЕРВЫЙ GET_DESCRIPTOR(8) слался на addr=0 — а
+   устройство после BIOS уже сидит НЕ на нуле! Поэтому enumeration теперь
+   перебирает адреса 0 и 1..7 на уже ВСБРОШЕННОМ порту (reset сбрасывает
+   адрес в 0 по USB spec 9.1.1.6, так что addr=0 обязано работать; если
+   нет — пробуем «BIOS-ны» адреса). Возвращаемый ring_idx говорит upper-слою,
+   надо ли делать SET_ADDRESS (idx==0) или можно работать как есть. */
+#define USB_ADDR_RING_MAX 8
+static uint8_t g_usb_addr_ring[USB_ADDR_RING_MAX] = {0,1,2,3,4,5,6,7};
+int uhci_get_addr_ring_entry(int idx, uint8_t *out_addr)
+{
+    if (idx < 0 || idx >= USB_ADDR_RING_MAX) return 0;
+    *out_addr = g_usb_addr_ring[idx];
+    return 1;
+}
 
 int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_pkt, void *data_buf, uint16_t data_len, int data_in, uint16_t max_pkt)
 {
@@ -955,21 +1008,24 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     uhci_select_host(hc);
 
     /* CF-18/ICH6: BIOS или SMI могут оставить HC в Global Suspend / порт в
-       suspend между транзактами. Перед КАЖДОЙ цепочкой TD будим root-hub. */
+       suspend между транзактами. Перед КАЖДОЙ цепочкой TD будим root-hub.
+       FIX: раньше будились только порты 0 и 1 — на ICH6 у UHCI-функций до
+       4 root-портов (PORTSC3/4), и активный порт вообще не участвовал в
+       resume. Теперь перебираем все 4 порта + гарантированно active_port. */
     {
-        uint16_t regp = portsc_reg(0), regp2 = portsc_reg(1);
-        uint16_t psx  = inw(hc->io_base + regp) | inw(hc->io_base + regp2);
         uint16_t stsx = inw(hc->io_base + UHCI_USBSTS);
         uint16_t cmdx = inw(hc->io_base + UHCI_USBCMD);
-        if ((stsx & USBSTS_RESUME) || (psx & PORTSC_SUSPEND) || (cmdx & USBCMD_EGSM)) {
-            int woke = 0;
-            if (inw(hc->io_base + regp)  & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 0);
-            if (inw(hc->io_base + regp2) & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 1);
-            woke |= uhci_resume_port(hc, 0);   /* снимает EGSM + W1C RESUME */
-            if (woke)
-                api_ptr->load_screen_add_string("UHCI resumed before xfer sts=%x cmd=%x",
-                                                stsx, cmdx);
+        int woke = 0;
+        for (int p = 0; p < 4; p++) {
+            if (inw(hc->io_base + portsc_reg(p)) & PORTSC_SUSPEND)
+                woke |= uhci_resume_port(hc, p);
         }
+        if ((stsx & USBSTS_RESUME) || (cmdx & USBCMD_EGSM)) {
+            woke |= uhci_resume_port(hc, (hc->active_port <= 3) ? hc->active_port : 0);
+        }
+        if (woke)
+            api_ptr->load_screen_add_string("UHCI resumed before xfer sts=%x cmd=%x",
+                                            stsx, cmdx);
     }
 
     uint32_t num_data = 0;
@@ -1186,18 +1242,18 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
     uhci_select_host(hc);
 
     {
-        uint16_t regp = portsc_reg(0), regp2 = portsc_reg(1);
-        uint16_t psx  = inw(hc->io_base + regp) | inw(hc->io_base + regp2);
         uint16_t stsx = inw(hc->io_base + UHCI_USBSTS);
         uint16_t cmdx = inw(hc->io_base + UHCI_USBCMD);
-        if ((stsx & USBSTS_RESUME) || (psx & PORTSC_SUSPEND) || (cmdx & USBCMD_EGSM)) {
-            int woke = 0;
-            if (inw(hc->io_base + regp)  & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 0);
-            if (inw(hc->io_base + regp2) & PORTSC_SUSPEND) woke |= uhci_resume_port(hc, 1);
-            woke |= uhci_resume_port(hc, 0);
-            if (woke)
-                api_ptr->load_screen_add_string("UHCI BULK resumed sts=%x cmd=%x", stsx, cmdx);
+        int woke = 0;
+        for (int p = 0; p < 4; p++) {
+            if (inw(hc->io_base + portsc_reg(p)) & PORTSC_SUSPEND)
+                woke |= uhci_resume_port(hc, p);
         }
+        if ((stsx & USBSTS_RESUME) || (cmdx & USBCMD_EGSM)) {
+            woke |= uhci_resume_port(hc, (hc->active_port <= 3) ? hc->active_port : 0);
+        }
+        if (woke)
+            api_ptr->load_screen_add_string("UHCI BULK resumed sts=%x cmd=%x", stsx, cmdx);
     }
 
     uint32_t num_tds = (len + ep_max_pkt - 1) / ep_max_pkt;

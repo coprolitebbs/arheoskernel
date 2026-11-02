@@ -42,6 +42,8 @@
 #define UHCI_SOFMOD     0x0C
 #define UHCI_PORTSC1    0x10
 #define UHCI_PORTSC2    0x12
+#define UHCI_PORTSC3    0x14   /* есть не во всех HC; чтение вернёт 0xFFFF/0 */
+#define UHCI_PORTSC4    0x16
 
 /* USBSTS bits (UHCI Rev1.1 §5.2) */
 #define USBSTS_USBINT   (1 << 0)
@@ -133,6 +135,11 @@
 #define TD_CTRL_NAK         (1u << 19)
 #define TD_CTRL_CRCTIMEO    (1u << 18)
 #define TD_CTRL_BITSTUFF    (1u << 17)
+#define TD_CTRL_PIDERR      (1u << 16)   /* bit16: received PID не распознан / ответа нет */
+/* Маска извлечения "received PID" из status-слова TD (UHCI Rev1.1 §4.3.3,
+   QEMU hw/usb/hcd-uhci.c делает ровно также): bits 15:8 в word1 статуса. */
+#define TD_STATUS_PID_SHIFT 8
+#define TD_STATUS_PID_MASK  (0xFFu << TD_STATUS_PID_SHIFT)
 
 /* Token (UHCI Spec Rev 1.1 §4.3.5):
    bits 0-7 PID | 8-14 ADDR(7b) | 15-18 ENDP(4b) | 19 DATA0/1
@@ -228,6 +235,12 @@ typedef struct {
     uint32_t dbg_ping_status;            // status TD ping-цепочки целиком
     uint32_t dbg_ping_spins;             // итерации ожидания ping (малы = HC жив)
     int      dbg_ping_result;            // код возврата ping
+    /* Порт, на котором HC физически общивается с текущим устройством
+       (заполняется в uhci_reset_port после успешного PED). 0xFF = не задан.
+       Нужен для корректного resume-кода перед каждой транзакцией: раньше
+       будились порты 0 и 1 ВСЕГДА, а suspend активного порта мог остаться
+       незамеченным на третьем/четвёртом root-hub контроллере. */
+    uint8_t  active_port;
 } uhci_hc_t;
 
 typedef struct {
