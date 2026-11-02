@@ -107,6 +107,10 @@
      bit18 CRC/Time-out  bit17 BitStuff  bit16 PacketId(err) */
 #define TD_CTRL_ISP         (1u << 31)
 #define TD_CTRL_ISC         (1u << 30)
+/* SPD = bits 29:28. ВНИМАНИЕ: бит 29 определён как TD_CTRL_SPD — это ОШИБКА
+   маски, оставшаяся с прошлых ревизий: 1<<29 попадает в поле SPD только как
+   старший бит; использовать TD_CTRL_SPD как "флаг" нельзя (он затирает SPD).
+   Все места кода используют явные TD_CTRL_SPD_FS/LS и маску ниже. */
 #define TD_CTRL_SPD         (1u << 29)
 #define TD_CTRL_C_ERR_SHIFT 26
 #define TD_CTRL_C_ERR_NONE  (0u << 26)
