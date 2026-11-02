@@ -17,13 +17,37 @@
 
 
 /*
- * usb_core.c - минимальный enumeration endpoint 0.
- * Этап 1: GET_DESCRIPTOR(Device) + SET_ADDRESS + ещё раз GET_DESCRIPTOR.
+ * usb_core.c - enumeration endpoint 0 + реестр устройств.
+ *
+ * Адресация: каждое устройство живёт на паре (hc_idx, port) и получает
+ * уникальный dev_addr 1..USB_ADDR_MAX. Перед SET_ADDRESS порт переживает
+ * hard reset (PED=0): выключенный порт не участвует в расписании HC,
+ * устройство гарантированно отвечает только на адрес 0, а TD уже
+ * enumerated устройств (адреса 1..N) его не трогают.
  */
 
 #include "include/usb_core.h"
 #include "../../include-kernel/lib.h"
 #include "../../include-kernel/ports_io.h"
+
+usb_device_t usb_devices[USB_REGISTRY_MAX];
+int          usb_device_count = 0;
+
+uhci_hc_t *usb_get_hc(int hc_idx){
+    if (hc_idx < 0 || hc_idx >= uhci_hc_count) return NULL;
+    return uhci_hc_ptrs[hc_idx];
+}
+
+uint8_t usb_alloc_dev_addr(void){
+    for (uint8_t a = 1; a <= USB_ADDR_MAX; a++){
+        int used = 0;
+        for (int i = 0; i < usb_device_count; i++){
+            if (usb_devices[i].dev_addr == a){ used = 1; break; }
+        }
+        if (!used) return a;
+    }
+    return 0;   /* исчерпано */
+}
 
 int usb_get_descriptor(uhci_hc_t *hc, uint8_t addr,
                               uint8_t desc_type, uint8_t desc_index,
@@ -142,12 +166,15 @@ int usb_parse_mass_storage(const void *config_buf, uint16_t total_len,
 }
 
 
-int usb_enumerate(uhci_hc_t *hc, int port,
-                  usb_device_desc_t *out_desc, uint8_t *out_addr){
+int usb_enumerate(uhci_hc_t *hc, int port, uint8_t addr,
+                  usb_device_desc_t *out_desc){
+    if (!hc || !out_desc) return -1;
 
-    /* 1) Сброс порта */
-    int rp = uhci_reset_port(hc, port);
-    if (rp != 0) return rp;
+    /* 1) Hard reset: устройство отвечает только на адрес 0, порт выключен.
+          Это "сброс адреса перед enumeration" — без него оставшийся с
+          прошлого захода адрес уводил бы GET_DESCRIPTOR на несуществующий
+          адрес, а TD других устройств перехватывали бы наш трафик на 0. */
+    uhci_port_reset_hard(hc, port);
 
     /* 2) Первые 8 байт Device Descriptor (bMaxPacketSize0 неизвестен) */
     usb_device_desc_t tmp;
@@ -159,19 +186,34 @@ int usb_enumerate(uhci_hc_t *hc, int port,
         max_pkt = 8;
     }
 
-    /* 3) SET_ADDRESS(1) */
-    if (usb_set_address(hc, 1) != 0) return -13;
-
-    /* После SET_ADDRESS устройство отвечает уже на адрес 1. USB spec
-       требует паузу ≥ 2 ms — busy-wait через порт. */
+    /* 3) SET_ADDRESS(addr). some devices need ≥2ms pause after set address */
+    if (usb_set_address(hc, addr) != 0) return -13;
     for (volatile int i = 0; i < 20000; i++) inw(hc->io_base);
 
-    /* 4) Полный Device Descriptor (18 байт) с новым адресом */
-    usb_device_desc_t full;
-    memset(&full, 0, sizeof(full));
-    if (usb_get_device_desc(hc, 1, &full, 18, max_pkt) != 0) return -14;
+    /* 4) Включаем порт (soft reset c PED=1) — без PED HC не будет
+          слать токены на адрес устройства в следующих транзакциях. */
+    if (uhci_reset_port(hc, port) != 0) return -15;
 
-    *out_desc = full;
-    *out_addr = 1;
+    /* 5) Полный Device Descriptor (18 байт) с новым адресом */
+    if (usb_get_device_desc(hc, addr, out_desc, 18, max_pkt) != 0) return -14;
+
+    return 0;
+}
+
+int usb_enumerate_device(usb_device_t *dev, uint8_t addr){
+    if (!dev) return -1;
+
+    uhci_hc_t *hc = usb_get_hc(dev->hc_idx);
+    if (!hc) return -2;
+
+    int r = usb_enumerate(hc, dev->port, addr, &dev->desc);
+    if (r != 0) return r;
+
+    dev->dev_addr = addr;
+    dev->ep0_max_pkt = dev->desc.bMaxPacketSize0;
+    if (dev->ep0_max_pkt != 8 && dev->ep0_max_pkt != 16 &&
+        dev->ep0_max_pkt != 32 && dev->ep0_max_pkt != 64){
+        dev->ep0_max_pkt = 8;
+    }
     return 0;
 }

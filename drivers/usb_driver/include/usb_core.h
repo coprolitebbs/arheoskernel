@@ -103,10 +103,45 @@ typedef struct {
     uint8_t  bulk_out_toggle;
 } usb_msc_iface_t;
 
+/* ---------------- USB-устройство (результат enumeration) ----------------
+   Адресация устройства: пара (hc_idx, port) + выданный dev_addr.
+   hc_idx — слот UHCI-контроллера (uhci_hc_ptrs[hc_idx]), порт 0/1. */
+#define USB_ADDR_MAX      127     /* 7-bit адрес; 0 зарезервирован под bus reset */
+
+typedef struct {
+    int      hc_idx;              /* индекс HC в uhci_hc_ptrs[] */
+    int      port;                /* root-порт 0..1 */
+    uint8_t  dev_addr;            /* выданный USB-адрес (1..USB_ADDR_MAX) */
+    uint8_t  cfg_value;           /* bConfigurationValue активной конфигурации */
+    uint16_t ep0_max_pkt;
+    usb_device_desc_t desc;
+    uint8_t  is_msc;              /* найден MSC/BOT интерфейс */
+    usb_msc_iface_t msc;
+    uint32_t sector_count;        /* валидно при is_msc */
+    uint32_t sector_size;
+    int      block_id;            /* id в блочном драйвере, -1 если нет */
+    char     name[16];            /* "usbN" для register_device */
+} usb_device_t;
+
+extern usb_device_t usb_devices[];
+extern int          usb_device_count;
+
+/* Выдать следующий свободный USB-адрес (1..USB_ADDR_MAX) */
+uint8_t usb_alloc_dev_addr(void);
 
 /* Прототипы */
-int usb_enumerate(uhci_hc_t *hc, int port,
-                  usb_device_desc_t *out_desc, uint8_t *out_addr);
+uhci_hc_t *usb_get_hc(int hc_idx);
+
+int usb_enumerate(uhci_hc_t *hc, int port, uint8_t addr,
+                  usb_device_desc_t *out_desc);
+
+/* Полный цикл: hard reset -> включение порта -> GET_DESC(8)@0 ->
+   SET_ADDRESS(addr) -> GET_DESC(18)@addr. Возвращает 0 при успехе. */
+int usb_enumerate_device(usb_device_t *dev, uint8_t addr);
+
+int usb_get_descriptor(uhci_hc_t *hc, uint8_t addr,
+                       uint8_t desc_type, uint8_t desc_index,
+                       void *buf, uint16_t want_len, uint16_t max_pkt);
 
 int usb_get_config_desc(uhci_hc_t *hc, uint8_t addr, void *buf,
                         uint16_t want_len, uint16_t max_pkt);
