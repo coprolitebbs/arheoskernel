@@ -20,6 +20,19 @@
 
 #include <stdint.h>
 
+/* Критическая секция: запрещает вытеснение задачи на время BOT-
+   последовательности / транзакции. Ядро передаёт драйверу указатель
+   на kernel_schedule_lock через api->schedule_lock_ptr; если его нет
+   (драйвер крутится до multitasking) — no-op. cli/sti не используются,
+   т.к. прерывания в этом ядре разворачиваются в yield (см. syscalls.c). */
+#ifdef __cplusplus
+#define USB_SCHED_LOCK(p)
+#define USB_SCHED_UNLOCK(p)
+#else
+#define USB_SCHED_LOCK(p)  do { if (p) *(volatile uint8_t*)(p) = 1; } while(0)
+#define USB_SCHED_UNLOCK(p) do { if (p) *(volatile uint8_t*)(p) = 0; } while(0)
+#endif
+
 /* ---------------- PCI ---------------- */
 #define PCI_CONFIG_ADDR 0xCF8
 #define PCI_CONFIG_DATA 0xCFC
@@ -177,6 +190,13 @@ int  uhci_hc_index(uhci_hc_t *hc);
    динамически через schedule_* / deschedule_*. */
 void uhci_ports_schedule_all(void);
 void uhci_ports_deschedule_all(void);
+
+/* Проверки выравнивания структур расписания для ВСЕХ HC
+   (frame list — 4K, QH/TD — 16). Возвращает 0 при успехе. */
+int  uhci_check_alignment(void);
+
+/* Сколько портов у контроллера (UHCI spec — 2) */
+static inline int uhci_hc_ports(uhci_hc_t *hc){ return hc && hc->ports ? hc->ports : 2; }
 
 /* Hot-patch port-TD (вернуть ACTIVE "дожжённым" TD). Вызывать из
    основного цикла опроса портов примерно раз за кадр. */

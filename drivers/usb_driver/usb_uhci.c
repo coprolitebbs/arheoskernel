@@ -406,7 +406,11 @@ static void port_td_init(uhci_hc_t *hc, int port){
     port_tds[i][port] = td;
 
     td->link   = TD_LINK_TERM;
-    td->status = 0;
+    /* СРАЗУ ACTIVE: HC должен застать TD уже вооружённым. Если бы мы
+       оставили status=0, HC мог бы проскочить кадр без опроса порта,
+       а hot-patch (poll_refresh) не имел бы права трогать "дожжённый"
+       TD из-за гонки чтения link. */
+    td->status = TD_CTRL_ACTIVE;
     /* IN token, addr 0, ep 0, max length, no IOC: HC "съедает" за кадр */
     td->token  = ((uint32_t)PID_IN << TD_TOKEN_PID_SHIFT)
                | (0u << TD_TOKEN_ADDR_SHIFT)
@@ -460,18 +464,49 @@ void uhci_ports_deschedule_all(void){
     }
 }
 
+/* Проверка выравнивания расписания для всех найденных HC.
+   frame list — 4K, QH/TD — 16 байт. Возвращает 0 при успехе,
+   иначе — битовую маску проблем (бит 0 = FL, бит 1 = QH, бит 2 = TD). */
+int uhci_check_alignment(void){
+    int bad = 0;
+    for (int h = 0; h < uhci_hc_count; h++){
+        uhci_hc_t *hc = uhci_hc_ptrs[h];
+        if (!hc || !hc->valid) continue;
+
+        if (((uint32_t)hc->frame_list & 0xFFF) != 0)      bad |= 1;
+        if (((uint32_t)hc->port_qh   & 0x0F) != 0)        bad |= 2;
+        if (((uint32_t)hc->port_qh1  & 0x0F) != 0)        bad |= 2;
+        if (((uint32_t)hc->ctrl_qh   & 0x0F) != 0)        bad |= 2;
+        if (((uint32_t)hc->bulk_qh   & 0x0F) != 0)        bad |= 2;
+        if (((uint32_t)hc->ctrl_ring & 0x0F) != 0)        bad |= 4;
+        if (((uint32_t)hc->bulk_ring & 0x0F) != 0)        bad |= 4;
+    }
+    return bad;
+}
+
 /* Hot-patch port TD: вернуть ACTIVE, если HC их "дожог".
-   Вызывать раз в ~1 мс из основного цикла опроса. */
+   Вызывать раз в ~1 мс из основного цикла опроса.
+
+   Важно: HC выбирает следующий TD ПОСЛЕ выполнения текущего, читая
+   link уже ЗАПОСЛЕДНИЙ транзакцией. Поэтому перепрошивка возможна
+   только когда TD ещё ACTIVE (HC сейчас его исполняет/ждёт NAK).
+   Как только ACTIVE снят — трогать TD нельзя (риск гонки), вместо
+   этого заново вооружаем СВЕЖИЙ TD и переподключаем head порта. */
 void uhci_ports_poll_refresh(void){
     for (int h = 0; h < uhci_hc_count; h++){
         uhci_hc_t *hc = uhci_hc_ptrs[h];
         if (!hc || !hc->running) continue;
-        for (int p = 0; p < 2; p++){
+        for (int p = 0; p < uhci_hc_ports(hc); p++){
             uhci_td_t *td = port_tds[hc->index][p];
-            if (!(td->status & TD_CTRL_ACTIVE)){
-                td->status = 0;
-                td->link   = TD_LINK_TERM;
-            }
+            if (!td) continue;
+
+            if (td->status & TD_CTRL_ACTIVE) continue;   /* HC ещё крутит */
+
+            /* TD дожжён — вооружить новый и переподключить head */
+            port_td_init(hc, p);
+            td = port_tds[hc->index][p];
+            td->status = TD_CTRL_ACTIVE;
+            port_qh_link(hc, p);
         }
     }
 }
