@@ -230,15 +230,20 @@
    ("memory" clobber) обеспечивает порядок записи до/после запуска HC.
    volatile здесь только мешает оптимизациям и не даёт никаких гарантий DMA. */
 typedef struct {
-    uint32_t link;
-    uint32_t status;
-    uint32_t token;
-    uint32_t buffer;
+    volatile uint32_t link;
+    volatile uint32_t status;   /* ОБЯЗАТЕЛЬНО volatile: HC пишет в это слово
+        по DMA асинхронно. Без volatile цикл ожидания компилируется в
+        «бесконечное чтение одного значения из регистра CPU» — на реальном
+        железе (CF-18) оно так и не обновляется, и каждая транзакция
+        завершается ложным TIMEOUT при реально уже отработанном TD. В QEMU
+        эффект маскировался таймингом эмуляции. */
+    volatile uint32_t token;
+    volatile uint32_t buffer;
 } __attribute__((aligned(16))) uhci_td_t;
 
 typedef struct {
-    uint32_t head;
-    uint32_t element;
+    volatile uint32_t head;
+    volatile uint32_t element;  /* volatile — см. комментарий к TD.status */
 } __attribute__((aligned(16))) uhci_qh_t;
 
 typedef struct {
@@ -292,18 +297,22 @@ extern uhci_td_t *bulk_tds_ptr;
 extern uhci_queue_t g_control_queue;
 extern uhci_queue_t g_bulk_queue;
 
-/* Синхронизация DMA-памяти.
-   ВАЖНО: на i386 без PAE кэш линейно адресуем — bus-master DMA когерентен
-   с кэшем, инвалидация НЕ требуется. wbinvd же — тяжёлая операция: на
-   ноутбуках она порою обрамляется SMI (System Management Interrupt), который
-   может «съедать» миллисекунды и срывать тайминги USB-транзактов. Поэтому
-   перед записью дескрипторов достаточно compiler barrier, а wbinvd оставлен
-   как явный аварийный инструмент (см. dbg-переменную uhci_force_wbinvd). */
+/* Синхронизация DMA-памяти. ПРЕДЫДУЩЕЕ ПРЕДПОЛОЖЕНИЕ («на i386 без PAE
+   bus-master DMA когерентен с кэшем») — ЛОЖЬ в общем виде. Кэш линейно
+   адресуем, но это НЕ делает DMA когерентным: UHCI — bus-master, его записи
+   идут в память, МИМУЯ кэш CPU. Если строка TD/QH остаётся в модифицированном
+   состоянии в кэше CPU, HC читает из DRAM СТАРУЮ копию, а его обновления
+   статуса CPU не видит вообще никогда. На CF-18 (Pentium-M, 32KB L1 WB) это и
+   есть главный отказ: TD навсегда Active -> ложный TIMEOUT. На QEMU эффект
+   маскировался тем, что эмуляция трогала память напрямую.
+   Поэтому ОБЯЗАТЕЛЬНО wbinvd (write-back + invalidate) ПЕРЕДАЁМ HC дескрипторы
+   и ПОСЛЕ завершения транзакта. Риск SMI при wbinvd меньше риска чтения
+   мусора; для кадровых таймингов UHCI это безопасно (мы и так поллим). */
 static inline void usb_dma_sync_before(void) {
-    __asm__ __volatile__("" ::: "memory");
+    __asm__ __volatile__("wbinvd" ::: "memory");
 }
 static inline void usb_dma_sync_after(void) {
-    __asm__ __volatile__("" ::: "memory");
+    __asm__ __volatile__("wbinvd" ::: "memory");
 }
 
 extern int uhci_force_wbinvd;   /* =1 включает режим тотального wbinvd (для A/B теста) */
