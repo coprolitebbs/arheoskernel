@@ -922,6 +922,51 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
      1) мягкий повтор сброса;
      2) power-cycle порта + принудительная очистка OC-latch;
      3) полный HCRESET контроллера (uhci_init), как uhci_restart() в Linux. */
+/* ==================== RADICAL RECOVERY (A118) ===============================
+   Если GET_DESCRIPTOR(8) провалился на всех 5 ретраях — НЕ выходим с -12, а
+   делаем то же, что hub_port_init() в Linux после исчерпания попыток: полный
+   сброс шины (GCR) + re-enable порта + reset, и ОДИН последний прогон.
+   Обоснование по логам A117: TD завершается ISP|ISC|C_ERR=0|CRC+BITSTUFF —
+   это НЕ «устройство молчит», а «HC сам сдался после 3 попыток». На CF-18
+   флешка до этого уже обслуживалась BIOS'ом в legacy-режиме: её ep0 может
+   остаться в согласованном состоянии DATA1/NAK-шторме, которое лечится только
+   повторным USB-reset'ом. GCR (Global Clear Reset, USBCMD bit2) форсирует
+   reset-state на всех портах разом — дешевле HCRESET и не трогает регистры HC. */
+int uhci_hard_recovery(uhci_hc_t *hc, int port)
+{
+    if (!hc) return -1;
+    api_ptr->load_screen_add_string("UHCI hard recovery on port %d", port);
+
+    /* 1) GCR: reset на линии для всех подключённых устройств. */
+    outw(hc->io_base + UHCI_USBCMD, USBCMD_GRESET | USBCMD_RS);
+    uhci_udelay(500);                       /* PR-импульс >= 10 мс spec;
+                                                GCR держим коротко, затем... */
+    outw(hc->io_base + UHCI_USBCMD, USBCMD_RS);
+    uhci_mdelay(20);                        /* reset recovery (USB 7.1.7.5) */
+
+    /* 2) Порты могли залипнуть в suspend/OC после GCR — переподнимаем. */
+    for (int p = 0; p < 4; p++) {
+        uint16_t ps = inw(hc->io_base + portsc_reg(p));
+        if (!(ps & PORTSC_CCS)) continue;
+        if (ps & (PORTSC_OCI | PORTSC_OCIC)) uhci_clear_overcurrent(hc, p);
+        uhci_write_port(hc, p, PORTSC_PED, 0);
+        uhci_clear_changes(hc, p);
+    }
+    uhci_ensure_running(hc);
+
+    /* 3) Штатный порт-ресет выбранного порта (со всей лестницей эскалации). */
+    int rp = uhci_reset_port(hc, port);
+    hc->dbg_recoveries++;
+    return rp;
+}
+
+/* Публичная обёртка: до 4 попыток сброса. Часть флешек активируются только
+   со второго-третьего reset'а (особенно если BIOS уже общался с ними).
+   Лестница эскалации (по образцу Linux hub_port_init/hub_reset_port и
+   Haiku USBAbsolutHostController::ResetPort):
+     1) мягкий повтор сброса;
+     2) power-cycle порта + принудительная очистка OC-latch;
+     3) полный HCRESET контроллера (uhci_init), как uhci_restart() в Linux. */
 int uhci_reset_port(uhci_hc_t *hc, int port)
 {
     if (!hc) return -1;
@@ -1083,7 +1128,16 @@ static inline uint32_t uhci_token_status(uint8_t addr, uint8_t ep, int in)
 /* Версия компоновки токенов — печатается в каждом транзите, чтобы по логу
    можно было ОДНОЗНАЧНО установить, какая СБОРКА драйвера реально крутится в
    памяти (см. USBVER ниже). */
-#define UHCI_CODE_REV 0xA117u   /* A117: select_host больше НЕ глушит соседей; страж uhci_ensure_running перед каждой очередью */
+#define UHCI_CODE_REV 0xA118u   /* A118: КОРНЕВОЙ ФИКС — C_ERR=3 при ISP|ISC+CRC/TMO
+   означает, что HC САМ дошёл до лимита попыток и сдался: устройство молчит на
+   wire (NAK-шторм / нет ответа). Прежняя диагностика это скрывала: TD0 читался
+   ДО того, как HC его обработает (поэтому TD0==TD_status), а "moved" был
+   грубым FR!=FR_pre (сдвиг на кадр за 5 млн спинов = планировщик УЖЕ умер от
+   HCH, а не «не трогал очередь»). Теперь: честный moved=(swstamp<timeout),
+   полный дамп всех TD цепочки в dbg1..3/d4..d7 (до wbinvd!), счётчик NAK
+   пересчитывается из флагов постфактум, и КАЖДАЯ серия ретраев предварится
+   полным GCR-reset + re-enable порта (radical recovery, как hub_port_init в
+   Linux после неудачи). */
 
 /* ==================== Компактный лог (экономия буфера экрана) ================
    Буфер лога загрузки ~30 строк, начало уплывало за 5 ретраев x 3 строки.
@@ -1376,11 +1430,50 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     if (result == -3)
     {
         uint16_t fr_now = inw(hc->io_base + UHCI_FRNUM);
+        /* ЧЕСТНЫЙ moved: раньше ставился по FR!=FR_pre. За 5 млн спинов кадр
+           гарантированно сдвигается ДАЖЕ если HC умер в HCH сразу после
+           установки элемента (FRNUM — свободнo_running-таймер). Поэтому
+           moved=1 при незавершённом TD ничего не доказывал, а moved=0 пугал
+           ложным «планировщик мёртв». Теперь moved = цикл ожидания завершился
+           ДО исчерпания timeout, т.е. хвостовой TD реально сбросил Active. */
+        int moved = (spins < timeout) ? 1 : 0;
         api_ptr->load_screen_add_string(
-            "UHCI xfer TIMEOUT: FR %x->%x CMD=%x STS=%x moved=%d HCH=%d RS=%d",
-            fr_pre, fr_now, cmd_pre, sts_pre,
-            (fr_now != fr_pre) ? 1 : 0,
+            "UHCI xfer %s: FR %x->%x CMD=%x STS=%x moved=%d HCH=%d RS=%d",
+            moved ? "STALL" : "TIMEOUT",
+            fr_pre, fr_now, cmd_pre, sts_pre, moved,
             !!(sts_pre & USBSTS_HCH), !!(cmd_pre & USBCMD_RS));
+    }
+
+    /* ==================== ПОЛНЫЙ ДАМП ЦЕПОЧКИ TD (A118) ====================
+       Прежняя диагностика печатала ТОЛЬКО TD0 и хвостовой TD — и именно
+       поэтому мы «топтались на месте»: TD0 читался в момент, когда его ещё
+       НЕ обработали (очередь depth-first доходит до него позже/никогда),
+       отсюда вечное TD0==TD_status==d800000 без всякой информации. Теперь
+       дампятся ВСЕ TD цепочки (token/status), причём ДО финального wbinvd и
+       через volatile-чтение из памяти. Формат компактный: статусы TD0..TD3 в
+       dbg1..dbg3+d4, токены+PORTSC в d5..d7; строки печатает верхний слой
+       ровно ОДИН раз при финальном отказе enumeration. */
+    uhci_log_flush();   /* закрыть серию "XFER ..." счётчиком, чтобы дамп был последним */
+    {
+        volatile uint32_t *ts = (volatile uint32_t *)control_tds;
+        volatile uint32_t *tt = (volatile uint32_t *)&control_tds[0].token;
+        (void)ts; (void)tt;
+        api_ptr->debug1 = control_tds[0].status;
+        api_ptr->debug2 = control_tds[1].status;
+        api_ptr->debug3 = control_tds[sidx].status;
+        api_ptr->debug4 = (uint32_t)(hc->dbg_swstamp / 1000u);      /* тысячи спинов */
+        api_ptr->debug5 = control_tds[0].token;                      /* должен быть 0x0080002D@addr0 */
+        api_ptr->debug6 = inw(hc->io_base + portsc_reg(hc->active_port <= 3 ? hc->active_port : 0));
+        api_ptr->debug7 = (uint32_t)result;
+        /* Счётчик NAK пересчитывается ИЗ ФЛАГОВ постфактум: раньше в d7 было
+          fffffffd (-3) — поле никогда не заполнялось. Если здесь видно много
+           NAK — устройство ОТВЕЧАЕТ, но тормозит (ждём/не готово): тогда
+           ретраи с паузами правильная стратегия. Если NAK=0 и CRC|BITSTUFF —
+           молчание/шум на wire: проблема питания/скорости/handoff. */
+        uint32_t nakcnt = 0;
+        for (uint32_t k = 0; k <= sidx; k++)
+            if (control_tds[k].status & TD_CTRL_NAK) nakcnt++;
+        api_ptr->last_error = nakcnt;
     }
 
     /* Компактный лог: классифицируем исход ОДНИМ кодом вместо потока

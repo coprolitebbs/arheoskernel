@@ -280,6 +280,8 @@ typedef struct {
        финальной ошибки restarts велико — HC гаснет регулярно (SMI/BIOS), и
        это подтверждает правильность выбранной защиты. */
     uint32_t dbg_restarts;
+    /* Счётчик радикальных восстановлений (uhci_hard_recovery, A118). */
+    uint32_t dbg_recoveries;
 } uhci_hc_t;
 
 typedef struct {
@@ -336,6 +338,10 @@ int  uhci_port_connected(uhci_hc_t *hc, int port);
    PR=1 на >=10ms, затем PR=0 и ждём PED=1 (до ~250мс). Возврат -2 означает,
    что порт не смог включиться (нет устройства / device D+ pull-up пропал). */
 int  uhci_reset_port(uhci_hc_t *hc, int port);
+/* A118: радикальное восстановление после серии неудачных транзактов —
+   GCR-сброс шины + re-enable всех подключённых портов + штатный reset порта.
+   Вызывается из usb_enumerate перед ПОСЛЕДНЕЙ попыткой GET_DESCRIPTOR. */
+int  uhci_hard_recovery(uhci_hc_t *hc, int port);
 uint16_t uhci_port_status(uhci_hc_t *hc, int port);
 
 /* Глобальный «активный» хост-контроллер: все TD/QH — единая статическая
