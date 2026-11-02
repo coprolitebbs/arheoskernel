@@ -220,13 +220,37 @@ int usb_enumerate(usb_hcd_t *hcd, int port, uint8_t new_addr,
             for (int i = 0; i < 25; i++) usb_hcd_delay_2ms(hcd);   // ~50 мс
         }
     }
+
+    /* A118: РАДИКАЛЬНОЕ ВОССТАНОВЛЕНИЕ. Серия из 5 GET_DESCRIPTOR провалилась
+       со статусом ISP|ISC|CRC+BITSTUFF при C_ERR=0 — это сигнатура «HC сам
+       сдался после лимита попыток», а не «устройство молчит». На обеих машинах
+       она НЕ меняется от программных ретраев, потому что состояние ep0/шины
+       сбрасывается только USB-reset'ом. Флешка на CF-18 до загрузки ОС
+       обслуживалась BIOS'ом в legacy-режиме и могла остаться с несогласованным
+       тогглом ep0; в QEMU аналогично — устройство подключено к виртуальному
+       хабу уже «живым». Делаем ровно то, что hub_port_init() в Linux после
+       исчерпания попыток: GCR-сброс шины + re-enable + port reset, и ОДИН
+       финальный GET_DESCRIPTOR. */
+    if (gd_r != 0 && hcd && hcd->type == HCD_UHCI && port >= 0) {
+        int rr = uhci_hard_recovery((uhci_hc_t *)hcd->priv, port);
+        api_ptr->load_screen_add_string("HARD REC r=%d", rr);
+        if (rr == 0) {
+            memset(dma_buffer, 0, 32);
+            gd_r = usb_get_device_desc(hcd, 0, (void *)dma_buffer, 8, 8);
+            api_ptr->load_screen_add_string("GET_DESC(8) after rec r=%d", gd_r);
+        }
+    }
+
     if (gd_r != 0) {
+        /* КОМПАКТНЫЙ ФИНАЛЬНЫЙ ЛОГ (A118): раньше печатались debug4/5 (оба
+           PORTSC — дубль) и setup/data/stat (TD0==TD_status — тоже дубль из-за
+           чтения TD0 до обработки). Теперь одна строка = полный дамп цепочки:
+           st(TD0)/st(DATA-TD)/st(STATUS-TD) + спины + токен TD0 + PORTSC.
+           По ней окончательно различаем: NAK-шторм vs шум на wire vs HC стоит. */
         api_ptr->debug4 = usb_hcd_port_status(hcd, port);
-        api_ptr->debug5 = usb_hcd_port_status(hcd, 0);
-        //api_ptr->debug6 = hcd->type;
-        api_ptr->load_screen_add_string("GET_DESC(8) r=%d setup=%x data=%x stat=%x",
-                                (int)api_ptr->debug7,
-                                api_ptr->debug8, api_ptr->debug6, api_ptr->debug9);
+        api_ptr->load_screen_add_string("GD8 FAIL r=%d td0=%x tdd=%x tds=%x",
+                                        (int)api_ptr->debug7,
+                                        api_ptr->debug1, api_ptr->debug2, api_ptr->debug3);
         return -12;
     }
 
