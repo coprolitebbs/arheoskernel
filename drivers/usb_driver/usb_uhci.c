@@ -1323,10 +1323,12 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
 
 void uhci_register_ptrs(void)
 {
-    frame_list_ptr    = uhci_frame_list;
-    control_qh_ptr    = &control_qh;
-    control_tds_ptr   = control_tds;
-    setup_static_ptr  = setup_static;
-    bulk_qh_ptr       = &bulk_qh;
-    bulk_tds_ptr      = bulk_tds;
+    frame_list_ptr   = uhci_frame_list;
+    /* БЫЛО: &control_qh / &bulk_qh — отдельные пустые структуры!
+       HC ходил по нулевой очереди. Пишем те же объекты, что используются в DMA: */
+    control_qh_ptr   = &g_control_queue.qh;
+    bulk_qh_ptr      = &g_bulk_queue.qh;
+    control_tds_ptr  = control_tds;
+    setup_static_ptr = setup_static;
+    bulk_tds_ptr     = bulk_tds;
 }
