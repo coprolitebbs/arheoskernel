@@ -94,6 +94,10 @@
 #define MAX_CONTROL_TDS   16
 #define MAX_BULK_TDS      64
 
+/* Максимум UHCI-контроллеров (PCI class 0x0C/0x03/prog-if 0).
+   Физические машины часто имеют 2 контроллера по 2 порта (ICH: USB#1/#2),
+   поэтому одного hc на весь драйвер не хватает. */
+#define UHCI_MAX_HC       4
 
 
 /* ---------------- Структуры UHCI (все выровнены на 16) ---------------- */
@@ -114,26 +118,35 @@ typedef struct {
     uint8_t  pci_bus;
     uint8_t  pci_dev;
     uint8_t  pci_func;
+    uint8_t  ports;       /* число root-портов (обычно 2) */
+    uint8_t  valid;       /* слот заполнен */
 } uhci_hc_t;
 
-extern uint8_t *frame_list_ptr;
-extern uhci_qh_t *control_qh_ptr;
-extern uhci_td_t *control_tds_ptr;
-extern uint8_t *setup_static_ptr;
-
-extern uhci_qh_t *bulk_qh_ptr;
-extern uhci_td_t *bulk_tds_ptr;
+/* Буферы HC выделяются статически под максимум контроллеров,
+   а uhci_hc_ptrs[] указывает на i-й элемент — так указатели
+   остаются валидными при повторном probe(). */
+extern uhci_hc_t *uhci_hc_ptrs[UHCI_MAX_HC];
+extern int        uhci_hc_count;
 
 /* PCI helpers */
 uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off);
 void     pci_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off, uint32_t val);
 
 /* UHCI API */
-int  uhci_probe(uhci_hc_t *hc);        /* найти UHCI в PCI, заполнить hc */
+int  uhci_probe_all(void);             /* найти ВСЕ UHCI-контроллеры в PCI */
 int  uhci_init(uhci_hc_t *hc);         /* сбросить и запустить HC */
 int  uhci_port_connected(uhci_hc_t *hc, int port);
 int  uhci_reset_port(uhci_hc_t *hc, int port);
 uint16_t uhci_port_status(uhci_hc_t *hc, int port);
+
+/* Инкрементальное планирование: все root-порты всех контроллеров
+   постоянно висят в Frame List, HC сам опрашивает их каждый кадр
+   (~1 мс). Перед SET_ADDRESS устройство должно быть сброшено
+   и отвечать на адрес 0 — иначе чужие TD с адресом 0 будут
+   перехватывать наши control-транзакции. */
+void uhci_ports_schedule_all(void);
+void uhci_ports_deschedule_all(void);
+void uhci_port_reset_hard(uhci_hc_t *hc, int port);
 
 /* Control transfer */
 int  uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr,

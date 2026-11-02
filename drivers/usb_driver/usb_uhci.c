@@ -16,36 +16,49 @@
  */
 
  /*
- * usb_uhci.c - UHCI Host Controller: PCI probe, reset, frame list,
- * port reset, control transfer. Этап 1: только по одному устройству
- * на root port, только control endpoint 0.
+ * usb_uhci.c - UHCI Host Controller: PCI probe (все контроллеры), reset,
+ * frame list, порты, control/bulk transfers.
+ *
+ * Мультиустройство:
+ *  - uhci_probe_all() находит ВСЕ UHCI-функции в PCI (на ICH их обычно
+ *    два: USB#1 и USB#2, по 2 root-порта на каждый);
+ *  - у каждого HC свой Frame List / QH / TD — кадры разных контроллеров
+ *    идут параллельно, устройства на разных HC не мешают друг другу;
+ *  - все root-порты постоянно висят в кадрах (port-QH очереди), HC сам
+ *    опрашивает их каждый кадр (~1 мс) и обрабатывает hotplug;
+ *  - перед SET_ADDRESS enumerated порт сбрасывается — устройство
+ *    отвечает только на адрес 0, а включение порта происходит строго
+ *    по TD из его собственной очереди, поэтому TD других устройств
+ *    (адреса 1..N) процесс enumeration не трогает.
  */
 
 #include "include/usb_uhci.h"
 #include "../../include-kernel/lib.h"
 #include "../../include-kernel/ports_io.h"
 
-/* ---------------- Статические UHCI-структуры ---------------- */
+/* ---------------- Статические UHCI-структуры на каждый HC ----------------
+   Всё в .bss драйвера (identity map: VA == PA). Динамически размечать
+   нельзя — HC требует физического адреса и 4K-выравнивания frame list. */
 
-/* Frame List: 1024 указателя по 4 байта, физическое выравнивание 4 KB.
-   В identity map нижней памяти физический адрес == виртуальный. */
-uint8_t frame_list[4096] __attribute__((aligned(4096)));
-uint8_t *frame_list_ptr;
-uhci_qh_t control_qh __attribute__((aligned(16)));
-uhci_qh_t *control_qh_ptr;
-uhci_td_t control_tds[MAX_CONTROL_TDS] __attribute__((aligned(16)));
-uhci_td_t *control_tds_ptr;
-uint8_t setup_static[8] __attribute__((aligned(16)));
-uint8_t *setup_static_ptr;
+uint8_t   frame_lists[UHCI_MAX_HC][4096] __attribute__((aligned(4096)));
+uhci_qh_t port_qhs[UHCI_MAX_HC][2]       __attribute__((aligned(16)));
+uhci_qh_t ctrl_qhs[UHCI_MAX_HC]          __attribute__((aligned(16)));
+uhci_qh_t bulk_qhs[UHCI_MAX_HC]          __attribute__((aligned(16)));
+uhci_td_t ctrl_tds[UHCI_MAX_HC][MAX_CONTROL_TDS] __attribute__((aligned(16)));
+uhci_td_t bulk_tds[UHCI_MAX_HC][MAX_BULK_TDS]    __attribute__((aligned(16)));
+uint8_t   setup_statics[UHCI_MAX_HC][8]  __attribute__((aligned(16)));
 
-/* Bulk transfer использует отдельный QH и свой пул TD.
-   Control и Bulk не конкурируют за одни и те же TD, но оба подвешиваются
-   в один и тот же Frame List — одновременно они не выполняются,
-   потому что вызовы синхронные. */
-uhci_qh_t bulk_qh __attribute__((aligned(16)));
-uhci_qh_t *bulk_qh_ptr;
-uhci_td_t bulk_tds[MAX_BULK_TDS] __attribute__((aligned(16)));
-uhci_td_t *bulk_tds_ptr;
+static uint8_t   *frame_list_of[UHCI_MAX_HC];
+static uhci_qh_t *port_qh_of[UHCI_MAX_HC];      /* &port_qhs[hc][0] */
+static uhci_qh_t *ctrl_qh_of[UHCI_MAX_HC];
+static uhci_qh_t *bulk_qh_of[UHCI_MAX_HC];
+static uhci_td_t *ctrl_td_of[UHCI_MAX_HC];
+static uhci_td_t *bulk_td_of[UHCI_MAX_HC];
+static uint8_t   *setup_of[UHCI_MAX_HC];
+
+uhci_hc_t        uhci_hcs[UHCI_MAX_HC];
+uhci_hc_t       *uhci_hc_ptrs[UHCI_MAX_HC];
+int              uhci_hc_count = 0;
 
 /* UHCI — bus-master, ему нужен физический адрес. Stack/driver .bss
    identity-mapped (VA==PA), но kmalloc-буферы живут по VA != PA.
@@ -89,22 +102,27 @@ void pci_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off, uint32_t v
 }
 
 
-/* ---------------- Probe ---------------- */
+/* ---------------- Probe всех UHCI ---------------- */
 
-int uhci_probe(uhci_hc_t *hc){
-    if (!hc) return -1;
-    memset(hc, 0, sizeof(*hc));
+int uhci_probe_all(void){
+    int n = 0;
 
-    for (uint16_t bus = 0; bus < 256; bus++){
-        for (uint8_t dev = 0; dev < 32; dev++){
-            for (uint8_t func = 0; func < 8; func++){
-                uint32_t id = pci_read32((uint8_t)bus, dev, func, 0x00);
-                if ((id & 0xFFFF) == 0xFFFF) continue;
+    for (uint16_t bus = 0; bus < 256 && n < UHCI_MAX_HC; bus++){
+        for (uint8_t dev = 0; dev < 32 && n < UHCI_MAX_HC; dev++){
+
+            /* function 0 обязана отвечать, иначе слот пуст */
+            uint32_t id0 = pci_read32((uint8_t)bus, dev, 0, 0x00);
+            if ((id0 & 0xFFFF) == 0xFFFF || (id0 & 0xFFFF) == 0) continue;
+
+            for (uint8_t func = 0; func < 8 && n < UHCI_MAX_HC; func++){
+                uint32_t id = (func == 0) ? id0
+                            : pci_read32((uint8_t)bus, dev, func, 0x00);
+                if ((id & 0xFFFF) == 0xFFFF || (id & 0xFFFF) == 0) continue;
 
                 uint32_t class = pci_read32((uint8_t)bus, dev, func, 0x08);
-                uint8_t base_cls = (class >> 24) & 0xFF;
-                uint8_t sub_cls  = (class >> 16) & 0xFF;
                 uint8_t prog_if  = (class >>  8) & 0xFF;
+                uint8_t sub_cls  = (class >> 16) & 0xFF;
+                uint8_t base_cls = (class >> 24) & 0xFF;
 
                 if (base_cls == PCI_CLASS_SERIAL_BUS &&
                     sub_cls  == PCI_SUBCLASS_USB &&
@@ -120,16 +138,26 @@ int uhci_probe(uhci_hc_t *hc){
                     cmd |= 0x05;
                     pci_write32((uint8_t)bus, dev, func, 0x04, cmd);
 
+                    uhci_hc_t *hc = &uhci_hcs[n];
+                    memset(hc, 0, sizeof(*hc));
                     hc->io_base  = io_base;
                     hc->pci_bus  = (uint8_t)bus;
                     hc->pci_dev  = dev;
                     hc->pci_func = func;
-                    return 0;
+                    hc->ports    = 2;          /* UHCI spec: 2 порта на контроллер */
+                    hc->valid    = 1;
+
+                    uhci_hc_ptrs[n] = hc;
+                    n++;
+                    /* Не останавливаемся: собираем ВСЕ контроллеры.
+                       На чипсетах типа ICH (Panasonic CF-18) их два,
+                       и флешка может висеть только на втором. */
                 }
             }
         }
     }
-    return -1;
+    uhci_hc_count = n;
+    return (n > 0) ? 0 : -1;
 }
 
 /* ---------------- Init ---------------- */
