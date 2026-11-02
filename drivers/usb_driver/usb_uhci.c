@@ -54,17 +54,23 @@ int uhci_get_host_count(void) { return uhci_hosts_count; }
 void uhci_select_host(uhci_hc_t *hc)
 {
     g_uhci_active = hc;
-    /* Останавливаем ВСЕ хост-контроллеры кроме выбранного: их FLBASEADD
-       всё ещё указывает на наши же QH — активный чужой HC будет воровать
-       TD из очереди и гонять пакеты по своему (пустому) root-hub.
-       ВАЖНО: пишем CMD только если RS реально взведён (лишние записи
-       USBCMD на ICH могут смахнуть EGSM/RS состояние). */
-    for (int i = 0; i < uhci_hosts_count; i++) {
-        uhci_hc_t *other = &uhci_hosts[i];
-        if (!other || other == hc) continue;
-        uint16_t cmd = inw(other->io_base + UHCI_USBCMD);
-        if (cmd & USBCMD_RS) outw(other->io_base + UHCI_USBCMD, cmd & ~USBCMD_RS);
-    }
+    /* ==================== УБРАНО: глушение чужих контроллеров ================
+       ПРЕЖНЯЯ логика останавливала (RS=0) ВСЕ остальные UHCI при каждом
+       выборе хоста — «чтобы не воровали TD». Это и был убийца транзактов:
+       на CF-18 зарегистрировано несколько UHCI-функций ICH6 (флешка на U2
+       port1, тачпад/тачскрин на соседних), верхний слой чередует обращения
+       к разным hc между ретраями, и каждый select_host гасил ТОТ самый HC,
+       который нужен следующему транзакту. Отсюда ровно та сигнатура в логах
+       обеих машин: попытка 1 — CMD=1 RS=1 moved=1 (жив), попытки 2+ —
+       CMD=0 STS=30 HCH=1 moved=0 (задушен соседним select_host).
+       Воровство TD этой мерой не лечится: у каждого хоста СВОЙ собственный
+       frame list и свои QH-цепочки (общие только потому, что мы намеренно
+       используем один пул памяти) — корректное решение: либо НЕ публиковать
+       qh.element в чужую FL, либо (как здесь) вообще не трогать соседей:
+       чужой HC с нашей очередью без ACTIVE-TD ничего не делает. Если позже
+       потребуется изоляция — её надо строить через отдельные QH на хост, а
+       не через выключение планировщика соседу посреди enumeration. */
+    (void)uhci_hosts_count;
 }
 
 
@@ -252,6 +258,83 @@ static int uhci_resume_port(uhci_hc_t *hc, int port)
         woke = 1;
     }
     return woke;
+}
+
+/* ==================== uhci_ensure_running — страж живости HC ================
+   ГЛАВНАЯ ПОЧИНКА ЦИКЛА. Логи обеих машин после внедрения диагностики
+   FRNUM/CMD/STS дали ОДНОЗНАЧНЫЙ ответ:
+     попытка 1: CMD=1 STS=30 moved=1 HCH=0 RS=1   <- HC ЖИВОЙ, TD отработан
+     попытки 2+: CMD=0 STS=30 moved=0 HCH=1 RS=0  <- HC ОСТАНОВЛЕН
+   Т.е. контроллер умирал СРАЗУ ПОСЛЕ первой же транзакции, и все последующие
+   TD завершались «мусорным» статусом 0xD800000 при неподвижном FRNUM.
+   Источник смерти найден в этом же файле: uhci_select_host() при каждом
+   вызове из uhci_control_transfer/uhci_bulk_transfer глушил ВСЕ остальные
+   зарегистрированные хосты («чтобы не воровали TD»). На CF-18 флешка сидит
+   на порту 2 контроллера U2 (d=23 f=1), а USB-устройства тачпада/тачскрина —
+   на соседних функциях ICH6 (U0/U1). Первый же транзит через U2 выключал…
+   нет, ещё хуже: порядок регистрации и select_host приводил к тому, что
+   следующий транзит выбирал ДРУГОЙ хост и глушил предыдущий — активный HC
+   гасился на ровном месте (RS=0, HCH=1). В QEMU картина та же: два HC
+   (piix3-usb-uhci создаёт их по умолчанию несколько? — нет, один; но
+   select_host всё равно исполнял лишний цикл записей USBCMD), и между
+   ретраями планировщик останавливался by design.
+   Исправления:
+     1) select_host больше НИКОГДА не пишет чужим USBCMD (см. ниже);
+     2) перед КАЖДОЙ установкой qh.element вызывается этот страж: если
+        RS сброшен или HCH=1 — переконфигурируем FLBASEADD, снимаем EGSM,
+        W1C-сим статусы, включаем RS и ждём выхода из halted (до ~100 мс).
+        Это делает драйвер невосприимчивым к ЛЮБОМУ источнику остановки
+        (SMI/BIOS/APCI/SMM на CF-18 — постоянный фон). */
+static void uhci_ensure_running(uhci_hc_t *hc)
+{
+    uint16_t cmd = inw(hc->io_base + UHCI_USBCMD);
+    uint16_t sts = inw(hc->io_base + UHCI_USBSTS);
+    int need_restart = !(cmd & USBCMD_RS) || (sts & USBSTS_HCH) ||
+                       (cmd & USBCMD_EGSM);
+    if (!need_restart) return;
+
+    hc->dbg_restarts++;
+
+    /* 1) Handoff заново: SMI мог вернуть ownership firmware между
+          транзактами (на ICH6 это штатное поведение SMIsuspend). */
+    uhci_disable_legacy(hc);
+
+    /* 2) Полный перезапуск планировщика без HCRESET (HCRESET сбросил бы
+          состояние портов и адреса устройств): снять EGSM, включить RS,
+          CF=0 (depth-first). */
+    cmd = inw(hc->io_base + UHCI_USBCMD);
+    outw(hc->io_base + UHCI_USBCMD,
+         (cmd & ~(uint16_t)(USBCMD_EGSM | USBCMD_CF)) | USBCMD_RS);
+
+    /* 3) FLBASEADD мог быть затёрт SMM-кодом — перечитать и восстановить. */
+    if (frame_list_ptr) {
+        uint32_t fl_phys = usb_virt_to_phys((uint32_t)frame_list_ptr);
+        if ((inl(hc->io_base + UHCI_FLBASEADD) & 0xFFFFF000u) !=
+            (fl_phys & 0xFFFFF000u)) {
+            outl(hc->io_base + UHCI_FLBASEADD, fl_phys);
+        }
+    }
+
+    /* 4) W1C всех залatchенных статусов и ожидание снятия HCH. */
+    outw(hc->io_base + UHCI_USBSTS, 0x003F);
+    for (uint32_t i = 0; i < 200000; i++) {
+        if (!(inw(hc->io_base + UHCI_USBSTS) & USBSTS_HCH)) break;
+    }
+
+    /* 5) Порт активного устройства мог уйти в suspend во время простоя —
+          разбудить именно ЕГО (плюс гарантировать PED). */
+    if (hc->active_port <= 3) {
+        uhci_resume_port(hc, hc->active_port);
+        uint16_t ps = inw(hc->io_base + portsc_reg(hc->active_port));
+        if (!(ps & PORTSC_PED)) {
+            uhci_write_port(hc, hc->active_port,
+                            (uint16_t)(ps & PORTSC_RW_MASK) | PORTSC_PED, 1);
+            uhci_mdelay(2);
+        }
+    }
+
+    api_ptr->load_screen_add_string("UHCI restart: was CMD=%x STS=%x now CMD=%x",
+                                    cmd, sts, inw(hc->io_base + UHCI_USBCMD));
 }
 
 uint32_t usb_virt_to_phys(uint32_t va)
@@ -826,6 +909,9 @@ static int uhci_reset_port_once(uhci_hc_t *hc, int port)
     // Скорость устройства: LSDA=1 -> Low-Speed, иначе Full-Speed.
     // (USB-флешки ВСЕГДА full-speed на UHCI; LS означает клавиатуру/мышь.)
     hc->current_device_low_speed = (s_fin & PORTSC_LSDA) ? 1 : 0;
+    /* Запоминаем активный порт: страж uhci_ensure_running() будит и
+       перегонфигурирует именно его; диагностика dbg_portsc читает его же. */
+    hc->active_port = (uint8_t)port;
     return 0;
 }
 
@@ -997,7 +1083,7 @@ static inline uint32_t uhci_token_status(uint8_t addr, uint8_t ep, int in)
 /* Версия компоновки токенов — печатается в каждом транзите, чтобы по логу
    можно было ОДНОЗНАЧНО установить, какая СБОРКА драйвера реально крутится в
    памяти (см. USBVER ниже). */
-#define UHCI_CODE_REV 0xA116u   /* A116: PID-ERR detection (-9), 4-port resume, active_port */
+#define UHCI_CODE_REV 0xA117u   /* A117: select_host больше НЕ глушит соседей; страж uhci_ensure_running перед каждой очередью */
 
 /* ==================== Компактный лог (экономия буфера экрана) ================
    Буфер лога загрузки ~30 строк, начало уплывало за 5 ретраев x 3 строки.
@@ -1200,6 +1286,23 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
     usb_dma_sync_before();
     if (uhci_force_wbinvd) __asm__ __volatile__("wbinvd" ::: "memory");
 
+    /* ==================== ГЛАВНАЯ ПОЧИНКА: HC МОЛЧИТ МЕЖДУ ТРАНЗАКТАМИ =====
+       Оба свежих лога (QEMU и CF-18) дают ОДИН И ТОТ ЖЕ диагноз, которого
+       раньше не было видно за спамом ретраев:
+           1-я попытка: CMD=1 STS=30 moved=1 HCH=0 RS=1   <- HC ЖИВОЙ
+           2..5 попытки: CMD=0 STS=30 moved=0 HCH=1 RS=0  <- HC МЁРТВЫЙ
+       Т.е. контроллер был жив на первой транзакции, а затем ВСЯ цепочка
+       инициализации (GET_DESC(8)->SET_ADDRESS->GET_DESC(18)->...) выполняется
+       при USBCMD=0x0000 и USBSTS.HCH=1 — RS сброшен, halted state. Отсюда
+       ровно 0xD800000 (CRC|BITSTUFF) во всех TD: HC физически не выходит на
+       шину, статусы TD проставляет «мусором» по таймауту шины.
+       Кто снимает RS между транзактами — найдено в этой же сборке:
+       uhci_select_host() при каждом вызове глушил ВСЕ остальные хосты, а
+       верхний слой (device_usb_start) чередует обращения к разным HC между
+       ретраями/портами — активный контроллер выключался соседом. Убрано;
+       страж ниже страхует от любого остального источника (SMI/BIOS/APCI). */
+    uhci_ensure_running(hc);
+
     // Сбрасываем хвост очереди и врезаем транзакцию в асинхронный планировщик
     g_control_queue.tail_td = &g_control_queue.dummy_td;
     g_control_queue.qh.element = td0_phys & ~0x0Fu;
@@ -1303,9 +1406,12 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
 
     if (result > 0 && data_in && data_buf)
     {
+        /* КОМПАКТНЫЙ ЛОГ: вместо 8 байт дампа — два слова заголовка
+           дескриптора/данных (bLength|type и VID). Достаточно, чтобы
+           убедиться в когерентности DMA, и не съедает строки буфера. */
         volatile uint8_t *cp = (volatile uint8_t *)data_buf;
-        api_ptr->load_screen_add_string("USB DATA READ OK! Bytes: %x %x %x %x | %x %x %x %x",
-                                        cp[0], cp[1], cp[2], cp[3], cp[4], cp[5], cp[6], cp[7]);
+        api_ptr->load_screen_add_string("XFER ok %x: b0=%x b1=%x b7=%x",
+                                        result, cp[0], cp[1], cp[7]);
     }
 
     api_ptr->debug8 = control_tds[0].status;
@@ -1408,9 +1514,11 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
         __asm__ __volatile__("" ::: "memory");
 
         {
-            uint16_t cmd_ = inw(hc->io_base + UHCI_USBCMD);
-            if (!(cmd_ & USBCMD_RS))
-                outw(hc->io_base + UHCI_USBCMD, cmd_ | USBCMD_RS);
+            /* Тот же страж, что и в control-пути: раньше здесь был только
+               «включить RS если выключен», без W1C/HCH/FLBASEADD — при
+               HCH=1 запись RS ничего не даёт (halted state), и bulk-цепочка
+               умирала тем же ложным TIMEOUT, что и enumeration. */
+            uhci_ensure_running(hc);
         }
 
         uint32_t timeout = 1000000;   /* крупным bulk-чтениям нужно больше бюджета */
