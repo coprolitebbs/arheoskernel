@@ -136,13 +136,22 @@
 
 /* Token (UHCI Spec Rev 1.1 §4.3.5):
    bits 0-7 PID | 8-14 ADDR(7b) | 15-18 ENDP(4b) | 19 DATA0/1
-   | 20-30 LEN (0x7FF = max, т.е. поле занимает БИТЫ 20..30!) */
+   | 20-30 LEN (0x7FF = max, т.е. поле занимает БИТЫ 20..30!)
+   ЭТАЛОН (hw/usb/hcd-uhci.c Linux, uhci_append_pid_token):
+   token = (len-1)<<20 | ep<<15 | addr<<8 | pid;
+   GET_DESCRIPTOR(8) на addr0: 0x0080072D.
+   КРИТИЧНО: компилятор обязан вычислять ((len-1) << TD_TOKEN_LEN_SHIFT)
+   ПРИ ВЫЧИСЛЕНИИ — для длины используется только макрос TD_TOKEN_SET_LEN,
+   который всегда сдвигает на 20 бит независимо от константы выше. */
 #define TD_TOKEN_PID_SHIFT  0
 #define TD_TOKEN_ADDR_SHIFT 8
 #define TD_TOKEN_EP_SHIFT   15
 #define TD_TOKEN_TOGGLE     (1u << 19)
 #define TD_TOKEN_LEN_SHIFT  20        // было 21 — на один бит левее, чем надо!
 #define TD_TOKEN_LEN_MASK   (0x7FFu << TD_TOKEN_LEN_SHIFT)
+/* Единственный способ положить длину в токен: макрос раскрывается на месте
+   использования, поэтому пересобирается всегда вместе с вызывающим файлом. */
+#define TD_TOKEN_SET_LEN(tokexpr, len_minus_1)  ((tokexpr) | ((uint32_t)(len_minus_1) << 20))
 
 #define TD_CTRL_C_ERR_1     (1u << 26)
 #define TD_CTRL_C_ERR_2     (2u << 26)

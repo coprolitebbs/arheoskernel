@@ -885,6 +885,13 @@ int uhci_reset_port(uhci_hc_t *hc, int port)
 /* Разобрать status-слова TD в человекочитаемый код ошибки.
    Возвращает: 0 = OK; иначе — отрицательный код, по которому upper-слой
    решает, что делать (NAK -> retry, STALL -> halt, CRC/timeout -> reset). */
+/* ВАЖНО: бит NAK (19) НЕ является ошибкой! UHCI Rev1.1 §4.3.3: HC выставляет
+   NAK как ИНФОРМАЦИЮ о том, что устройство ответило NAK (занято). Linux в
+   uhci_result_control трактует NAK как «успех фазы с коротким результатом» и
+   никогда не считает его ошибкой. Прежняя версия маппинга + программные
+   ретраи всей цепочки SETUP->DATA->STATUS после каждого NAK приводили к
+   гарантированному двойному DATA-пакету на ep0 (нарушение протокола -> реальный
+   STALL). Поэтому NAK здесь возвращает 0. */
 static int uhci_td_error_code(uint32_t st)
 {
     if (st & TD_CTRL_ACTIVE)   return -10; // всё ещё активно (не должно быть на выходе)
@@ -893,8 +900,51 @@ static int uhci_td_error_code(uint32_t st)
     if (st & TD_CTRL_BABBLE)   return -6;  // babble — устройство «болтает» по шине
     if (st & TD_CTRL_CRCTIMEO) return -7;  // CRC/Time-out — аппаратный таймаут фазы
     if (st & TD_CTRL_BITSTUFF) return -8;  // bit-stuffing ошибка на линии
-    return 0;
+    return 0;                              /* NAK/ISC/ISP — НЕ ошибки */
 }
+
+/* Побайтово перечитать TD из ПАМЯТИ (не из регистра) и собрать 32-битное
+   слово в прямом порядке. Если контроллер реально обработал TD, эти значения
+   ОБЯЗАНЫ совпасть с полями структуры. Расхождение = мы читаем НЕ ту память,
+   которую видит HC (двойная трансляция адресов / устаревший бинарник). */
+static uint32_t uhci_raw_dword(const void *p, uint32_t off)
+{
+    const volatile uint8_t *b = (const volatile uint8_t *)p + off;
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+           ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+/* ==================== Служебные конструкторы токенов ====================
+   ВАЖНО (UHCI Rev1.1 §4.3.5): в TOKEN-поле SETUP-пакета бит DATA toggle
+   (bit19) НЕ ИСПОЛЬЗУЕТСЯ и обязан быть 0. Раньше сюда через общую формулу
+   попадал toggle от DATA-стадии — на реальном ICH6 такой пакет отбрасывается.
+   Все поля собираются ЯВНЫМИ числами (без зависимости от констант сдвига),
+   чтобы по логу можно было сверить каждый бит. */
+static inline uint32_t uhci_token_setup(uint8_t addr)
+{
+    /* PID_SETUP=0x2D | addr<<8 | ep0 | toggle=0 | (8-1)<<20 => 0x0080002D@addr0 */
+    return (uint32_t)PID_SETUP | ((uint32_t)(addr & 0x7F) << 8) | (7u << 20);
+}
+
+static inline uint32_t uhci_token_data_pid(uint8_t addr, uint8_t ep, int in, uint32_t chunk)
+{
+    /* chunk==0 (zero-length) -> поле len = 0x7FF; иначе len = chunk-1 */
+    uint32_t lenfield = (chunk == 0) ? 0x7FFu : (chunk - 1u);
+    return (uint32_t)(in ? PID_IN : PID_OUT) | ((uint32_t)(addr & 0x7F) << 8) |
+           ((uint32_t)(ep & 0x0F) << 15) | (lenfield << 20);
+}
+
+static inline uint32_t uhci_token_status(uint8_t addr, uint8_t ep, int in)
+{
+    /* STATUS stage: token PID того направления, где идёт нулевой DATA1 */
+    return (uint32_t)(in ? PID_OUT : PID_IN) | ((uint32_t)(addr & 0x7F) << 8) |
+           ((uint32_t)(ep & 0x0F) << 15) | (1u << 19) | (0x7FFu << 20);
+}
+
+/* Версия компоновки токенов — печатается в каждом транзите, чтобы по логу
+   можно было ОДНОЗНАЧНО установить, какая СБОРКА драйвера реально крутится в
+   памяти (см. USBVER ниже). */
+#define UHCI_CODE_REV 0xA115u
 
 int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_pkt, void *data_buf, uint16_t data_len, int data_in, uint16_t max_pkt)
 {
@@ -961,13 +1011,13 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
        лишь добавляет HC лишних состояний; горизонтальная связь TD0->TD1
        работает и без него (так делает uhci-hcd Linux). */
     control_tds[0].link   = (td1_phys & ~0x0Fu);
-    /* IOC теперь на КАЖДОМ TD цепочки, включая SETUP: эмуляция QEMU
-       piix3-usb-uhci при отсутствии IOC на первом TD некорректно
-       «схлопывала» цепочку и поднимала ложный STALLED (r=-4). На реальном
-       ICH6 это безвредно — USBINTR замаскирован в 0. */
+    /* IOC на каждом TD цепочки — безопасно (USBINTR замаскирован в 0) и нужно,
+       чтобы QEMU/ICH корректно обновляли статус каждого TD. */
     control_tds[0].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_3 |
                             spd_field | ls_flag;
-    control_tds[0].token  = (PID_SETUP << TD_TOKEN_PID_SHIFT) | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) | (0u << TD_TOKEN_EP_SHIFT) | (7u << TD_TOKEN_LEN_SHIFT);
+    /* ТОКЕН SETUP: PID|addr|ep0|toggle=0|len=(8-1). Эталон для addr=0:
+       0x0080072D (Linux: uhci_append_pid_token(0x2D, 0, 0, 8)). */
+    control_tds[0].token  = uhci_token_setup(dev_addr);
     control_tds[0].buffer = setup_phys;
     hc->dbg_td0_token = control_tds[0].token;
 
@@ -977,7 +1027,10 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
         uint32_t idx = 1 + i;
         uint32_t off = i * max_pkt;
         uint32_t chunk = (data_len - off > max_pkt) ? max_pkt : (data_len - off);
-        uint32_t toggle = ((i & 1) == 0) ? TD_TOKEN_TOGGLE : 0u; // ep0 DATA: первый пакет PID_DATA1
+        /* ep0 после SETUP всегда начинает с DATA0 (toggle=0), далее
+           DATA0/DATA1 чередуются. Прежняя версия ставила ПЕРВЫМ DATA1 —
+           устройство отвечало STALL на рассогласованный тоггл. */
+        uint32_t toggle = ((i & 1) == 1) ? TD_TOKEN_TOGGLE : 0u;
 
         uint32_t next_idx = (i + 1 < num_data) ? (idx + 1) : (1 + num_data);
         uint32_t next_td_phys = usb_virt_to_phys((uint32_t)&control_tds[next_idx]);
@@ -985,10 +1038,7 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
         control_tds[idx].link = (next_td_phys & ~0x0Fu);
         control_tds[idx].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_3 |
                                   spd_field | ls_flag;
-        control_tds[idx].token = ((data_in ? PID_IN : PID_OUT) << TD_TOKEN_PID_SHIFT) |
-                                 ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
-                                 (0u << TD_TOKEN_EP_SHIFT) |
-                                 toggle | ((chunk - 1) << TD_TOKEN_LEN_SHIFT);
+        control_tds[idx].token = uhci_token_data_pid(dev_addr, 0, data_in, chunk) | toggle;
 
         uint32_t pa = usb_virt_to_phys((uint32_t)((uint8_t *)data_buf + off));
         if (pa == 0) return -1;
@@ -997,27 +1047,34 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr, const uint8_t *setup_
 
     // --- TD[sidx]: STATUS Stage ---
     uint32_t sidx = 1 + num_data;
-    uint32_t status_pid = has_data ? (data_in ? PID_OUT : PID_IN) : PID_IN;
 
     control_tds[sidx].link   = TD_LINK_TERM;
     control_tds[sidx].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_C_ERR_3 |
                                spd_field | ls_flag;
-    // STATUS stage всегда PID_DATA1 (toggle=1), длина 0 => поле length = 0x7FF
-    control_tds[sidx].token = (status_pid << TD_TOKEN_PID_SHIFT) |
-                              ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT) |
-                              (0u << TD_TOKEN_EP_SHIFT) |
-                              TD_TOKEN_TOGGLE | (0x7FFu << TD_TOKEN_LEN_SHIFT);
+    /* STATUS stage: направление ПРОТИВОПОЛОЖНОГО data-фазе, нулевой DATA1
+       (len field = 0x7FF). Для IN-транзакции это PID_OUT. */
+    control_tds[sidx].token  = uhci_token_status(dev_addr, 0, data_in);
     control_tds[sidx].buffer = setup_phys;
 
     uint32_t status_td_status_off = (uint32_t)&control_tds[sidx].status - (uint32_t)&control_tds[0];
 
     api_ptr->load_screen_add_string("UHCI DMA Map: QH=%x TD0=%x TD_stat_off=%x", qh_phys, td0_phys, status_td_status_off);
-    /* Проверка сборки токена SETUP-TD: ожидаем 0x0000072D для addr=0
-       (LEN=7<<20 | EP=0 | ADDR=0 | PID=0x2D). Если в логе видно другое —
-       сдвиг/маска LEN или PID неверны, и именно это даёт CRC/timeouts. */
-    api_ptr->load_screen_add_string("UHCI TD0 tok=%x sts=%x lnk=%x buf=%x",
+    /* Проверка сборки токена SETUP-TD: ожидаем 0x0080072D для addr=0
+       (LEN=7<<20 | EP=0 | ADDR=0 | PID=0x2D, toggle=0). Если видно другое —
+       в памяти ДРУГАЯ сборка драйвера (см. метку REV ниже). */
+    api_ptr->load_screen_add_string("UHCI TD0 tok=%x sts=%x lnk=%x buf=%x rev=%x",
                                     control_tds[0].token, control_tds[0].status,
-                                    control_tds[0].link, control_tds[0].buffer);
+                                    control_tds[0].link, control_tds[0].buffer,
+                                    (uint32_t)UHCI_CODE_REV);
+    /* Побайтовый дамп первых двух TD прямо из памяти — если байты не
+       соответствуют полям структуры, мы пишем НЕ в ту память, из которой HC
+       читает дескрипторы (двойная трансляция / устаревший образ в RAM). */
+    {
+        const volatile uint8_t *tb = (const volatile uint8_t *)&control_tds[0];
+        api_ptr->load_screen_add_string("UHCI TDraw %x %x %x %x | %x %x %x %x",
+                                        tb[0], tb[1], tb[2], tb[3],
+                                        tb[4], tb[5], tb[6], tb[7]);
+    }
 
     // Синхронизация записи дескрипторов перед тем, как HC их увидит
     usb_dma_sync_before();
