@@ -177,6 +177,11 @@
 #define PID_OUT     0xE1
 #define PID_DATA0   0xC3
 #define PID_DATA1   0x4B
+/* PID ERR (0xD2): кладётся HC в поле "error PID"/bit7 статуса TD, когда НИКАКОЙ
+   ответный PID не получен (device не отвечает / порты в suspend). Отличие от
+   CRCTIMEO-битов: биты 18/17 при этом МОЛЧАТ (QEMU uhci_write_td_status так и
+   делает) — поэтому их надо читать отдельно, а error-PID сравнивать с 0x5D. */
+#define PID_ERR     0xD2
 
 #define MAX_CONTROL_TDS   16
 #define MAX_BULK_TDS      64
@@ -215,6 +220,14 @@ typedef struct {
     uint32_t dbg_swstamp;                // программная "метка времени": сколько итераций
                                          // ожидания потребовалось (0..timeout). Если равно
                                          // timeout+1 — очередь вообще не двигалась (HC dead).
+    /* Диагностика ПОСЛЕДНЕГО заведомо-холостого транзакта ("ping" на адресе,
+       где устройства нет). Если ping завершается мгновенно с PID ERR +
+       Timeouts, а рабочий GET_DESCRIPTOR висит ACTIVE до таймаута — значит
+       HC физически общивает ДРУГОЙ порт (на ICH6 флешка сидит на портах
+       companion-контроллера dev 23 func 1, а не dev 29 func 0): */
+    uint32_t dbg_ping_status;            // status TD ping-цепочки целиком
+    uint32_t dbg_ping_spins;             // итерации ожидания ping (малы = HC жив)
+    int      dbg_ping_result;            // код возврата ping
 } uhci_hc_t;
 
 typedef struct {
