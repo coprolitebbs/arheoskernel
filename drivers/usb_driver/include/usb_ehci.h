@@ -22,6 +22,7 @@
 
 typedef struct {
     uint32_t mmio_base;   //физический MMIO base (BAR0)
+    uint32_t mmio_size;   //размер BAR0 по PCI size-probing (обычно 0x400)
     uint32_t op_base;     //mmio_base + CAPLENGTH (operational registers)
     uint32_t n_ports;
     int      initialized;
