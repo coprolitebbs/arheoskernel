@@ -59,9 +59,20 @@
 #define QTD_BYTES(t)       (((t) >> 16) & 0x7FFFu)
 #define QTD_ACTIVE         (1u << 7)
 #define QTD_IOC            (1u << 15)
-#define QTD_TOGGLE         (1u << 31)
-//#define	QTD_STS_HALT	(1 << 6)	//halted on error on real
-#define QTD_STS_HALT       (1u << 8)
+#define QTD_TOGGLE         (1u << 31)  //DCR (Data Toggle Control/Report)
+/* Статусные биты токена qTD по EHCI spec (Table 3-5):
+   bit 7 Active, bit 8 Halted, bits 9..10 Error Counter,
+   bits 12..14 Status (ErrCode), bit 15 IOC. */
+#define QTD_STS_HALT       (1u << 8)   //halted on error — по спеке это бит 8
+#define QTD_ERRCODE_SHIFT  12          //bits 12..14: 0=no err, 1=timeouts, 2=BDRE, 3=Babble, 4=BusError, 5=STalled
+#define QTD_KEC_SHIFT      9           //остаток error counter после retire
+
+static inline uint32_t qtd_errcode(uint32_t token){
+    return (token >> QTD_ERRCODE_SHIFT) & 0x7u;
+}
+static inline uint32_t qtd_kec(uint32_t token){
+    return (token >> QTD_KEC_SHIFT) & 0x3u;
+}
 
 //QH Endpoint Characteristics
 #define QH_EP_MAXPKT(m)    (((uint32_t)(m) & 0x7FFu) << 16)
@@ -149,8 +160,20 @@ static void mmio_write(ehci_hc_t *ehc, uint32_t off, uint32_t val){
 
 //---------------- Probe ----------------
 
+/* ICH (PI/LPC) bridge PCI config: dev 31, func 0.
+   SMIC (0xD8): bit 11 EHCI_SMI_EN, bit 10 USB_SMI_EN — пока BIOS/OS
+   владеет контроллерами через SMM, регистры могут вести себя странно.
+   USBPTD (0xE2): "USB Port Detect" — на ICH6/ICH7-M биты 0..3 =
+   presence detect портов UHCI#1/#2/#3/EHCI. По ним видно, на каком
+   контроллере реально висит флешка, ещё до инициализации HC. */
+#define ICH_LPC_DEV      31
+#define ICH_LPC_FUNC     0
+#define ICH_REG_SMIC     0xD8
+#define ICH_REG_USBPTD   0xE2
+
 int ehci_probe_all(void)
 {
+    uint32_t bar_size = 0;
     ehci_hc_count = 0;
     for (uint16_t bus = 0; bus < 256; bus++) {
         for (uint8_t dev = 0; dev < 32; dev++) {
@@ -174,6 +197,28 @@ int ehci_probe_all(void)
                 uint32_t mmio = bar0 & 0xFFFFFFF0;
                 if (!mmio) continue;
 
+                //Размер BAR по classic size-probing (сохранив оригинал).
+                //ICH6 EHCI обычно 4 КБ; если маппим меньше — хвост
+                //PORTSC читаться не будет.
+                pci_write32((uint8_t)bus, dev, func, 0x10, 0xFFFFFFFFu);
+                uint32_t sz_raw = pci_read32((uint8_t)bus, dev, func, 0x10);
+                pci_write32((uint8_t)bus, dev, func, 0x10, bar0);
+                bar_size = (sz_raw & 0xFFFFFFF0u);
+                bar_size = (~bar_size + 1u) & bar_size; //низкий set-бит = размер
+                if (bar_size < 0x100) bar_size = 0x1000; //fallback
+
+                //Снять SMI-перехват USB/EHCI у BIOS (ICH-специфично,
+                //безопасно: запись в чужой device просто игнорируется).
+                uint32_t smic = pci_read32((uint8_t)bus, dev, func, 0xDC);
+                smic &= ~((1u << 11) | (1u << 10));
+                pci_write32((uint8_t)bus, dev, func, 0xDC, smic);
+
+                //Presence detect с LPC-моста (ICH6): какие порты "живые".
+                uint32_t ptd = pci_read32(0, ICH_LPC_DEV, ICH_LPC_FUNC, ICH_REG_USBPTD);
+                if (api_ptr && api_ptr->load_screen_add_string)
+                    api_ptr->load_screen_add_string("EHCI probe %x:%x.%x VID=%x BAR=%x size=%x SMIC=%x PTD=%x",
+                                                    bus, dev, func, (id & 0xFFFF), mmio, bar_size, smic, ptd);
+
                 uint32_t cmd = pci_read32((uint8_t)bus, dev, func, 0x04);
                 cmd |= 0x06;   // Memory + Bus Master
                 pci_write32((uint8_t)bus, dev, func, 0x04, cmd);
@@ -181,6 +226,7 @@ int ehci_probe_all(void)
                 ehci_hc_t *ehc = &ehci_hcs[ehci_hc_count++];
                 memset(ehc, 0, sizeof(*ehc));
                 ehc->mmio_base = mmio;
+                ehc->mmio_size = bar_size;
             }
         }
     }
@@ -238,17 +284,21 @@ int ehci_init(ehci_hc_t *ehc)
 {
     if (!ehc) return -1;
 
-    //Map MMIO (uncached!)
+    //Map MMIO (uncached!). Размер — по реальному BAR (ICH6 EHCI = 4 КБ),
+    //округлённый вверх до страницы. 0x1000 могло не покрывать PORTSC
+    //последних портов на некоторых чипах.
+    uint32_t map_size = (ehc->mmio_size >= 0x800) ? ehc->mmio_size : 0x1000;
+    map_size = (map_size + 0xFFF) & ~0xFFFu;
     if (api_ptr->vmm_map_pages_uncached_ptr)
-        api_ptr->vmm_map_pages_uncached_ptr(ehc->mmio_base, 0x1000);
+        api_ptr->vmm_map_pages_uncached_ptr(ehc->mmio_base, map_size);
     else if (api_ptr->vmm_map_pages_ptr)
-        api_ptr->vmm_map_pages_ptr(ehc->mmio_base, 0x1000);
+        api_ptr->vmm_map_pages_ptr(ehc->mmio_base, map_size);
     else
         return -1;
 
     uint8_t cap_len = *(volatile uint8_t*)(ehc->mmio_base);
     if (cap_len == 0 || cap_len == 0xFF){
-        api_ptr->load_screen_add_string("EHCI cap_len=%x (bad)", cap_len);
+        api_ptr->load_screen_add_string("EHCI cap_len=%x (bad) mmio=%x", cap_len, ehc->mmio_base);
         return -2;
     }
     ehc->op_base = ehc->mmio_base + cap_len;
@@ -257,18 +307,35 @@ int ehci_init(ehci_hc_t *ehc)
     ehc->n_ports = hcs & 0x0F;
     if (ehc->n_ports == 0 || ehc->n_ports > 15) ehc->n_ports = 15;
 
+    //Сначала читаем состояние "как оставил BIOS": HCHalted/CFL.
+    //Если CFL==1 и RS==1 — BIOS сам держит все порты на EHCI и
+    //сбрасывать CF нельзя (companion-контроллеры могут быть выключены).
+    uint32_t sts0 = mmio_read(ehc, EHCI_USBSTS);
+    uint32_t cmd0 = mmio_read(ehc, EHCI_USBCMD);
+    uint32_t cf0  = mmio_read(ehc, EHCI_CONFIGFLAG);
+    api_ptr->load_screen_add_string("EHCI pre: CAP=%x HCS=%x CMD=%x STS=%x CF=%x",
+                                    cap_len, hcs, cmd0, sts0, cf0);
+    int bios_owned = (cf0 & CFG_ROUTE_ALL) && (cmd0 & CMD_RUN);
+
     //HCRESET
     mmio_write(ehc, EHCI_USBCMD, CMD_HCRESET);
-    for (int i = 0; i < 100000; i++){
+    for (int i = 0; i < 1000000; i++){
         if (!(mmio_read(ehc, EHCI_USBCMD) & CMD_HCRESET)) break;
     }
     //HCHalted должен установиться после reset
-    for (int i = 0; i < 100000; i++){
-        if (mmio_read(ehc, EHCI_USBSTS) & STS_HCHALTED) break;
+    int halted = 0;
+    for (int i = 0; i < 1000000; i++){
+        if (mmio_read(ehc, EHCI_USBSTS) & STS_HCHALTED){ halted = 1; break; }
+    }
+    if (!halted){
+        api_ptr->load_screen_add_string("EHCI HCREST stuck: CMD=%x STS=%x",
+                                        mmio_read(ehc, EHCI_USBCMD),
+                                        mmio_read(ehc, EHCI_USBSTS));
+        return -4;
     }
 
-    //Очистить статус
-    mmio_write(ehc, EHCI_USBSTS, 0x3F);
+    //Очистить статус (W1C — пишем единицы в установленные биты)
+    mmio_write(ehc, EHCI_USBSTS, mmio_read(ehc, EHCI_USBSTS));
     mmio_write(ehc, EHCI_USBINTR, 0);
     mmio_write(ehc, EHCI_CTRLDSSEG, 0);
 
@@ -314,8 +381,36 @@ int ehci_init(ehci_hc_t *ehc)
 
     mmio_write(ehc, EHCI_ASYNCLISTADDR, async_head_phys);
 
-    //CF=1: все порты маршрутизируются EHCI
-    mmio_write(ehc, EHCI_CONFIGFLAG, CFG_ROUTE_ALL);
+    //CF=1: все порты маршрутизируются EHCI.
+    //Исключение: если BIOS оставил EHCI запущенным с CFL=1, он сам
+    //распорядился портами (возможно, часть осознанно осталась на UHCI) —
+    //не трогаем CF, иначе можно "отобрать" порт у живого companion.
+    if (bios_owned){
+        api_ptr->load_screen_add_string("EHCI: BIOS owns ports (CF=1,RS=1) - keeping CF");
+    } else {
+        mmio_write(ehc, EHCI_CONFIGFLAG, CFG_ROUTE_ALL);
+    }
+
+    //Порты после смены ownership/сброса. Хак EHCI: PORTSC портов,
+    //оставшихся у companion-контроллера (PO=1), через MMIO EHCI читать
+    //нельзя — там будет мусор. Включаем только порты, реально принадлежащие
+    //EHCI; для остальных пишем ConfigRunFlag-зависимый idle (без записи
+    //PED в чужой порт).
+    for (uint32_t p = 1; p <= ehc->n_ports; p++){
+        uint32_t ps = mmio_read(ehc, EHCI_PORTSC(p));
+        if (!(ps & PSC_PO)){
+            //Порт наш. Если устройство подключено, но порт не включён
+            //(BIOS выключил или PHY в chirp) — включаем принудительно.
+            if ((ps & PSC_CCS) && !(ps & PSC_PED)){
+                mmio_write(ehc, EHCI_PORTSC(p),
+                           (ps | PSC_PED) & ~(PSC_CSC | PSC_PEDC));
+            }
+        }
+        api_ptr->load_screen_add_string("EHCI p%d PORTSC=%x pspd=%d po=%d",
+                                        (int)p, ps,
+                                        (int)((ps >> 26) & 3),
+                                        (ps & PSC_PO) ? 1 : 0);
+    }
 
     //Run + Async Schedule Enable
     uint32_t cmd = mmio_read(ehc, EHCI_USBCMD);
@@ -363,6 +458,14 @@ int ehci_port_reset(ehci_hc_t *ehc, int port)
         api_ptr->load_screen_add_string("ehci_pr p%d in=%x pspd=%d",
                                         port, ps0, (int)((ps0 >> 26) & 3));
 
+    //Порт принадлежит companion-контроллеру (PO=1)? EHCI трогать его
+    //PORTSC через MMIO не должен;Enumeration такого порта — задача UHCI.
+    if (ps0 & PSC_PO){
+        if (api_ptr && api_ptr->load_screen_add_string)
+            api_ptr->load_screen_add_string("ehci_pr p%d owned by companion", port);
+        return -3;
+    }
+
     if (!(ps0 & PSC_CCS)) return -1;
 
     //Assert PR=1.
@@ -372,17 +475,21 @@ int ehci_port_reset(ehci_hc_t *ehc, int port)
     //а EHCI hardware при CSC=1 держит порт disabled (PED=0).
     mmio_write(ehc, reg, ps0 | PSC_PR);
 
-    //Держим PR≥1 50 мс
+    //Держим PR=1 минимум 10 мс + 1 мс после снятия (USB spec TDRSTR/TDDSCN).
+    //get_ticks() возвращает тики по 10 мс (PIT 100 Гц)!
+    //Раньше ждали "< 5" тиков = 50 мс на assert и settle "< 50" = 500 мс
+    //на PED — запас был, но теперь делаем явно: assert 2 тика (20 мс),
+    //settle до 10 тиков (100 мс).
     uint32_t t0 = api_ptr->get_ticks();
-    while ((api_ptr->get_ticks() - t0) < 5) { (void)mmio_read(ehc, reg); }
+    while ((api_ptr->get_ticks() - t0) < 2) { (void)mmio_read(ehc, reg); }
 
     //Deassert PR=0, форсим PED=1. Если CSC/PEDC появились снова — очистятся.
     uint32_t ps = mmio_read(ehc, reg);
     mmio_write(ehc, reg, (ps & ~PSC_PR) | PSC_PED);
 
-    //Ждём PE=1
+    //Ждём PE=1 (после deassert нужно ~1 мс; даём до 100 мс)
     t0 = api_ptr->get_ticks();
-    while ((api_ptr->get_ticks() - t0) < 50){
+    while ((api_ptr->get_ticks() - t0) < 10){
         ps = mmio_read(ehc, reg);
         if (ps & PSC_PED){
             if (api_ptr && api_ptr->load_screen_add_string)
@@ -390,6 +497,7 @@ int ehci_port_reset(ehci_hc_t *ehc, int port)
                                                 port, ps, (int)((ps >> 26) & 3));
             return 0;
         }
+        __asm__ __volatile__("pause");
     }
     if (api_ptr && api_ptr->load_screen_add_string)
         api_ptr->load_screen_add_string("ehci_pr p%d timeout=%x", port, ps);
