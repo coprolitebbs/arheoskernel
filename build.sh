@@ -49,7 +49,7 @@ if command -v i686-elf-gcc &> /dev/null; then
     DRVFLAGS="-m32 -march=i386 -ffreestanding -fno-common -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables"
     #USER_CCFLAGS="-m32 -march=i386 -ffreestanding -nostdlib -fno-stack-protector -fno-pie -mstringop-strategy=loop -fno-builtin"
     USER_CCFLAGS="-m32 -march=i386 -ffreestanding -nostdlib -Os -fno-stack-protector -fno-toplevel-reorder -fno-pie -fno-common -mstringop-strategy=loop -fno-builtin -DCOMPILE_BIN -DARHEOS_OS"
-    USER_CCFLAGS_ELF="-m32 -march=i386 -ffreestanding -fPIE -fno-stack-protector -fno-builtin -DARHEOS_OS"
+    USER_CCFLAGS_ELF="-m32 -march=i386 -ffreestanding -fPIE -fno-stack-protector -fno-builtin -Os -DARHEOS_OS"
     USER_LDFLAGS_ELF="-m elf_i386 -pie -e _start"
 
 else
@@ -131,7 +131,7 @@ $CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_uhci.c  -o bin/usb_uhci.o
 $CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_msc.c  -o bin/usb_msc.o
 #$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_hub.c  -o bin/usb_hub.o
 #$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_hcd.c  -o bin/usb_hcd.o
-#$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/ehci_core.c  -o bin/ehci_core.o
+$CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_ehci.c  -o bin/usb_ehci.o
 $CC $DRVFLAGS -fno-pie -c drivers/usb_driver/usb_driver.c  -o bin/usb_driver.o
 nasm -f elf32 drivers/usb_driver/usb_start.asm -o bin/usb_start.o
 
@@ -158,7 +158,7 @@ bin/block_start.o bin/block_driver.o bin/drv_ports_io.o bin/dlib.o -o bin/block_
 #bin/ehci_core.o bin/usb_driver.o bin/drv_ports_io.o bin/dlib.o -o bin/usb_driver.elf
 
 $LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
-bin/usb_start.o bin/usb_core.o bin/usb_uhci.o bin/usb_msc.o bin/usb_driver.o \
+bin/usb_start.o bin/usb_core.o bin/usb_uhci.o bin/usb_msc.o bin/usb_ehci.o bin/usb_driver.o \
  bin/drv_ports_io.o bin/dlib.o -o bin/usb_driver.elf
 
 
@@ -223,7 +223,8 @@ $CC $USER_CCFLAGS_ELF -c userspace/examples/scanf_check/scanf_check.c -o bin/u_s
 
 #Утилиты
 #Командный процессор sekhmet
-$CC $USER_CCFLAGS -c "userspace/system procs/sekhmet/sekhmet.c" -o bin/u_sekhmet.o
+#$CC $USER_CCFLAGS -c "userspace/system procs/sekhmet/sekhmet.c" -o bin/u_sekhmet.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/sekhmet/sekhmet.c" -o bin/u_sekhmet.o
 #horus
 $CC $USER_CCFLAGS -c "userspace/system procs/chorus/chorus.c" -o bin/u_chorus.o
 #halt
@@ -251,6 +252,8 @@ $CC $USER_CCFLAGS_ELF -c "userspace/system procs/thoth/platform_arheos.c" -o bin
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/lsusb/lsusb.c" -o bin/u_lsusb.o
 #arfetch
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/arfetch/arfetch.c" -o bin/u_arfetch.o
+#df
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/df/df.c" -o bin/u_df.o
 
 # Линк flat-бинарника без ELF-заголовков
 # Базовый адрес -Ttext 0x40000000 совпадает с картой памяти процессов.
@@ -265,9 +268,9 @@ $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_arr_test.o -o bin
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_scanf_check.o -o bin/sc_test.elf
 
 
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 \
--e _start bin/u_std.o bin/u_memory.o bin/u_lib.o bin/u_uconfig.o bin/u_sekhmet.o \
-bin/u_uimage.o -o bin/sekhmet.bin
+#$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 \
+#-e _start bin/u_std.o bin/u_memory.o bin/u_lib.o bin/u_uconfig.o bin/u_sekhmet.o \
+#bin/u_uimage.o -o bin/sekhmet.bin
 $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_chorus.o -o bin/chorus.bin
 $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_halt.o -o bin/halt.bin
 $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_cat.o bin/u_lib.o -o bin/cat.bin
@@ -278,9 +281,11 @@ $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x400
 $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_mkdir.o -o bin/mkdir.bin
 $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_rmdir.o -o bin/rmdir.bin
 $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_lib.o bin/u_memory.o bin/u_uimage.o bin/u_setbg.o -o bin/setbg.bin
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_uconfig_elf.o bin/u_uimage_elf.o bin/u_sekhmet.o -o bin/sekhmet.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_thoth.o bin/u_thoth_platform.o -o bin/thoth.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lsusb.o -o bin/lsusb.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_uimage_elf.o bin/u_arfetch.o -o bin/arfetch.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_lib_elf.o bin/u_df.o -o bin/df.elf
 
 #clear
 #rm -f bin/*.o
@@ -322,7 +327,7 @@ create_fat_image() {
     #mcopy -i "$IMG" bin/kb_check.bin ::/USBIN/
     #mcopy -i "$IMG" bin/allocram.bin ::/USBIN/
     mmd -i "$IMG" ::/BIN
-    mcopy -i "$IMG" bin/sekhmet.bin ::/BIN/
+    mcopy -i "$IMG" bin/sekhmet.elf ::/BIN/
     mcopy -i "$IMG" bin/halt.bin ::/BIN/
     #mcopy -i "$IMG" bin/hello.bin ::/BIN/
     mcopy -i "$IMG" bin/chorus.bin ::/BIN/
@@ -337,6 +342,7 @@ create_fat_image() {
     mcopy -i "$IMG" bin/thoth.elf ::/BIN/
     mcopy -i "$IMG" bin/lsusb.elf ::/BIN/
     mcopy -i "$IMG" bin/arfetch.elf ::/BIN/
+    mcopy -i "$IMG" bin/df.elf ::/BIN/
 
     mmd -i "$IMG" ::/CONFIG
     mmd -i "$IMG" ::/CONFIG/BOOT
@@ -428,7 +434,7 @@ e2cp bin/kb_check.bin tmp_ext2.img:/usbin/kb_check.bin
 e2cp bin/arr_test.elf tmp_ext2.img:/usbin/arr_test.elf
 e2cp bin/sc_test.elf tmp_ext2.img:/usbin/sc_test.elf
 
-e2cp bin/sekhmet.bin tmp_ext2.img:/bin/sekhmet.bin
+e2cp bin/sekhmet.elf tmp_ext2.img:/bin/sekhmet.elf
 e2cp bin/halt.bin tmp_ext2.img:/bin/halt.bin
 e2cp bin/hello.bin tmp_ext2.img:/bin/hello.bin
 e2cp bin/chorus.bin tmp_ext2.img:/bin/chorus.bin
@@ -443,6 +449,7 @@ e2cp bin/setbg.bin tmp_ext2.img:/bin/setbg.bin
 e2cp bin/thoth.elf tmp_ext2.img:/bin/thoth.elf
 e2cp bin/lsusb.elf tmp_ext2.img:/bin/lsusb.elf
 e2cp bin/arfetch.elf tmp_ext2.img:/bin/arfetch.elf
+e2cp bin/df.elf tmp_ext2.img:/bin/df.elf
 
 e2mkdir tmp_ext2.img:/config
 e2mkdir tmp_ext2.img:/config/boot
@@ -484,14 +491,14 @@ echo -e "${GREEN}Все образы собраны в output/${NC}"
 # ---- Запуск QEMU с дискетой или hdd ----
 #qemu-system-i386 -drive file=output/fat12_720.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 #qemu-system-i386 -drive file=output/fat12_1440.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
-#qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 
 #USB FLOPPY drive
 #qemu-system-i386 -boot order=a -drive file=output/fat12_1440.img,format=raw,if=floppy -device piix3-usb-uhci -drive id=usbdisk,file=output/fat12_1440_usb.img,if=none,format=raw -device usb-storage,drive=usbdisk -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
-#USB hard drive UHCI
-qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+#USB hard drive UHCI on image
+#qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 #USB EHCI
 #qemu-system-i386 -device usb-ehci,id=ehci -device usb-hub,bus=ehci.0,port=1,usb_version=2,id=hub2 -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-bot,bus=hub2.0,port=2,id=bot -device scsi-hd,bus=bot.0,drive=usbdisk,channel=0,scsi-id=0,lun=0 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
@@ -504,10 +511,21 @@ qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=output/usbimage.i
 #qemu-system-i386 -M pc -readconfig docs/config/ich9-ehci-uhci.cfg -drive if=none,id=usbstick,format=raw,file=output/usbimage.img -device usb-storage,bus=ehci.0,drive=usbstick -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 
-#qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9 -trace enable=usb_uhci* -trace enable=usb_desc* -D ./uhci.log
-sudo qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+#qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+#sudo qemu-system-i386 -device piix3-usb-uhci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 #sudo qemu-system-i386 -device ich9-usb-ehci1,id=ehci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,bus=ehci.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 #sudo qemu-system-i386 -device qemu-xhci,id=xhci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,bus=xhci.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+
+#QEMU with many uhci devs
+qemu-system-i386 -device piix3-usb-uhci -device usb-kbd -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk -vga std -m 1536 -debugcon stdio  -global isa-debugcon.iobase=0xe9
+
+#QEMU 2 storage UHCI
+#qemu-system-i386 -device piix3-usb-uhci -drive id=d1,file=output/usbimage.img,if=none,format=raw -drive id=d2,file=output/fat12_1440_usb.img,if=none,format=raw -device usb-storage,drive=d1 -device usb-storage,drive=d2 -vga std -m 1536 -debugcon stdio -global isa-debugcon.iobase=0xe9
+
+#QEMU virtual EHCI hub with flash device & usb-bot
+#sudo qemu-system-i386 -device ich9-usb-ehci1,id=ehci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-bot,bus=ehci.0,id=bot1 -device scsi-hd,bus=bot1.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+
+#../bochs/Bochs-USB-Edition/bochs/bochs -f ./bochsrc.txt -q
 
 
 #file bin/kernel.elf

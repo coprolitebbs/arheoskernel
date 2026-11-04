@@ -75,6 +75,12 @@ int vfs_rmdir(const char *path);
 int vfs_stat(const char *path, fs_stat_t *st);
 void vfs_resolve_relative_path(const char *user_path, char *out_absolute_path);
 
+//существующий VFS_STATUS_*
+int vfs_get_mount_count(void);
+int vfs_get_mount_info(int index, char *mount_point_out, uint32_t mp_max,
+                       uint32_t *drive_id, const char **fs_name,
+                       fs_statfs_t *statfs);
+
 int vfs_init_system(void);
 int vfs_shutdown_system(void);
 

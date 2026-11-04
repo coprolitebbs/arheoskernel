@@ -210,7 +210,17 @@ void vmm_map_page(page_directory_t *dir, uint32_t virt, uint32_t phys, uint32_t 
 }
 
 
-
+//Маппит MMIO-регион как некэшируемый (PCD + PWT). Нужно для регистров
+//контроллеров (EHCI), чтобы CPU не читал устаревшие значения из кэша.
+void vmm_map_pages_uncached(uint32_t phys, uint32_t size){
+    if (phys == 0 || size == 0) return;
+    for (uint32_t offset = 0; offset < size; offset += PAGE_SIZE) {
+        uint32_t p_addr = phys + offset;
+        uint32_t v_addr = phys + offset;
+        vmm_map_page(kernel_directory, v_addr, p_addr,
+                     PAGE_PRESENT | PAGE_WRITE | PAGE_PCD | PAGE_PWT);
+    }
+}
 
 
 // Удаление отображения

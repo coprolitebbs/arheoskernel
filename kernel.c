@@ -187,7 +187,7 @@ void _start(void){
     //find_and_prepare_s3_trio64();
 
     uint32_t fb_phys = graphics_get_fb_phys_addr();
-    uint32_t fb_size = has_lfb ? boot_info->pitch * boot_info->height : (4 * 1024 * 1024);
+    uint32_t fb_size = has_lfb ? boot_info->pitch * boot_info->height : (16 * 1024 * 1024);
 
     //uint32_t vga_phys = 0x000A0000;
     //uint32_t vga_size = 0x00020000;

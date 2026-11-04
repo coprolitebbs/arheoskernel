@@ -1299,7 +1299,7 @@ void kernel_init_thread(void){
     //task_spawn_from_file("/usbin/kb_check.bin", 0x40000000, NULL);
     //task_spawn_from_file("/usbin/allocram.bin", 0x40000000, "512");
 
-    task_spawn_from_file("/bin/sekhmet.bin", 0x40000000, NULL);
+    task_spawn_from_file("/bin/sekhmet.elf", 0x40000000, NULL);
     //vmm_stress_test_cross_pde();
     //current_task = ready_queue;
 

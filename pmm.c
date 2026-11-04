@@ -373,7 +373,7 @@ size_t pmm_get_total_memory(void){
     return total_pages * PAGE_SIZE;
 }
 
-
+/*
 void graphics_init_uma_address(uint32_t total_mem, int lfb_available, uint32_t lfb_addr_from_boot){
     //com_init(); //Инициализируем COM сразу
     //com_puts("[GRAPHICS] Init UMA address...\n");
@@ -390,26 +390,26 @@ void graphics_init_uma_address(uint32_t total_mem, int lfb_available, uint32_t l
     //com_puts("[GRAPHICS] LFB not available. Calculating UMA address...\n");
 
     uint32_t candidate_addr = 0;
-
-    /*
-    if (total_mem > 0x00400000){
-        candidate_addr = total_mem - 0x00300000; // 4MB VRAM
-
-        fb_phys_addr = candidate_addr;
-        fb_virt_addr = candidate_addr; // Identity map
-        has_lfb = 1; // Считаем, что теперь у нас есть линейный доступ
-
-        //com_puts("[GRAPHICS] UMA FB Phys: 0x");
-        //com_puthex(fb_phys_addr);
-        //com_puts(", Virt: 0x");
-        //com_puthex(fb_virt_addr);
-        //com_puts("\n");
-        //com_puts("[GRAPHICS] Linear mode bit set in MSR. Direct access enabled.\n");
-    } else {
-        //com_puts("[GRAPHICS] ERROR: Not enough memory for UMA.\n");
-    }*/
 }
+*/
+void graphics_init_uma_address(uint32_t total_mem, int lfb_available, uint32_t lfb_addr_from_boot){
+    /* Доверяем адресу от загрузчика, даже если флаг LFB в graphics_flags
+       не выставлен. Причина: некоторые BIOS (в т.ч. VGABIOS-lgpl в Bochs)
+       успешно активируют LFB, но не выставляют/неправильно сообщают флаг
+       VBE mode attributes. Если lfb_addr от stage2 ненулевой — значит,
+       PhysBasePtr был валидным, и писать туда безопасно.
+       Платформы без LFB (VGA text) присылают lfb_addr = 0 — их не задеваем. */
+    if (lfb_addr_from_boot != 0){
+        fb_phys_addr = lfb_addr_from_boot;
+        fb_virt_addr = lfb_addr_from_boot;
+        has_lfb = 1;
+        return;
+    }
 
+    /* Fallback: попытка вычислить UMA (оставлено как было) */
+    (void)total_mem;
+    (void)lfb_available;
+}
 
 
 uint32_t graphics_get_fb_phys_addr(){

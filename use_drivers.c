@@ -23,6 +23,7 @@
 #include "include-kernel/isr.h"
 #include "include-kernel/lib.h"
 #include "include-kernel/vmm.h"
+#include "include-kernel/pmm.h"
 #include "include-kernel/task.h"
 #include "include-kernel/kernel_heap.h"
 #include "include-kernel/kconsole.h"
@@ -53,6 +54,38 @@ usb_stack_driver_api_t *usb_driver_api = 0;
 static const void *kernel_get_active_locale(void){
     return (const void *)locale_get_active();
 }
+
+
+/* Универсальный USB DMA-аллокатор.
+   Возвращает физически непрерывный блок, identity-mapped в VA-пространство
+   ядра (а значит — и в адресное пространство драйвера, который живёт в
+   том же CR3). Используется драйвером для QH/TD и больших transfer-буферов. */
+static void *kernel_usb_dma_alloc(uint32_t size, uint32_t *phys_out){
+    if (size == 0 || !phys_out) return NULL;
+    uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint32_t phys  = (uint32_t)pmm_alloc_pages(pages);
+    if (!phys) return NULL;
+
+    /* pmms возвращает физический адрес. На текущей архитектуре ядра
+       identity-map покрывает всю RAM, поэтому VA == PA. Для будущей
+       поддержки IOMMU/некогерентной памяти здесь будет vmm_map_page +
+       cache flush, но интерфейс уже правильный. */
+    *phys_out = phys;
+    return (void*)phys;
+}
+
+static void kernel_usb_dma_free(void *virt, uint32_t size){
+    if (!virt || size == 0) return;
+    uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    pmm_free_pages(virt, pages);
+}
+
+
+/* Тики ядра для драйверов: PIT-счётчик, 100 Гц. Просто читаем глобал. */
+static uint32_t kernel_get_ticks(void){
+    return tick_count;
+}
+
 
 
 void drivers_init(void){
@@ -125,6 +158,7 @@ void drivers_init(void){
         usb_driver_api->schedule_lock_ptr = &kernel_schedule_lock;
         usb_driver_api->block = blockdevice_driver;
         usb_driver_api->vmm_map_pages_ptr = vmm_map_pages;
+        usb_driver_api->vmm_map_pages_uncached_ptr = vmm_map_pages_uncached;
         usb_driver_api->malloc_ptr = kmalloc;
         usb_driver_api->free_ptr   = kfree;
         usb_driver_api->yield_ptr = sys_yield;
@@ -132,27 +166,32 @@ void drivers_init(void){
         usb_driver_api->debug8 = 0;
         usb_driver_api->debug9 = 0;
         usb_driver_api->load_screen_add_string = load_screen_add_string;
+        usb_driver_api->dma_alloc_ptr = kernel_usb_dma_alloc;
+        usb_driver_api->dma_free_ptr = kernel_usb_dma_free;
+        usb_driver_api->get_ticks = kernel_get_ticks;
 
         //load_screen_add_string("clearing registry");
         usb_registry_clear();
 
         //load_screen_add_string("Starting usb");
         int res = usb_driver_api->usb_start();
+        (void)res;
 
-        //load_screen_add_string("Enumerating usb devs");
+         /* Драйвер сам заполняет devices[] и device_count.
+           Ядро просто перекладывает записи в реестр. */
         for (uint32_t i = 0; i < usb_driver_api->device_count; i++){
             usb_registry_add(&usb_driver_api->devices[i]);
         }
 
 
         load_screen_add_string("USB dev: VID=%x PID=%x class=%x",usb_driver_api->vid, usb_driver_api->pid,usb_driver_api->dev_class);
-        load_screen_add_string("USB dbg: d1=%x d2=%x d3=%x",
-    usb_driver_api->debug1, usb_driver_api->debug2, usb_driver_api->debug3);
-        load_screen_add_string("USB dbg2: d4=%x d5=%x d6=%x d7=%x",
-    usb_driver_api->debug4, usb_driver_api->debug5,
-    usb_driver_api->debug6, usb_driver_api->debug7);
-        load_screen_add_string("USB dbg3: d8=%x d9=%x",
-    usb_driver_api->debug8, usb_driver_api->debug9);
+        load_screen_add_string("USB: %d device(s) enumerated",usb_driver_api->device_count);
+        load_screen_add_string("USB p0 step=%d res=%x vp=%x dc=%x",
+            (int)usb_driver_api->debug1, usb_driver_api->debug2,
+            usb_driver_api->debug5, usb_driver_api->debug6);
+        load_screen_add_string("USB p1 step=%d res=%x vp=%x dc=%x",
+            (int)usb_driver_api->debug3, usb_driver_api->debug4,
+            usb_driver_api->debug7, usb_driver_api->debug8);
         //load_screen_add_string("USB last error: %x",usb_driver_api->last_error);
         //if (usb_driver_api->block_id != 0xFFFFFFFFu && usb_driver_api->device_count > 0)
             //load_screen_add_string("USB registered as block id=%d", usb_driver_api->block_id);

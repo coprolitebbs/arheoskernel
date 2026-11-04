@@ -14,7 +14,7 @@
 				<Option compiler="null" />
 			</Target>
 		</Build>
-		<Unit filename="bochsrc" />
+		<Unit filename="bochsrc.txt" />
 		<Unit filename="boot_1440.asm" />
 		<Unit filename="boot_720.asm" />
 		<Unit filename="boot_hdd.asm" />
@@ -86,14 +86,9 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="drivers/kbd_driver/kbd_start.asm" />
-		<Unit filename="drivers/usb_driver/ehci_core.c">
-			<Option compilerVar="CC" />
-		</Unit>
-		<Unit filename="drivers/usb_driver/include/ehci_priv.h" />
 		<Unit filename="drivers/usb_driver/include/usb_core.h" />
 		<Unit filename="drivers/usb_driver/include/usb_driver.h" />
-		<Unit filename="drivers/usb_driver/include/usb_hcd.h" />
-		<Unit filename="drivers/usb_driver/include/usb_hub.h" />
+		<Unit filename="drivers/usb_driver/include/usb_ehci.h" />
 		<Unit filename="drivers/usb_driver/include/usb_msc.h" />
 		<Unit filename="drivers/usb_driver/include/usb_uhci.h" />
 		<Unit filename="drivers/usb_driver/usb_core.c">
@@ -102,10 +97,7 @@
 		<Unit filename="drivers/usb_driver/usb_driver.c">
 			<Option compilerVar="CC" />
 		</Unit>
-		<Unit filename="drivers/usb_driver/usb_hcd.c">
-			<Option compilerVar="CC" />
-		</Unit>
-		<Unit filename="drivers/usb_driver/usb_hub.c">
+		<Unit filename="drivers/usb_driver/usb_ehci.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="drivers/usb_driver/usb_msc.c">
@@ -259,6 +251,7 @@
 		<Unit filename="userspace/filesystem/config/sekhmet/config.cfg" />
 		<Unit filename="userspace/filesystem/config/sekhmet/sekhmet.hlp" />
 		<Unit filename="userspace/include/fileattrs.h" />
+		<Unit filename="userspace/include/mount_structures.h" />
 		<Unit filename="userspace/include/syscall.h" />
 		<Unit filename="userspace/include/uconfig.h" />
 		<Unit filename="userspace/include/udevices.h" />
@@ -289,6 +282,9 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/chorus/chorus.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/df/df.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/free/free.c">

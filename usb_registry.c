@@ -16,9 +16,11 @@
  */
 
 #include "include-kernel/usb_registry.h"
-//#include "userspace/include/udevices_struct.h"
+#include "userspace/include/udevices_struct.h"
 #include "include-kernel/lib.h"
 
+
+/*
 static usb_dev_record_t g_usb_devs[USB_REGISTRY_MAX];
 static int g_usb_devs_count = 0;
 
@@ -37,6 +39,29 @@ int usb_registry_add(const usb_dev_record_t *rec){
 int usb_registry_count(void){
     return g_usb_devs_count;
 }
+
+int usb_registry_get(int idx, usb_dev_record_t *out){
+    if (idx < 0 || idx >= g_usb_devs_count || !out) return -1;
+    *out = g_usb_devs[idx];
+    return 0;
+}
+*/
+static usb_dev_record_t g_usb_devs[USB_REGISTRY_MAX];
+static int g_usb_devs_count = 0;
+
+void usb_registry_clear(void){
+    memset(g_usb_devs, 0, sizeof(g_usb_devs));
+    g_usb_devs_count = 0;
+}
+
+int usb_registry_add(const usb_dev_record_t *rec){
+    if (!rec) return -1;
+    if (g_usb_devs_count >= USB_REGISTRY_MAX) return -1;
+    g_usb_devs[g_usb_devs_count++] = *rec;
+    return g_usb_devs_count - 1;
+}
+
+int usb_registry_count(void){ return g_usb_devs_count; }
 
 int usb_registry_get(int idx, usb_dev_record_t *out){
     if (idx < 0 || idx >= g_usb_devs_count || !out) return -1;

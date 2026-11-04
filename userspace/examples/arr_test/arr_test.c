@@ -26,7 +26,8 @@
 // под неинициализированные данные и занулил ли их Ring 0.
 int global_static_array[ARRAY_SIZE];
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
     (void)argc;
     (void)argv;
 
@@ -38,7 +39,8 @@ int main(int argc, char *argv[]) {
     printf("\x1B[32;44m\x1B[10;0H[TEST 1] Initializing static global array (%d elements)...\n", ARRAY_SIZE);
 
     //Заполняем массив числами (например, четной последовательностью)
-    for (int i = 0; i < ARRAY_SIZE; i++) {
+    for (int i = 0; i < ARRAY_SIZE; i++)
+    {
         global_static_array[i] = i * 2;
     }
 
@@ -58,7 +60,8 @@ int main(int argc, char *argv[]) {
     //Запрашиваем у аллокатора Ring 3 память под 512 целых чисел
     int *dynamic_array = (int *)malloc(ARRAY_SIZE * sizeof(int));
 
-    if (dynamic_array == NULL) {
+    if (dynamic_array == NULL)
+    {
         printf("[FAIL] malloc() returned NULL! Virtual heap allocation is broken.\n");
         return -1;
     }
@@ -68,7 +71,8 @@ int main(int argc, char *argv[]) {
     printf("Populating dynamic array memory space...\n");
 
     //Заполняем динамический массив другой последовательностью (умножение на 3)
-    for (int i = 0; i < ARRAY_SIZE; i++) {
+    for (int i = 0; i < ARRAY_SIZE; i++)
+    {
         dynamic_array[i] = i * 3;
     }
 

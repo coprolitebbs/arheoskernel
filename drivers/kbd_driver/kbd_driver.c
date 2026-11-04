@@ -27,7 +27,7 @@ kbd_driver_api_t *api_ptr;
 description_driver_api_t descr_api;
 
 
-// Внутренний кольцевой буфер символов драйвера
+//Внутренний кольцевой буфер символов драйвера
 kbd_event_t kbd_event_buf[KBD_BUFFER_SIZE];
 kbd_event_t *kbd_event_buf_ptr;
 volatile uint32_t kbd_head = 0;
@@ -39,14 +39,17 @@ static uint8_t led_command_state = 0;
 
 //  ----- внутренние функции  -----
 
-static void kbd_wait_write(void) {
+static void kbd_wait_write(void)
+{
     uint32_t timeout = 50000;
-    while ((inb(KBD_STATUS_PORT) & 0x02) && timeout--) {
+    while ((inb(KBD_STATUS_PORT) & 0x02) && timeout--)
+    {
         asm volatile("nop");
     }
 }
 
-static void kbd_update_leds(void) {
+static void kbd_update_leds(void)
+{
     if (led_command_state != 0) return;
 
     kbd_wait_write();
@@ -57,13 +60,17 @@ static void kbd_update_leds(void) {
 
 //  -----  внешние функции  -----
 
-// Асинхронный коллбек прерывания (вызывается из ядра по IRQ1)
-void kbd_irq_callback(uint8_t scancode){
-    // Если Capslock, зажечь индикатор
-    if (scancode == 0xFA){
-        if (led_command_state == 1){
+//Асинхронный коллбек прерывания (вызывается из ядра по IRQ1)
+void kbd_irq_callback(uint8_t scancode)
+{
+    //Если Capslock, зажечь индикатор
+    if (scancode == 0xFA)
+    {
+        if (led_command_state == 1)
+        {
             uint8_t led_mask = 0;
-            if (driver_caps_lock_state){
+            if (driver_caps_lock_state)
+            {
                 led_mask |= 0x04;
             }
             kbd_wait_write();
@@ -71,29 +78,35 @@ void kbd_irq_callback(uint8_t scancode){
             outb(KBD_DATA_PORT, led_mask);
             return;
         }
-        else if (led_command_state == 2){
+        else if (led_command_state == 2)
+        {
             led_command_state = 0;
             current_hardware_led_state = driver_caps_lock_state;
             return;
         }
     }
-    if (scancode == 0x3A){
+    if (scancode == 0x3A)
+    {
         driver_caps_lock_state = !driver_caps_lock_state;
         return;
     }
     //Префикс расширенных клавиш 0xE0 имеет взведенный бит 0x80,
     //но его нельзя отсекать как событие отпускания! Пропускаем его в буфер.
-    if (scancode != 0xE0){
+    if (scancode != 0xE0)
+    {
         //Если прилетел скан-код отпускания обычной клавиши (старший бит 0x80 взведен),
         //упаковываем его со специальным типом (type = 0) и пропускаем, либо обрабатываем.
         uint32_t next_head = (kbd_head + 1) % KBD_BUFFER_SIZE;
         if (next_head == kbd_tail) return; //Переполнение
 
-        if (scancode & 0x80){
+        if (scancode & 0x80)
+        {
             // Событие отпускания клавиши (Release)
             kbd_event_buf_ptr[kbd_head].scancode = scancode & 0x7F; // Чистый код клавиши
             kbd_event_buf_ptr[kbd_head].type = 0;                  // Type 0 = Отпущена
-        } else {
+        }
+        else
+        {
             // Событие нажатия клавиши (Press)
             kbd_event_buf_ptr[kbd_head].scancode = scancode;
             kbd_event_buf_ptr[kbd_head].type = 1;                  // Type 1 = Нажата
@@ -113,13 +126,17 @@ void kbd_irq_callback(uint8_t scancode){
 
 
 //Блокирующее чтение символа (Вызывается системным вызовом SYS_READ)
-uint32_t kbd_get_event_blocked(void){
+uint32_t kbd_get_event_blocked(void)
+{
     //api_ptr->debug_val1++;
-    while (1){
-        if (driver_caps_lock_state != current_hardware_led_state){
+    while (1)
+    {
+        if (driver_caps_lock_state != current_hardware_led_state)
+        {
             kbd_update_leds();
         }
-        if (kbd_tail != kbd_head) {
+        if (kbd_tail != kbd_head)
+        {
 
             kbd_event_t ev = kbd_event_buf_ptr[kbd_tail];
             kbd_tail = (kbd_tail + 1) % KBD_BUFFER_SIZE; //Неделимый инкремент
@@ -135,15 +152,18 @@ uint32_t kbd_get_event_blocked(void){
 
 
 //Неблокирующая проверка наличия символов (Аналог KBHIT)
-int kbd_has_events(void){
-    if (driver_caps_lock_state != current_hardware_led_state){
+int kbd_has_events(void)
+{
+    if (driver_caps_lock_state != current_hardware_led_state)
+    {
         kbd_update_leds();
     }
     return (kbd_tail != kbd_head) ? 1 : 0;
 }
 
 
-void kbd_init(struct boot_info *boot){
+void kbd_init(struct boot_info *boot)
+{
     (void)boot;
     kbd_event_buf_ptr = kbd_event_buf;
     kbd_head = 0;
@@ -156,7 +176,8 @@ void kbd_init(struct boot_info *boot){
 }
 
 
-void driver_main(struct boot_info *boot){
+void driver_main(struct boot_info *boot)
+{
     kbd_init(boot);
 
     description_driver_api_t *descr_api_ptr = &descr_api;
@@ -173,7 +194,8 @@ void driver_main(struct boot_info *boot){
 }
 
 
-description_driver_api_t *driver_get_api(void){
+description_driver_api_t *driver_get_api(void)
+{
     return &descr_api;
 }
 

@@ -23,7 +23,8 @@
 #include "../../include-kernel/lib.h"
 
 
-int fat12_read_boot_sector(fat12_fs_t *vol){
+int fat12_read_boot_sector(fat12_fs_t *vol)
+{
     int result;
 
     result = fat12_read_sectors(vol,0,1,vol->boot_sector);
@@ -34,13 +35,15 @@ int fat12_read_boot_sector(fat12_fs_t *vol){
 
 
 
-static uint16_t fat12_get_u16(const uint8_t *p){
+static uint16_t fat12_get_u16(const uint8_t *p)
+{
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
 
 
-int fat12_parse_bpb(fat12_fs_t *vol){
+int fat12_parse_bpb(fat12_fs_t *vol)
+{
     if (!vol) return FS_IO_ERROR;
     //BIOS Parameter Block
     vol->bytes_per_sector = fat12_get_u16(&vol->boot_sector[0x0B]);

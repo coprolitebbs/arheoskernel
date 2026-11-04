@@ -15,82 +15,95 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
- /*
- * usb_uhci.c - UHCI Host Controller: PCI probe (все контроллеры), reset,
- * frame list, порты, control/bulk transfers.
+/*
+ * usb_uhci.c - UHCI Host Controller: PCI probe, reset, frame list,
+ * port reset, control/bulk transfer.
  *
- * Мультиустройство:
- *  - uhci_probe_all() находит ВСЕ UHCI-функции в PCI (на ICH их обычно
- *    два: USB#1 и USB#2, по 2 root-порта на каждый);
- *  - у каждого HC свой Frame List / QH / TD-кольца — кадры разных
- *    контроллеров идут параллельно, устройства на разных HC не мешают
- *    друг другу;
- *  - все root-порты постоянно висят в кадрах (port-QH очереди с TD,
- *    которые HC "дожигает" за кадр). Между кадрами драйвер hot-patch'ит
- *    status последнего активного TD порта — так HC продолжает опрашивать
- *    порт каждый кадр без участия софта (hotplug работает сам);
- *  - control/bulk очереди включаются в расписание только на время
- *    конкретной транзакции (bulk — один кадр, чтобы NAK-пакеты чужих
- *    устройств не съедали слоты нашего кольца);
- *  - перед SET_ADDRESS порт переживает hard reset (PED=0): выключенный
- *    порт не участвует в расписании HC, поэтому TD других устройств его
- *    не видят, а наше устройство отвечает только на адрес 0.
- *
- * Реальное железо (Panasonic CF-18 / ICH3 и аналоги):
- *  - legacy-режим BIOS: USBCMD.CF=0 при захвате — переводим контроллер
- *    в полный контроль SOF (CF=1), иначе HC не генерирует кадры;
- *  - порты после BIOS могут стоять в SUSPEND / SDE (soft disconnect) —
- *    снимаем при инициализации;
- *  - debug-порты (PORTSC.DS) не трогаем reset'ом, чтобы не угонять
- *    EDB-режим отладочного кабеля;
- *  - USBSTS.HSE (Host System Error) проверяется в каждом цикле ожидания:
- *    при системной ошибке HC останавливается и TD вечно висят ACTIVE —
- *    без проверки мы бы просто зависли.
+ * Один HC (uhci0). QH/TD/Frame List — статические (.bss драйвера,
+ * identity map: VA == PA). Control и Bulk работают синхронно через
+ * общий Frame List: очередь подключается к слотам только на время
+ * транзакции, между вызовами все слоты терминируются по обычному принципу
  */
 
 #include "include/usb_uhci.h"
+#include "include/usb_driver.h"
 #include "../../include-kernel/lib.h"
 #include "../../include-kernel/ports_io.h"
 
-/* ---------------- Статические UHCI-структуры на каждый HC ----------------
-   Всё в .bss драйвера (identity map: VA == PA). Динамически размечать
-   нельзя — HC требует физического адреса и 4K-выравнивания frame list. */
+//---------------- UHCI DMA-структуры (динамическая аллокация) ----------------
+//Все структуры, которые читает/пишет HC (Frame List, QH, TD), должны быть физически
+//непрерывными и identity-mapped. Аллоцируются через usb_dma_alloc() -> kernel_usb_dma_alloc() ->
+//pmm_alloc_pages().
+//dma_alloc_ptr устанавливается ядром в use_drivers.c ПОСЛЕ driver_main(),
+//поэтому allocation делается в device_usb_start() (см. usb_driver.c)
 
-uint8_t   frame_lists[UHCI_MAX_HC][4096] __attribute__((aligned(4096)));
-uhci_qh_t port_qhs[UHCI_MAX_HC][2]       __attribute__((aligned(16)));
-uhci_qh_t ctrl_qhs[UHCI_MAX_HC]          __attribute__((aligned(16)));
-uhci_qh_t bulk_qhs[UHCI_MAX_HC]          __attribute__((aligned(16)));
-uhci_td_t ctrl_rings[UHCI_MAX_HC][UHCI_CTRL_RING] __attribute__((aligned(16)));
-uhci_td_t bulk_rings[UHCI_MAX_HC][UHCI_BULK_RING] __attribute__((aligned(16)));
-uint8_t   setup_statics[UHCI_MAX_HC][8]  __attribute__((aligned(16)));
+uint8_t  *frame_list_ptr   = NULL;
+uhci_qh_t *control_qh_ptr  = NULL;
+uhci_td_t *control_tds_ptr = NULL;
+uint8_t  *setup_static_ptr = NULL;
+uhci_qh_t *bulk_qh_ptr     = NULL;
+uhci_td_t *bulk_tds_ptr    = NULL;
 
-/* Позиция головы кольца (следующий свободный TD) — только со стороны
-   CPU; HC видит лишь link-поля самих TD. */
-static uint32_t ctrl_ring_head[UHCI_MAX_HC];
-static uint32_t bulk_ring_head[UHCI_MAX_HC];
-static uint32_t ctrl_ring_free[UHCI_MAX_HC];
-static uint32_t bulk_ring_free[UHCI_MAX_HC];
+//Физические адреса (для DMA). На x86 identity-mapped: VA == PA, но
+//храним отдельно, чтобы код был корректен и для будущих IOMMU-кейсов
+static uint32_t frame_list_phys   = 0;
+static uint32_t control_qh_phys   = 0;
+static uint32_t control_tds_phys  = 0;
+static uint32_t setup_static_phys = 0;
+static uint32_t bulk_qh_phys      = 0;
+static uint32_t bulk_tds_phys     = 0;
 
-uhci_hc_t        uhci_hcs[UHCI_MAX_HC];
-uhci_hc_t       *uhci_hc_ptrs[UHCI_MAX_HC];
-int              uhci_hc_count = 0;
+//Флаги "выделено" для cleanup()
+static int dma_frame_ok    = 0;
+static int dma_ctrl_qh_ok  = 0;
+static int dma_ctrl_tds_ok = 0;
+static int dma_setup_ok    = 0;
+static int dma_bulk_qh_ok  = 0;
+static int dma_bulk_tds_ok = 0;
 
-uint32_t uhci_dbg_hse = 0;
-uint32_t uhci_dbg_err = 0;
-uint32_t uhci_dbg_timeout = 0;
+uint8_t uhci_dev_is_ls[128]= {0};
 
-/* UHCI — bus-master, ему нужен физический адрес. Stack/driver .bss
-   identity-mapped (VA==PA), но kmalloc-буферы живут по VA != PA.
-   Делаем walk по текущим page tables через CR3. */
-uint32_t usb_virt_to_phys(uint32_t va){
+//Глобальный массив всех найденных UHCI-контроллеров.
+//На ICH6 их три: 0:1d.0 (#1), 0:1d.1 (#2), 0:1d.2 (#3).
+//Устройства могут быть на любом из них — нужно сканировать все.
+uhci_hc_t uhci_hcs[UHCI_MAX_CONTROLLERS];
+int uhci_hc_count = 0;
+
+
+//Барьеры памяти для DMA. На x86 это инструкции, гарантирующие порядок записей/чтений.
+//Для UHCI критично, чтобы контроллер увидел полностью сформированный TD/QH до того,
+//как он будет ему передан
+static inline void uhci_wmb(void)
+{
+    __asm__ __volatile__("sfence" ::: "memory");
+}
+static inline void uhci_mb(void)
+{
+    __asm__ __volatile__("mfence" ::: "memory");
+}
+static inline void uhci_rmb(void)
+{
+    __asm__ __volatile__("lfence" ::: "memory");
+}
+
+//Текущие системные тики (10 мс/тик). 0 если API ещё не настроен
+static inline uint32_t uhci_get_ticks(void)
+{
+    return (api_ptr && api_ptr->get_ticks) ? api_ptr->get_ticks() : 0;
+}
+
+//UHCI — bus-master, ему нужен физический адрес. Stack/driver .bss
+//identity-mapped (VA==PA), но kmalloc-буферы живут по VA != PA
+//Делаем walk по текущим page tables через CR3
+uint32_t usb_virt_to_phys(uint32_t va)
+{
     uint32_t cr3;
     __asm__ __volatile__("mov %%cr3, %0" : "=r"(cr3));
     cr3 &= 0xFFFFF000u;
 
     uint32_t *pd = (uint32_t*)cr3;
     uint32_t pde = pd[va >> 22];
-    if (!(pde & 1)) return va;                 /* not present — fallback */
-
+    if (!(pde & 1)) return va;                 //Не найден, даем fallback
     uint32_t *pt = (uint32_t*)(pde & 0xFFFFF000u);
     uint32_t pte = pt[(va >> 12) & 0x3FF];
     if (!(pte & 1)) return va;
@@ -98,680 +111,825 @@ uint32_t usb_virt_to_phys(uint32_t va){
     return (pte & 0xFFFFF000u) | (va & 0xFFF);
 }
 
-/* Привязка указателей колец/QH к слоту hc->index. Идемпотентно. */
-static void uhci_bind_ptrs(uhci_hc_t *hc){
-    int i = hc->index;
-    hc->frame_list = frame_lists[i];
-    hc->fl_phys    = (uint32_t)frame_lists[i];
-    hc->port_qh    = &port_qhs[i][0];
-    hc->port_qh1   = &port_qhs[i][1];
-    hc->ctrl_qh    = &ctrl_qhs[i];
-    hc->bulk_qh    = &bulk_qhs[i];
-    hc->ctrl_ring  = ctrl_rings[i];
-    hc->bulk_ring  = bulk_rings[i];
+
+//Выделить DMA-структуры через ядро. Идемпотентна — повторный вызов
+//без предварительного uhci_free_structures() вернёт 0 (already allocated)
+//На любой ошибке частично выделенное освобождается и возвращается отрицательный код
+int uhci_alloc_structures(void)
+{
+    uint32_t phys;
+    uint32_t size;
+
+    if (frame_list_ptr != NULL)
+    {
+        return 0;   /* уже выделено */
+    }
+
+    //Frame List: 4096 байт, выровнен на 4K (pmm_alloc_pages даёт 4K-aligned)
+    frame_list_ptr = (uint8_t*)usb_dma_alloc(4096, &phys);
+    if (!frame_list_ptr || (phys & 0xFFF) != 0)
+    {
+        uhci_free_structures();
+        return -1;
+    }
+    dma_frame_ok    = 1;
+    frame_list_phys = phys;
+    memset(frame_list_ptr, 0, 4096);
+
+    //Control QH: 16 байт (физ. адрес — на границе 16)
+    control_qh_ptr = (uhci_qh_t*)usb_dma_alloc(sizeof(uhci_qh_t), &phys);
+    if (!control_qh_ptr || (phys & 0x0F) != 0)
+    {
+        uhci_free_structures();
+        return -2;
+    }
+    dma_ctrl_qh_ok   = 1;
+    control_qh_phys  = phys;
+    memset(control_qh_ptr, 0, sizeof(uhci_qh_t));
+
+    //Control TD pool: MAX_CONTROL_TDS * 16 = 256 байт
+    size = MAX_CONTROL_TDS * sizeof(uhci_td_t);
+    control_tds_ptr = (uhci_td_t*)usb_dma_alloc(size, &phys);
+    if (!control_tds_ptr || (phys & 0x0F) != 0)
+    {
+        uhci_free_structures();
+        return -3;
+    }
+    dma_ctrl_tds_ok   = 1;
+    control_tds_phys  = phys;
+    memset(control_tds_ptr, 0, size);
+
+    //Bulk QH: 16 байт
+    bulk_qh_ptr = (uhci_qh_t*)usb_dma_alloc(sizeof(uhci_qh_t), &phys);
+    if (!bulk_qh_ptr || (phys & 0x0F) != 0)
+    {
+        uhci_free_structures();
+        return -4;
+    }
+    dma_bulk_qh_ok = 1;
+    bulk_qh_phys   = phys;
+    memset(bulk_qh_ptr, 0, sizeof(uhci_qh_t));
+
+    //Bulk TD pool: MAX_BULK_TDS * 16 = 1024 байт
+    size = MAX_BULK_TDS * sizeof(uhci_td_t);
+    bulk_tds_ptr = (uhci_td_t*)usb_dma_alloc(size, &phys);
+    if (!bulk_tds_ptr || (phys & 0x0F) != 0)
+    {
+        uhci_free_structures();
+        return -5;
+    }
+    dma_bulk_tds_ok = 1;
+    bulk_tds_phys   = phys;
+    memset(bulk_tds_ptr, 0, size);
+
+    //Setup-буфер: 8 байт (для SETUP-пакета control-transfers)
+    setup_static_ptr = (uint8_t*)usb_dma_alloc(8, &phys);
+    if (!setup_static_ptr || (phys & 0x0F) != 0)
+    {
+        uhci_free_structures();
+        return -6;
+    }
+    dma_setup_ok       = 1;
+    setup_static_phys  = phys;
+    memset(setup_static_ptr, 0, 8);
+
+    return 0;
 }
 
-/* ---------------- PCI ---------------- */
+//Освободить все DMA-структуры. Безопасна для частично выделенного состояния (флаги dma_*_ok)
+//Не вызывать, пока HC ещё жив и ссылается на эти структуры
+void uhci_free_structures(void)
+{
+    if (dma_setup_ok    && setup_static_ptr)
+    {
+        usb_dma_free(setup_static_ptr, 8);
+        dma_setup_ok    = 0;
+    }
+    if (dma_bulk_tds_ok && bulk_tds_ptr)
+    {
+        usb_dma_free(bulk_tds_ptr, MAX_BULK_TDS * sizeof(uhci_td_t));
+        dma_bulk_tds_ok = 0;
+    }
+    if (dma_bulk_qh_ok  && bulk_qh_ptr)
+    {
+        usb_dma_free(bulk_qh_ptr, sizeof(uhci_qh_t));
+        dma_bulk_qh_ok  = 0;
+    }
+    if (dma_ctrl_tds_ok && control_tds_ptr)
+    {
+        usb_dma_free(control_tds_ptr, MAX_CONTROL_TDS * sizeof(uhci_td_t));
+        dma_ctrl_tds_ok = 0;
+    }
+    if (dma_ctrl_qh_ok  && control_qh_ptr)
+    {
+        usb_dma_free(control_qh_ptr, sizeof(uhci_qh_t));
+        dma_ctrl_qh_ok  = 0;
+    }
+    if (dma_frame_ok    && frame_list_ptr)
+    {
+        usb_dma_free(frame_list_ptr, 4096);
+        dma_frame_ok    = 0;
+    }
+    frame_list_ptr   = NULL;
+    control_qh_ptr   = NULL;
+    control_tds_ptr  = NULL;
+    setup_static_ptr = NULL;
+    bulk_qh_ptr      = NULL;
+    bulk_tds_ptr     = NULL;
+    frame_list_phys   = 0;
+    control_qh_phys   = 0;
+    control_tds_phys  = 0;
+    setup_static_phys = 0;
+    bulk_qh_phys      = 0;
+    bulk_tds_phys     = 0;
+}
 
-uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off){
+
+
+//Проверка состояния HC во время ожидания TD. Возвращает 0 — HC жив и работает; <0 — фатальная проблема
+int uhci_hc_healthy(uhci_hc_t *hc)
+{
+    uint16_t sts = inw(hc->io_base + UHCI_USBSTS);
+    if (sts & USBSTS_HSE)
+    {
+        outw(hc->io_base + UHCI_USBSTS, USBSTS_HSE);   //W1C
+        return -1;   //Host System Error (PCI abort и т.п.)
+    }
+    if (sts & USBSTS_HCH)
+    {
+        return -2;   //HC Halted — контроллер остановлен
+    }
+    return 0;
+}
+
+
+//---------------- PCI ----------------
+
+uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
+{
     uint32_t addr = (1u << 31)
-                  | ((uint32_t)bus  << 16)
-                  | ((uint32_t)dev  << 11)
-                  | ((uint32_t)func <<  8)
-                  | (off & 0xFC);
+                    | ((uint32_t)bus  << 16)
+                    | ((uint32_t)dev  << 11)
+                    | ((uint32_t)func <<  8)
+                    | (off & 0xFC);
     outl(PCI_CONFIG_ADDR, addr);
     return inl(PCI_CONFIG_DATA);
 }
 
-void pci_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off, uint32_t val){
+void pci_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off, uint32_t val)
+{
     uint32_t addr = (1u << 31)
-                  | ((uint32_t)bus  << 16)
-                  | ((uint32_t)dev  << 11)
-                  | ((uint32_t)func <<  8)
-                  | (off & 0xFC);
+                    | ((uint32_t)bus  << 16)
+                    | ((uint32_t)dev  << 11)
+                    | ((uint32_t)func <<  8)
+                    | (off & 0xFC);
     outl(PCI_CONFIG_ADDR, addr);
     outl(PCI_CONFIG_DATA, val);
 }
 
-int uhci_hc_index(uhci_hc_t *hc){
+
+//---------------- Probe ----------------
+/*
+int uhci_probe(uhci_hc_t *hc)
+{
     if (!hc) return -1;
-    return (int)hc->index;
-}
+    memset(hc, 0, sizeof(*hc));
 
-/* ---------------- Probe всех UHCI ---------------- */
-
-int uhci_probe_all(void){
-    int n = 0;
-
-    for (uint16_t bus = 0; bus < 256 && n < UHCI_MAX_HC; bus++){
-        for (uint8_t dev = 0; dev < 32 && n < UHCI_MAX_HC; dev++){
-
-            /* function 0 обязана отвечать, иначе слот пуст */
-            uint32_t id0 = pci_read32((uint8_t)bus, dev, 0, 0x00);
-            if ((id0 & 0xFFFF) == 0xFFFF || (id0 & 0xFFFF) == 0) continue;
-
-            for (uint8_t func = 0; func < 8 && n < UHCI_MAX_HC; func++){
-                uint32_t id = (func == 0) ? id0
-                            : pci_read32((uint8_t)bus, dev, func, 0x00);
-                if ((id & 0xFFFF) == 0xFFFF || (id & 0xFFFF) == 0) continue;
+    for (uint16_t bus = 0; bus < 256; bus++)
+    {
+        for (uint8_t dev = 0; dev < 32; dev++)
+        {
+            for (uint8_t func = 0; func < 8; func++)
+            {
+                uint32_t id = pci_read32((uint8_t)bus, dev, func, 0x00);
+                if ((id & 0xFFFF) == 0xFFFF) continue;
 
                 uint32_t class = pci_read32((uint8_t)bus, dev, func, 0x08);
-                uint8_t prog_if  = (class >>  8) & 0xFF;
-                uint8_t sub_cls  = (class >> 16) & 0xFF;
                 uint8_t base_cls = (class >> 24) & 0xFF;
+                uint8_t sub_cls  = (class >> 16) & 0xFF;
+                uint8_t prog_if  = (class >>  8) & 0xFF;
 
                 if (base_cls == PCI_CLASS_SERIAL_BUS &&
-                    sub_cls  == PCI_SUBCLASS_USB &&
-                    prog_if  == PCI_PROGIF_UHCI){
+                        sub_cls  == PCI_SUBCLASS_USB &&
+                        prog_if  == PCI_PROGIF_UHCI)
+                {
 
                     uint32_t bar4 = pci_read32((uint8_t)bus, dev, func, 0x20);
-                    if (!(bar4 & 0x01)) continue;    /* не I/O BAR */
+                    if (!(bar4 & 0x01)) continue;
                     uint16_t io_base = bar4 & 0xFFFC;
                     if (io_base == 0) continue;
 
-                    /* Включить I/O Space + Bus Master */
                     uint32_t cmd = pci_read32((uint8_t)bus, dev, func, 0x04);
                     cmd |= 0x05;
                     pci_write32((uint8_t)bus, dev, func, 0x04, cmd);
 
-                    uhci_hc_t *hc = &uhci_hcs[n];
-                    memset(hc, 0, sizeof(*hc));
-                    hc->index    = (uint8_t)n;
+                    //Отключить BIOS USB Legacy Support / SMI generation на ICH3/ICH4
+                    //Пока SMI включён, любое обращение к USB-регистрам может уходить в BIOS
+                    //через SMI — с непредсказуемой задержкой и порчей состояния
+                    //Делаем ДО return 0, иначе для UHCI код не выполнится
+                    uint32_t vendor_dev = pci_read32((uint8_t)bus, dev, func, 0x00);
+                    if ((vendor_dev & 0xFFFF) == 0x8086)    //Intel
+                    {
+                        //USBLEGSUP: bit0 = SMI enable (снять), bit8 = PIRQ enable (можно оставить)
+                        //Пишем 0x2000 — SMI=0, PIRQ=1, все R/WC очищены
+                        pci_write32((uint8_t)bus, dev, func, 0xC0, 0x2000);
+                    }
+
                     hc->io_base  = io_base;
                     hc->pci_bus  = (uint8_t)bus;
                     hc->pci_dev  = dev;
                     hc->pci_func = func;
-                    hc->ports    = 2;          /* UHCI spec: 2 порта на контроллер */
-                    hc->valid    = 1;
-
-                    uhci_bind_ptrs(hc);
-
-                    uhci_hc_ptrs[n] = hc;
-                    n++;
-                    /* Не останавливаемся: собираем ВСЕ контроллеры.
-                       На чипсетах типа ICH (Panasonic CF-18) их два,
-                       и флешка может висеть только на втором. */
+                    return 0;
                 }
             }
         }
     }
-    uhci_hc_count = n;
-    return (n > 0) ? 0 : -1;
+    return -1;
+}*/
+
+//Найти ВСЕ UHCI-контроллеры в PCI. Заполняет uhci_hcs[], возвращает количество.
+int uhci_probe_all(void)
+{
+    uhci_hc_count = 0;
+
+    for (uint16_t bus = 0; bus < 256; bus++)
+    {
+        for (uint8_t dev = 0; dev < 32; dev++)
+        {
+            for (uint8_t func = 0; func < 8; func++)
+            {
+                if (uhci_hc_count >= UHCI_MAX_CONTROLLERS) return uhci_hc_count;
+
+                uint32_t id = pci_read32((uint8_t)bus, dev, func, 0x00);
+                if ((id & 0xFFFF) == 0xFFFF) continue;
+
+                uint32_t class = pci_read32((uint8_t)bus, dev, func, 0x08);
+                uint8_t base_cls = (class >> 24) & 0xFF;
+                uint8_t sub_cls  = (class >> 16) & 0xFF;
+                uint8_t prog_if  = (class >>  8) & 0xFF;
+
+                if (base_cls != PCI_CLASS_SERIAL_BUS ||
+                    sub_cls  != PCI_SUBCLASS_USB ||
+                    prog_if  != PCI_PROGIF_UHCI) continue;
+
+                uint32_t bar4 = pci_read32((uint8_t)bus, dev, func, 0x20);
+                if (!(bar4 & 0x01)) continue;
+                uint16_t io_base = bar4 & 0xFFFC;
+                if (io_base == 0) continue;
+
+                uint32_t cmd = pci_read32((uint8_t)bus, dev, func, 0x04);
+                cmd |= 0x05;
+                pci_write32((uint8_t)bus, dev, func, 0x04, cmd);
+
+                uint32_t vendor_dev = pci_read32((uint8_t)bus, dev, func, 0x00);
+                if ((vendor_dev & 0xFFFF) == 0x8086)
+                {
+                    pci_write32((uint8_t)bus, dev, func, 0xC0, 0x2000);
+                }
+
+                uhci_hc_t *hc = &uhci_hcs[uhci_hc_count];
+                memset(hc, 0, sizeof(*hc));
+                hc->io_base  = io_base;
+                hc->pci_bus  = (uint8_t)bus;
+                hc->pci_dev  = dev;
+                hc->pci_func = func;
+                uhci_hc_count++;
+            }
+        }
+    }
+    return uhci_hc_count;
 }
 
-/* ---------------- Init ---------------- */
+//---------------- Init ----------------
 
-int uhci_wait_hcreset(uhci_hc_t *hc){
-    for (uint32_t i = 0; i < 1000000; i++){
+int uhci_wait_hcreset(uhci_hc_t *hc)
+{
+    for (uint32_t i = 0; i < 100000; i++)
+    {
         if (!(inw(hc->io_base + UHCI_USBCMD) & USBCMD_HCRESET)) return 0;
     }
     return -1;
 }
 
-/* Остановить HC до состояния "RS=0, HCH=1" — нужно для честного
-   configure-port flow (иначе HC крутит кадры с чужими ссылками). */
-static void uhci_halt(uhci_hc_t *hc){
-    outw(hc->io_base + UHCI_USBCMD, 0);
-    for (uint32_t i = 0; i < 1000000; i++){
-        if (inw(hc->io_base + UHCI_USBSTS) & USBSTS_HCH) break;
-    }
-}
-
-int uhci_init(uhci_hc_t *hc){
+int uhci_init(uhci_hc_t *hc)
+{
     if (!hc) return -1;
 
-    uhci_bind_ptrs(hc);
+    //Legacy mode BIOS: если CF=0, BIOS оставил HC в режиме, где firmware делит управление с OS
+    //Принудительно переводим в полный OS-контроль
+        //Global reset: сбрасывает HC и все порты в исходное состояние.
+    //На ICH3 после BIOS порты могут быть в SUSPEND/SDE/legacy — global reset
+    //это очищает. Делаем ДО HCRESET, чтобы HC точно был в чистом состоянии.
+    outw(hc->io_base + UHCI_USBCMD, USBCMD_GRESET | USBCMD_CF);
+    for (volatile int i = 0; i < 30000; i++) inw(hc->io_base + UHCI_USBCMD);
+    outw(hc->io_base + UHCI_USBCMD, USBCMD_CF);
 
-    /* 0) Legacy-режим BIOS (USBCMD.CF=0): HC принимает часть настроек
-          от firmware и может не генерировать SOF. Переводим в полный
-          программный контроль. На CF-18 (ICH3) это обязательно. */
-    uint16_t cmd0 = inw(hc->io_base + UHCI_USBCMD);
-    if (!(cmd0 & USBCMD_CF)){
-        uhci_halt(hc);
-        outw(hc->io_base + UHCI_USBCMD, cmd0 | USBCMD_CF);
-    }
-
-    /* 1) Global Reset — сбрасывает все порты, снимает devices с шины.
-          Делаем только если контроллер был запущен (BIOS-legacy или
-          наш прошлый запуск); на холодном HC GRESET иногда залипает. */
-    uint16_t sts0 = inw(hc->io_base + UHCI_USBSTS);
-    if ((cmd0 & USBCMD_RS) || !(sts0 & USBSTS_HCH)){
-        uhci_halt(hc);
-        outw(hc->io_base + UHCI_USBCMD, USBCMD_GRESET | USBCMD_CF);
-        for (volatile int i = 0; i < 30000; i++) inw(hc->io_base + UHCI_USBCMD); /* ~10 ms */
-        outw(hc->io_base + UHCI_USBCMD, USBCMD_CF);
-    }
-
-    /* 2) Host Controller Reset */
-    outw(hc->io_base + UHCI_USBCMD, USBCMD_HCRESET | USBCMD_CF);
+    //Host Controller Reset
+    outw(hc->io_base + UHCI_USBCMD, USBCMD_HCRESET);
     if (uhci_wait_hcreset(hc) != 0) return -2;
 
-    /* 3) Отключить все прерывания — работаем polling'ом */
+    //Отключить все прерывания — работаем polling'ом
     outw(hc->io_base + UHCI_USBINTR, 0);
 
-    /* 4) Очистить статус (W1C) */
+    //Очистить статус (все W1C биты: USBINT, ERROR, RESET, RESUME, HSE)
     outw(hc->io_base + UHCI_USBSTS, 0x007F);
 
-    /* 5) Кольца TD: забить terminate-статусом, обнулить головы */
-    ctrl_ring_head[hc->index] = 0;
-    bulk_ring_head[hc->index] = 0;
-    ctrl_ring_free[hc->index] = UHCI_CTRL_RING;
-    bulk_ring_free[hc->index] = UHCI_BULK_RING;
-    for (int i = 0; i < UHCI_CTRL_RING; i++){
-        hc->ctrl_ring[i].link = TD_LINK_TERM;
-        hc->ctrl_ring[i].status = 0;
-    }
-    for (int i = 0; i < UHCI_BULK_RING; i++){
-        hc->bulk_ring[i].link = TD_LINK_TERM;
-        hc->bulk_ring[i].status = 0;
-    }
-
-    /* 7) Frame List — все слоты terminate (пока без очередей) */
-    uint32_t *fl = (uint32_t*)hc->frame_list;
-    for (int i = 0; i < 1024; i++) fl[i] = TD_LINK_TERM;
-    outl(hc->io_base + UHCI_FLBASEADD, hc->fl_phys);
-    outw(hc->io_base + UHCI_FRNUM, 0);
-    outw(hc->io_base + UHCI_SOFMOD, 64);   /* 64 байта на кадр */
-
-    /* 8) Снять порты с suspend/soft-disconnect, которые мог оставить BIOS */
-    for (int p = 0; p < hc->ports; p++){
-        uint16_t reg = (p == 0) ? UHCI_PORTSC1 : UHCI_PORTSC2;
-        uint16_t s = inw(hc->io_base + reg);
-        if (s & (PORTSC_SUSPEND | PORTSC_SDE)){
-            outw(hc->io_base + reg, s & ~(PORTSC_SUSPEND | PORTSC_SDE));
+    //Ложный overcurrent на старых ICH (PIIX4/ICH3): бит 7 PORTSC
+    //может быть установлен постоянно, аппаратно отключая порт.
+    //Игнорируем его — пишем 1 для очистки change-бита (если это R/WC)
+    //и принудительно включаем порт позже через reset.
+    for (int p = 0; p < 2; p++){
+        uint16_t preg = (p == 0) ? UHCI_PORTSC1 : UHCI_PORTSC2;
+        uint16_t ps = inw(hc->io_base + preg);
+        if (ps & 0x0080){                 /* OverCurrent Indicator / Change */
+            outw(hc->io_base + preg, ps);  /* write-1-to-clear все change-биты */
         }
     }
 
-    /* 9) Запуск HC */
-    cmd0 = inw(hc->io_base + UHCI_USBCMD);
-    outw(hc->io_base + UHCI_USBCMD, cmd0 | USBCMD_RS | USBCMD_CF);
+    //Frame List — все слоты terminate (Vf=1, нет QH)
+    uint32_t *fl = (uint32_t*)frame_list_ptr;
+    for (int i = 0; i < 1024; i++) fl[i] = TD_LINK_TERM;
+    //Физический адрес = виртуальный (identity map нижних 16 МБ)
+    outl(hc->io_base + UHCI_FLBASEADD, frame_list_phys);
 
-    /* 10) Дождаться, что HC снял HCH */
-    for (uint32_t i = 0; i < 1000000; i++){
-        if (!(inw(hc->io_base + UHCI_USBSTS) & USBSTS_HCH)){
-            hc->running = 1;
+    uhci_mb();   //гарантируем, что контроллер увидит новый Frame List
+
+    outw(hc->io_base + UHCI_FRNUM, 0);
+    outw(hc->io_base + UHCI_SOFMOD, 64);   //64 байта на кадр
+
+    //Запуск HC: CF=1 (полный OS-контроль, без legacy режима) + RS=1.
+    //CF обязателен! Без него на ICH3/ICH4 HC остаётся в legacy BIOS
+    //режиме, порты не сканируются, CCS не выставляется. QEMU этого
+    //не проверяет (там HC всегда "configured"), а реальное железо — да.
+    uint16_t cmd = inw(hc->io_base + UHCI_USBCMD);
+    outw(hc->io_base + UHCI_USBCMD, cmd | USBCMD_CF | USBCMD_RS);
+
+        //Дождаться, что HC снял HCH и реально запустился
+    for (uint32_t i = 0; i < 100000; i++)
+    {
+        uint16_t sts = inw(hc->io_base + UHCI_USBSTS);
+        if (!(sts & USBSTS_HCH))
+        {
+            //Дополнительная проверка: CF=1 и RS=1 реально установились
+            uint16_t cmd_now = inw(hc->io_base + UHCI_USBCMD);
+            if ((cmd_now & (USBCMD_CF | USBCMD_RS)) != (USBCMD_CF | USBCMD_RS))
+            {
+                return -4;   //HC не принял CF/RS — платформа нестандартна
+            }
             return 0;
         }
     }
     return -3;
 }
 
-int uhci_init_all(void){
-    int ok = 0;
-    for (int i = 0; i < uhci_hc_count; i++){
-        if (uhci_init(uhci_hc_ptrs[i]) == 0) ok++;
-    }
-    if (ok == 0) return -1;
-    uhci_ports_schedule_all();
-    return ok;
-}
+//---------------- Ports ----------------
 
-/* ---------------- Ports ---------------- */
-
-static uint16_t portsc_reg(int port){
+uint16_t portsc_reg(int port)
+{
     return (port == 0) ? UHCI_PORTSC1 : UHCI_PORTSC2;
 }
 
-uint16_t uhci_port_status(uhci_hc_t *hc, int port){
+uint16_t uhci_port_status(uhci_hc_t *hc, int port)
+{
     return inw(hc->io_base + portsc_reg(port));
 }
 
-int uhci_port_connected(uhci_hc_t *hc, int port){
+int uhci_port_connected(uhci_hc_t *hc, int port)
+{
     return (uhci_port_status(hc, port) & PORTSC_CCS) ? 1 : 0;
 }
 
-void uhci_port_resume(uhci_hc_t *hc, int port){
+int uhci_reset_port(uhci_hc_t *hc, int port)
+{
     uint16_t reg = portsc_reg(port);
-    uint16_t s = inw(hc->io_base + reg);
-    if (s & (PORTSC_SUSPEND | PORTSC_SDE)){
-        outw(hc->io_base + reg, s & ~(PORTSC_SUSPEND | PORTSC_SDE));
+
+    uint16_t pre = inw(hc->io_base + reg);
+    if (pre & (PORTSC_SUSPEND | PORTSC_SDE))
+    {
+        outw(hc->io_base + reg, pre & ~(PORTSC_SUSPEND | PORTSC_SDE));
+        for (volatile int i = 0; i < 10000; i++) inw(hc->io_base + reg);
     }
-}
 
-/* Hard reset: PR=1, PED=0, suspend off, W1C change bits.
-   Порт ВЫКЛЮЧЕН на всё время assert+hold — HC не пытается ничего
-   транслировать, пока мы держим reset. Отдельно от "soft" reset
-   (uhci_reset_port), который форсирует PED=1 для стабилизации. */
-void uhci_port_reset_hard(uhci_hc_t *hc, int port){
-    uint16_t reg = portsc_reg(port);
     uint16_t s = inw(hc->io_base + reg);
+    if (s & PORTSC_DS) return -3;        /* debug port — не трогаем */
 
-    /* Debug-порт (EDB-кабель) не трогаем — reset угонит его в странный режим */
-    if (s & PORTSC_DS) return;
+    /* Если CCS=0, но установлен overcurrent (бит 7) — это, скорее всего,
+       ложное срабатывание на старом ICH. Пробуем сбросить порт всё равно:
+       после reset overcurrent-состояние может уйти. */
+    if (!(s & PORTSC_CCS)){
+        if (s & 0x0080){
+            /* Очистить change-бит overcurrent, записав 1 */
+            outw(hc->io_base + reg, s);
+            for (volatile int i = 0; i < 10000; i++) inw(hc->io_base + reg);
+            s = inw(hc->io_base + reg);
+            /* Если CCS всё ещё 0 — устройство действительно не подключено
+               (или overcurrent реальный). Продолжаем reset на всякий случай:
+               reset может «выбить» залипшее overcurrent-состояние. */
+        } else {
+            return -1;                   /* нет устройства и нет overcurrent */
+        }
+    }
 
-    outw(hc->io_base + reg, (s & ~(PORTSC_PED | PORTSC_SUSPEND))
-                          | PORTSC_PR | PORTSC_W1C);
+    //Assert: PR=1, PED=1
+    outw(hc->io_base + reg, PORTSC_PR | PORTSC_PED);
 
-    /* Держим ≥ 50 ms */
-    for (volatile int i = 0; i < 60000; i++) inw(hc->io_base + reg);
+    //Держим PR=1 ≥ 50 мс (USB 2.0 §7.1.7.3). Используем тики ядра (10 мс), чтобы
+    //время было одинаковым на любой частоте CPU. Safety-net по итерациям — на случай если тики
+    //почему-то не идут (например, PIT не запущен, или мы до multithreading)
+    uint32_t t_reset = uhci_get_ticks();
+    uint32_t safety = 10000000;
+    while (((uhci_get_ticks() - t_reset) < 5) && (safety-- > 0))
+    {
+        inw(hc->io_base + reg);
+    }
 
-    /* Deassert: читаем свежий PORTSC, снимаем PR, PED остаётся 0 */
+    //Deassert: читаем СВЕЖИЙ PORTSC, снимаем PR, PED форсируем =1
     uint16_t cur = inw(hc->io_base + reg);
-    outw(hc->io_base + reg, (cur & ~(PORTSC_PR | PORTSC_SUSPEND)) | PORTSC_W1C);
+    outw(hc->io_base + reg, (cur & ~PORTSC_PR) | PORTSC_PED);
 
-    /* ≥ 10 ms восстановления (USB spec: reset recovery) */
-    for (volatile int i = 0; i < 120000; i++) inw(hc->io_base + reg);
+    //Дать порту стабилизироваться ≥ 10 мс (reset recovery time, USB 2.0 §7.1.7.5)
+    uint32_t t_settle = uhci_get_ticks();
+    safety = 5000000;
+    while (((uhci_get_ticks() - t_settle) < 1) && (safety-- > 0))
+    {
+        inw(hc->io_base + reg);
+    }
 
-    /* Почистить change bits, которые выставились в ходе reset */
     uint16_t fin = inw(hc->io_base + reg);
-    outw(hc->io_base + reg, fin | PORTSC_W1C);
-}
+    outw(hc->io_base + reg, fin | PORTSC_CSC | PORTSC_PEDC | PORTSC_PED);
 
-/* "Soft" reset с включением порта: используется для стабилизации
-   уже enumerated устройства (переподключение). Возвращает 0, если
-   порт включился. */
-int uhci_reset_port(uhci_hc_t *hc, int port){
-    uint16_t reg = portsc_reg(port);
-
-    uint16_t s = inw(hc->io_base + reg);
-    if (!(s & PORTSC_CCS)) return -1;    /* нет устройства */
-
-    uhci_port_reset_hard(hc, port);
-
-    /* Теперь включаем порт: PED=1 */
-    uint16_t cur = inw(hc->io_base + reg);
-    outw(hc->io_base + reg, (cur & ~PORTSC_PR) | PORTSC_PED | PORTSC_W1C);
-
-    /* Ждём, пока HC сам не поднимет PED (успешная инициализация FS/LS) */
-    for (uint32_t i = 0; i < 2000000; i++){
+    //Финальная проверка
+    uint32_t t0 = uhci_get_ticks();
+    while ((uhci_get_ticks() - t0) < 50)    //50 тиков * 10 мс = 500 мс запас
+    {
         s = inw(hc->io_base + reg);
         if (s & PORTSC_PED) return 0;
+        if (s & PORTSC_DS)  return -3;      //debug port
     }
     return -2;
 }
 
-/* ---------------- Планировщик кадров ----------------
-   Структура очереди каждого HC:
-
-     frame slot -> port_qh -> [port TD p0] -> port_qh1 -> [port TD p1]
-                              (element)          (head)
-        ctrl_qh / bulk_qh подключаются ЭЛЕМЕНТОМ следующего QH
-        (element bit) только на время транзакции:
-
-     ... p1 element -> ctrl_qh -> [ctrl TDs]   (во время control xfer)
-     ... p1 element -> bulk_qh -> [bulk TDs]   (во время bulk xfer)
-
-   Port TD — бесконечные IN-токены на адрес 0/ep0 c IOC=0: HC каждый
-   кадр пытается опросить порт; без устройства transaction завершается
-   PID error (CRCTIMEO), status залипает. Перед следующим кадром
-   driver hot-patch'ит status обратно в ACTIVE — опрос продолжается.
-   Это стандартный трюк UHCI-стеков (Linux usb-uhci port chain). */
-
-static uhci_td_t *port_tds[UHCI_MAX_HC][2] __attribute__((aligned(16)));
-static uhci_td_t port_td_store[UHCI_MAX_HC][2] __attribute__((aligned(16)));
-
-static void port_td_init(uhci_hc_t *hc, int port){
-    int i = hc->index;
-    uhci_td_t *td = &port_td_store[i][port];
-    port_tds[i][port] = td;
-
-    td->link   = TD_LINK_TERM;
-    /* СРАЗУ ACTIVE: HC должен застать TD уже вооружённым. Если бы мы
-       оставили status=0, HC мог бы проскочить кадр без опроса порта,
-       а hot-patch (poll_refresh) не имел бы права трогать "дожжённый"
-       TD из-за гонки чтения link. */
-    td->status = TD_CTRL_ACTIVE;
-    /* IN token, addr 0, ep 0, max length, no IOC: HC "съедает" за кадр */
-    td->token  = ((uint32_t)PID_IN << TD_TOKEN_PID_SHIFT)
-               | (0u << TD_TOKEN_ADDR_SHIFT)
-               | (0u << TD_TOKEN_EP_SHIFT)
-               | ((uint32_t)0x7FF << TD_TOKEN_LEN_SHIFT);
-    td->buffer = hc->fl_phys;   /* любой валидный буфер (dummy) */
-}
-
-/* Переподключить head порта к его port-TD */
-static void port_qh_link(uhci_hc_t *hc, int port){
-    uhci_qh_t *qh = (port == 0) ? hc->port_qh : hc->port_qh1;
-    qh->head = ((uint32_t)port_tds[hc->index][port]) & ~0x0Fu;
-}
-
-void uhci_ports_schedule_all(void){
-    for (int h = 0; h < uhci_hc_count; h++){
-        uhci_hc_t *hc = uhci_hc_ptrs[h];
-        if (!hc || !hc->valid) continue;
-
-        port_td_init(hc, 0);
-        port_td_init(hc, 1);
-
-        uhci_qh_t *p0 = hc->port_qh;
-        uhci_qh_t *p1 = hc->port_qh1;
-        uhci_qh_t *cq = hc->ctrl_qh;
-        uhci_qh_t *bq = hc->bulk_qh;
-
-        /* Цепочка портов; element у последнего — terminate (очереди выкл) */
-        port_qh_link(hc, 0);
-        port_qh_link(hc, 1);
-        p0->element = (((uint32_t)p1) & ~0x0Fu) | TD_LINK_Q;
-        p1->element = TD_LINK_TERM;
-
-        cq->head    = TD_LINK_TERM;
-        cq->element = TD_LINK_TERM;
-        bq->head    = TD_LINK_TERM;
-        bq->element = TD_LINK_TERM;
-
-        uint32_t first = (((uint32_t)p0) & ~0x0Fu) | TD_LINK_Q;
-        uint32_t *fl = (uint32_t*)hc->frame_list;
-        for (int i = 0; i < 1024; i++) fl[i] = first;
-    }
-}
-
-void uhci_ports_deschedule_all(void){
-    for (int h = 0; h < uhci_hc_count; h++){
-        uhci_hc_t *hc = uhci_hc_ptrs[h];
-        if (!hc) continue;
-        uint32_t *fl = (uint32_t*)hc->frame_list;
-        for (int i = 0; i < 1024; i++) fl[i] = TD_LINK_TERM;
-    }
-}
-
-/* Проверка выравнивания расписания для всех найденных HC.
-   frame list — 4K, QH/TD — 16 байт. Возвращает 0 при успехе,
-   иначе — битовую маску проблем (бит 0 = FL, бит 1 = QH, бит 2 = TD). */
-int uhci_check_alignment(void){
-    int bad = 0;
-    for (int h = 0; h < uhci_hc_count; h++){
-        uhci_hc_t *hc = uhci_hc_ptrs[h];
-        if (!hc || !hc->valid) continue;
-
-        if (((uint32_t)hc->frame_list & 0xFFF) != 0)      bad |= 1;
-        if (((uint32_t)hc->port_qh   & 0x0F) != 0)        bad |= 2;
-        if (((uint32_t)hc->port_qh1  & 0x0F) != 0)        bad |= 2;
-        if (((uint32_t)hc->ctrl_qh   & 0x0F) != 0)        bad |= 2;
-        if (((uint32_t)hc->bulk_qh   & 0x0F) != 0)        bad |= 2;
-        if (((uint32_t)hc->ctrl_ring & 0x0F) != 0)        bad |= 4;
-        if (((uint32_t)hc->bulk_ring & 0x0F) != 0)        bad |= 4;
-    }
-    return bad;
-}
-
-/* Hot-patch port TD: вернуть ACTIVE, если HC их "дожог".
-   Вызывать раз в ~1 мс из основного цикла опроса.
-
-   Важно: HC выбирает следующий TD ПОСЛЕ выполнения текущего, читая
-   link уже ЗАПОСЛЕДНИЙ транзакцией. Поэтому перепрошивка возможна
-   только когда TD ещё ACTIVE (HC сейчас его исполняет/ждёт NAK).
-   Как только ACTIVE снят — трогать TD нельзя (риск гонки), вместо
-   этого заново вооружаем СВЕЖИЙ TD и переподключаем head порта. */
-void uhci_ports_poll_refresh(void){
-    for (int h = 0; h < uhci_hc_count; h++){
-        uhci_hc_t *hc = uhci_hc_ptrs[h];
-        if (!hc || !hc->running) continue;
-        for (int p = 0; p < uhci_hc_ports(hc); p++){
-            uhci_td_t *td = port_tds[hc->index][p];
-            if (!td) continue;
-
-            if (td->status & TD_CTRL_ACTIVE) continue;   /* HC ещё крутит */
-
-            /* TD дожжён — вооружить новый и переподключить head */
-            port_td_init(hc, p);
-            td = port_tds[hc->index][p];
-            td->status = TD_CTRL_ACTIVE;
-            port_qh_link(hc, p);
-        }
-    }
-}
-
-/* Подключить/отключить ctrl-очередь HC к расписанию.
-   enable=1: хвост цепочки портов (element последнего активного порта)
-             указывает на ctrl_qh; head ctrl_qh уже заполнен вызывающим.
-   enable=0: элемент снова terminate. */
-void uhci_ctrl_queue_enable(uhci_hc_t *hc, int enable){
-    uhci_qh_t *tail = hc->port_qh1;   /* всегда есть (2 порта) */
-    if (enable){
-        tail->element = (((uint32_t)hc->ctrl_qh) & ~0x0Fu) | TD_LINK_Q;
-    } else {
-        tail->element = TD_LINK_TERM;
-        hc->ctrl_qh->head = TD_LINK_TERM;
-    }
-}
-
-void uhci_bulk_queue_enable(uhci_hc_t *hc, int enable){
-    uhci_qh_t *tail = hc->port_qh1;
-    if (enable){
-        tail->element = (((uint32_t)hc->bulk_qh) & ~0x0Fu) | TD_LINK_Q;
-    } else {
-        tail->element = TD_LINK_TERM;
-        hc->bulk_qh->head = TD_LINK_TERM;
-    }
-}
-
-/* Проверка живости HC во время busy-wait.
-   Возвращает 0 = OK; <0 = проблема (HSE/Error/остановлен). */
-int uhci_hc_healthy(uhci_hc_t *hc){
-    uint16_t sts = inw(hc->io_base + UHCI_USBSTS);
-    if (sts & USBSTS_HSE){
-        outw(hc->io_base + UHCI_USBSTS, USBSTS_HSE);
-        uhci_dbg_hse++;
-        return -1;
-    }
-    if (sts & USBSTS_ERROR){
-        outw(hc->io_base + UHCI_USBSTS, USBSTS_ERROR);
-        uhci_dbg_err++;
-        /* Error — штатное событие (TD с ошибкой), не fatal */
-    }
-    if (!(inw(hc->io_base + UHCI_USBCMD) & USBCMD_RS)) return -2;
-    return 0;
-}
-
-/* Выделить n подряд идущих TD из кольца. Кольцо замкнуто: последний
-   TD всегда имеет валидный link, голова "съеденных" TD крутится HC
-   бесконечно, пока очередь выключена — поэтому выделяем только когда
-   свободных гарантированно больше, чем нужно. */
-static uhci_td_t *ring_alloc(uhci_hc_t *hc, int is_bulk, uint32_t n){
-    uint32_t size = is_bulk ? UHCI_BULK_RING : UHCI_CTRL_RING;
-    uint32_t *head = is_bulk ? &bulk_ring_head[hc->index]
-                             : &ctrl_ring_head[hc->index];
-    uint32_t *free_cnt = is_bulk ? &bulk_ring_free[hc->index]
-                                 : &ctrl_ring_free[hc->index];
-
-    if (*free_cnt < n) return NULL;
-
-    uhci_td_t *ring = is_bulk ? hc->bulk_ring : hc->ctrl_ring;
-    uint32_t start = *head;
-    *head = (*head + n) % size;
-    *free_cnt -= n;
-
-    /* Замкнуть кольцо: последний выдаваемого участка ссылается на голову */
-    for (uint32_t i = 0; i < n; i++){
-        uint32_t idx = (start + i) % size;
-        uint32_t nxt = (start + i + 1) % size;
-        ring[idx].link = ((uint32_t)&ring[nxt]) & ~0x0Fu;
-    }
-    return &ring[start];
-}
-
-static void ring_release(uhci_hc_t *hc, int is_bulk, uint32_t n){
-    uint32_t size = is_bulk ? UHCI_BULK_RING : UHCI_CTRL_RING;
-    uint32_t *head = is_bulk ? &bulk_ring_head[hc->index]
-                             : &ctrl_ring_head[hc->index];
-    uint32_t *free_cnt = is_bulk ? &bulk_ring_free[hc->index]
-                                 : &ctrl_ring_free[hc->index];
-    *head = (*head + n) % size;
-    *free_cnt += n;
-}
-
-/* ---------------- Control transfer ---------------- */
+//---------------- Control transfer ----------------
 
 int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr,
                           const uint8_t *setup_pkt,
                           void *data_buf, uint16_t data_len,
-                          int data_in, uint16_t max_pkt){
+                          int data_in, uint16_t max_pkt)
+{
 
     if (!hc || !setup_pkt) return -1;
     if (max_pkt == 0 || max_pkt > 64) max_pkt = 8;
 
-    int has_data = (data_len > 0 && data_buf != NULL);
+    //Low-speed устройство (клавиатура, мышь, тачпад): нужен TD_CTRL_LS в статусе всех TD,
+    //иначе HC отправит FS-пакет и LS-устройство его не примет
+    uint32_t ls_bit = (dev_addr < 128 && uhci_dev_is_ls[dev_addr])
+                      ? TD_CTRL_LS : 0;
+
+    //Сколько TD понадобится под data stage (по одному на пакет)
     uint32_t num_data = 0;
-    if (has_data){
+    int has_data = (data_len > 0 && data_buf != NULL);
+    if (has_data)
+    {
         num_data = (data_len + max_pkt - 1) / max_pkt;
-        if (num_data > UHCI_CTRL_RING - 2)
-            num_data = UHCI_CTRL_RING - 2;
+        if (num_data > MAX_CONTROL_TDS - 2)
+        {
+            num_data = MAX_CONTROL_TDS - 2;   //обрезаем, если не влезает
+        }
     }
-    uint32_t total_tds = 1 + num_data + 1;
+    uint32_t total_tds = 1 + num_data + 1;    //setup + data + status
 
-    uhci_td_t *tds = ring_alloc(hc, 0, total_tds);
-    if (!tds) return -4;    /* кольцо переполнено — HC не успевает */
+    //Setup packet копируем в статику (identity-map)
+    for (int i = 0; i < 8; i++) setup_static_ptr[i] = setup_pkt[i];
 
-    uint8_t *setup_buf = setup_statics[hc->index];
-    for (int i = 0; i < 8; i++) setup_buf[i] = setup_pkt[i];
+    uhci_td_t *tds = control_tds_ptr;
+    uint8_t   *buf = (uint8_t *)data_buf;
 
-    uint8_t *buf = (uint8_t *)data_buf;
-
-    /* --- TD[0]: SETUP, DATA0, 8 байт --- */
-    tds[0].status = TD_CTRL_ACTIVE;
+    //TD[0]: SETUP, DATA0, 8 байт
+    tds[0].link   = (control_tds_phys + sizeof(uhci_td_t)) & ~0x0Fu;
+    tds[0].status = TD_CTRL_ACTIVE | TD_CTRL_MAXERR_3 | ls_bit;
     tds[0].token  = ((uint32_t)PID_SETUP << TD_TOKEN_PID_SHIFT)
-                  | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT)
-                  | (0u << TD_TOKEN_EP_SHIFT)
-                  | 0u                                              /* DATA0 */
-                  | ((uint32_t)(8 - 1) << TD_TOKEN_LEN_SHIFT);
-    tds[0].buffer = (uint32_t)setup_buf;   /* статика = VA==PA */
+                    | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT)
+                    | (0u << TD_TOKEN_EP_SHIFT)
+                    | 0u                                              //DATA0
+                    | ((uint32_t)(8 - 1) << TD_TOKEN_LEN_SHIFT);
+    tds[0].buffer = setup_static_phys;
 
-    /* --- TD[1..num_data]: Data stage, чанки по max_pkt ---
-       Toggle в data stage начинается с DATA1 и чередуется. */
-    for (uint32_t i = 0; i < num_data; i++){
+    //TD[1..num_data]: Data stage, чанки по max_pkt
+    //Toggle в data stage начинается с DATA1 и чередуется:
+    //i=0 -> DATA1, i=1 -> DATA0, i=2 -> DATA1, ...
+    for (uint32_t i = 0; i < num_data; i++)
+    {
         uint32_t idx   = 1 + i;
         uint32_t off   = i * max_pkt;
         uint32_t chunk = (data_len - off > max_pkt) ? max_pkt
-                                                    : (data_len - off);
+                         : (data_len - off);
         uint32_t toggle = ((i & 1) == 0) ? TD_TOKEN_TOGGLE : 0u;
+        uint32_t next_idx = (i + 1 < num_data) ? (idx + 1) : (1 + num_data);
+        uint32_t next   = (control_tds_phys + next_idx * sizeof(uhci_td_t)) & ~0x0Fu;
 
-        tds[idx].status = TD_CTRL_ACTIVE;
+        tds[idx].link   = next;
+        //tds[idx].status = TD_CTRL_ACTIVE | TD_CTRL_MAXERR_3;
+        uint32_t spd = data_in ? TD_CTRL_SPD : 0;
+        tds[idx].status = TD_CTRL_ACTIVE | TD_CTRL_MAXERR_3 | spd | ls_bit;
         tds[idx].token  = ((uint32_t)(data_in ? PID_IN : PID_OUT) << TD_TOKEN_PID_SHIFT)
-                        | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT)
-                        | (0u << TD_TOKEN_EP_SHIFT)
-                        | toggle
-                        | ((uint32_t)(chunk - 1) << TD_TOKEN_LEN_SHIFT);
+                          | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT)
+                          | (0u << TD_TOKEN_EP_SHIFT)
+                          | toggle
+                          | ((uint32_t)(chunk - 1) << TD_TOKEN_LEN_SHIFT);
         tds[idx].buffer = usb_virt_to_phys((uint32_t)(buf + off));
     }
 
-    /* --- Status TD: направление противоположно data, всегда DATA1 --- */
+    //Status TD: направление противоположно data, всегда DATA1, 0 байт
     uint32_t sidx       = 1 + num_data;
     uint32_t status_pid = has_data ? (data_in ? PID_OUT : PID_IN) : PID_IN;
 
-    tds[sidx].status = TD_CTRL_ACTIVE;   /* IOC не ставим: прерываний нет */
+    tds[sidx].link   = TD_LINK_TERM;
+    tds[sidx].status = TD_CTRL_ACTIVE | TD_CTRL_IOC | TD_CTRL_MAXERR_3 | ls_bit;
     tds[sidx].token  = (status_pid << TD_TOKEN_PID_SHIFT)
-                     | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT)
-                     | (0u << TD_TOKEN_EP_SHIFT)
-                     | TD_TOKEN_TOGGLE
-                     | ((uint32_t)0x7FF << TD_TOKEN_LEN_SHIFT);
-    tds[sidx].buffer = (uint32_t)setup_buf;
+                       | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT)
+                       | (0u << TD_TOKEN_EP_SHIFT)
+                       | TD_TOKEN_TOGGLE
+                       | ((uint32_t)0x7FF << TD_TOKEN_LEN_SHIFT);
+    tds[sidx].buffer = setup_static_phys;
 
-    /* --- Включить ctrl-очередь в расписание --- */
-    hc->ctrl_qh->head = ((uint32_t)tds) & ~0x0Fu;
-    uhci_ctrl_queue_enable(hc, 1);
+    //--- QH ---
+    control_qh_ptr->head    = control_tds_phys & ~0x0Fu;
+    control_qh_ptr->element = TD_LINK_TERM;
 
-    /* --- Ожидание --- */
-    uint32_t timeout = 20000000;
+    //Гарантируем, что контроллер увидит полностью сформированные TD до того,
+    //как QH будет подключён к Frame List
+    uhci_wmb();
+
+    uint32_t qh_phys_val = control_qh_phys;
+    for (int i = 0; i < 1024; i++)
+        *(uint32_t*)&frame_list_ptr[i*4] = (qh_phys_val & ~0x0Fu) | TD_LINK_Q;
+
+    //--- Ожидание ---
+    uint32_t timeout = 50000000;   //safety-net по итерациям
+    uint32_t nak_retries = 0;
+    uint32_t start_tick = uhci_get_ticks();
+    //200 тиков * 10 мс = 2 секунды. Гранулярность 10 мс, точность <0.5 %
+    const uint32_t CTRL_TIMEOUT_TICKS = UHCI_TICKS_PER_SEC * UHCI_CTRL_TIMEOUT_SEC;
+
     int result = -3;
-    while (timeout--){
-        uint32_t st = tds[sidx].status;
-        if (!(st & TD_CTRL_ACTIVE)){
-            uint32_t bad = TD_CTRL_STALLED | TD_CTRL_DBUFERR |
-                           TD_CTRL_BABBLE  | TD_CTRL_CRCTIMEO |
-                           TD_CTRL_BITSTUFF;
-            if (st & bad){ result = -2; break; }
-            int data_ok = 1;
-            for (uint32_t i = 0; i < num_data; i++){
-                if (tds[1 + i].status & bad){ data_ok = 0; break; }
+    while (timeout--)
+    {
+        if ((timeout & 0x3FF) == 0)
+        {
+            if (uhci_hc_healthy(hc) != 0)
+            {
+                result = -4;
+                break;
             }
-            result = data_ok ? (int)data_len : -2;
+        }
+        //(current - start) корректно через переполнение uint32_t:
+        //пока timeout < 2^31 тиков (248 суток), всё работает
+        if ((timeout & 0xFF) == 0 &&
+                (uhci_get_ticks() - start_tick) > CTRL_TIMEOUT_TICKS)
+        {
+            result = -5;
             break;
         }
-        if ((timeout & 0xFFFF) == 0){
-            if (uhci_hc_healthy(hc) < 0){ result = -5; break; }
+
+        uint32_t st = tds[sidx].status;
+        if (!(st & TD_CTRL_ACTIVE))
+        {
+            //Только реальные ошибки — NAK сюда не входит, он штатный
+            uint32_t hard_bad = TD_CTRL_STALLED | TD_CTRL_DBUFERR |
+                                TD_CTRL_BABBLE  | TD_CTRL_CRCTIMEO;
+
+            //Проверить все TD на ошибки и NAK
+            int hard_err  = 0;
+            int nak_seen  = 0;
+            for (uint32_t i = 0; i < total_tds; i++)
+            {
+                uint32_t kst = tds[i].status;
+                if (kst & hard_bad)
+                {
+                    hard_err = 1;
+                    break;
+                }
+                if (kst & TD_CTRL_NAK) nak_seen = 1;
+            }
+            if (hard_err)
+            {
+                result = -2;
+                break;
+            }
+
+            if (nak_seen)
+            {
+                //Retry: toggle-механизм USB защитит от дублирования данных
+                //(device discarded+ACK на повторный toggle)
+                //Safety-net от бесконечного NAK — nak_retries и TSC
+                if (++nak_retries > 1000)
+                {
+                    result = -5;
+                    break;
+                }
+                for (uint32_t i = 0; i < total_tds; i++)
+                {
+                    tds[i].status = TD_CTRL_ACTIVE | TD_CTRL_MAXERR_3 | ls_bit;
+                    if (i == sidx) tds[i].status |= TD_CTRL_IOC;
+                    //SPD — только на data-stage IN-TD (setup и status его не должны иметь по спеке)
+                    if (data_in && i >= 1 && i <= num_data)
+                    {
+                        tds[i].status |= TD_CTRL_SPD;
+                    }
+                }
+                uhci_wmb();
+                continue;
+            }
+
+            //Все TD прошли успешно
+            result = (int)data_len;
+            break;
         }
     }
-    if (result == -3) uhci_dbg_timeout++;
 
-    uhci_ctrl_queue_enable(hc, 0);
-    ring_release(hc, 0, total_tds);
+    //Снять ACTIVE со всех TD, чтобы они были чистыми к следующему вызову
+    for (uint32_t i = 0; i < total_tds; i++)
+    {
+        tds[i].status &= ~TD_CTRL_ACTIVE;
+    }
+
+    //После завершения TD гарантируем, что CPU увидит данные, записанные контроллером
+    //(актуально для IN-передач)
+    uhci_rmb();
+
+        //Диагностика неудачи control-transfer: покажем код, финальный статус TD
+    //и PORTSC — по ним видно, STALL это, timeout, или порт выключился.
+    if (result < 0 && api_ptr && api_ptr->load_screen_add_string) {
+        api_ptr->load_screen_add_string("ctrl xfer: r=%x st=%x ls=%d addr=%d",
+            (uint32_t)result, tds[sidx].status, (int)(ls_bit ? 1 : 0), dev_addr);
+    }
+
+    for (int i = 0; i < 1024; i++)
+        *(uint32_t*)&frame_list_ptr[i*4] = TD_LINK_TERM;
 
     (void)total_tds;
     return result;
 }
 
-/* ---------------- Bulk transfer ---------------- */
-
 int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
                        uint16_t ep_max_pkt, uint8_t *toggle,
-                       void *buf, uint32_t len, int dir_in){
+                       void *buf, uint32_t len, int dir_in)
+{
 
     if (!hc || !buf || len == 0 || !toggle) return -1;
     if (ep_max_pkt == 0 || ep_max_pkt > 1024) ep_max_pkt = 64;
 
     uint32_t num_tds = (len + ep_max_pkt - 1) / ep_max_pkt;
-    if (num_tds > UHCI_BULK_RING){
-        num_tds = UHCI_BULK_RING;
-        len = num_tds * ep_max_pkt;    /* режем запрос до влезающего */
+    if (num_tds > MAX_BULK_TDS)
+    {
+        num_tds = MAX_BULK_TDS;
+        len = num_tds * ep_max_pkt;    //режем запрос до влезающего
     }
-
-    uhci_td_t *tds = ring_alloc(hc, 1, num_tds);
-    if (!tds) return -4;
 
     uint8_t ep_num = ep_addr & 0x0F;
     uint8_t cur_toggle = *toggle ? 1 : 0;
     uint8_t *b = (uint8_t *)buf;
+    uhci_td_t *tds = bulk_tds_ptr;
 
-    for (uint32_t i = 0; i < num_tds; i++){
+    for (uint32_t i = 0; i < num_tds; i++)
+    {
         uint32_t off   = i * ep_max_pkt;
         uint32_t chunk = (len - off > ep_max_pkt) ? ep_max_pkt : (len - off);
         uint32_t toggle_bit = cur_toggle ? TD_TOKEN_TOGGLE : 0u;
+        uint32_t next = (i + 1 < num_tds)
+                        ? ((bulk_tds_phys + (i + 1) * sizeof(uhci_td_t)) & ~0x0Fu)
+                        : TD_LINK_TERM;
 
-        tds[i].status = TD_CTRL_ACTIVE;
+        tds[i].link   = next;
+        //tds[i].status = TD_CTRL_ACTIVE | (i == num_tds - 1 ? TD_CTRL_IOC : 0u) | TD_CTRL_MAXERR_3;
+        uint32_t spd = dir_in ? TD_CTRL_SPD : 0;
+        tds[i].status = TD_CTRL_ACTIVE | TD_CTRL_MAXERR_3 | spd | (i == num_tds - 1 ? TD_CTRL_IOC : 0u);
         tds[i].token  = ((uint32_t)(dir_in ? PID_IN : PID_OUT) << TD_TOKEN_PID_SHIFT)
-                      | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT)
-                      | ((uint32_t)ep_num << TD_TOKEN_EP_SHIFT)
-                      | toggle_bit
-                      | ((uint32_t)(chunk - 1) << TD_TOKEN_LEN_SHIFT);
+                        | ((uint32_t)dev_addr << TD_TOKEN_ADDR_SHIFT)
+                        | ((uint32_t)ep_num << TD_TOKEN_EP_SHIFT)
+                        | toggle_bit
+                        | ((uint32_t)(chunk - 1) << TD_TOKEN_LEN_SHIFT);
         tds[i].buffer = usb_virt_to_phys((uint32_t)(b + off));
 
         cur_toggle ^= 1;
     }
-    /* Последний TD замыкает кольцо на голову — см. ring_alloc */
 
-    hc->bulk_qh->head = ((uint32_t)tds) & ~0x0Fu;
-    uhci_bulk_queue_enable(hc, 1);
+    bulk_qh_ptr->head    = bulk_tds_phys & ~0x0Fu;
+    bulk_qh_ptr->element = TD_LINK_TERM;
 
-    /* Ждём завершения ВСЕХ TD (не только последнего: кольцо крутится).
-       Успех = ни одного бита ошибки и все ACTIVE сняты. */
-    uint32_t rounds = 0;
-    uint32_t timeout = 20000000;
+    uhci_wmb();
+
+    uint32_t qh_phys_val = bulk_qh_phys;
+    for (int i = 0; i < 1024; i++)
+        *(uint32_t*)&frame_list_ptr[i*4] = (qh_phys_val & ~0x0Fu) | TD_LINK_Q;
+
+    uint32_t timeout = 100000000;   //safety-net по итерациям
+    uint32_t nak_retries = 0;
+    uint32_t start_tick = uhci_get_ticks();
+    //500 тиков * 10 мс = 5 секунд
+    const uint32_t BULK_TIMEOUT_TICKS = UHCI_TICKS_PER_SEC * UHCI_BULK_TIMEOUT_SEC;
+
     int result = -3;
-    const uint32_t bad = TD_CTRL_STALLED | TD_CTRL_DBUFERR |
-                         TD_CTRL_BABBLE  | TD_CTRL_CRCTIMEO |
-                         TD_CTRL_BITSTUFF;
-    while (timeout--){
-        uint32_t active_left = 0, err = 0;
-        for (uint32_t k = 0; k < num_tds; k++){
-            uint32_t st = tds[k].status;
-            if (st & TD_CTRL_ACTIVE) active_left++;
-            if (st & bad) err = 1;
-        }
-        if (err){ result = -2; break; }
-        if (active_left == 0){
-            /* Все TD обработаны. Но HC мог прокрутить кольцо повторно
-               (NAK-переоценка) — сверяемся только когда хотя бы один
-               раунд истёк. Простейшая защита: ждём ещё один кадр. */
-            if (++rounds >= 2){
-                *toggle = cur_toggle;
-                result = (int)len;
+    while (timeout--)
+    {
+        if ((timeout & 0x3FF) == 0)
+        {
+            if (uhci_hc_healthy(hc) != 0)
+            {
+                result = -4;
                 break;
             }
         }
-        if ((timeout & 0xFFFF) == 0){
-            if (uhci_hc_healthy(hc) < 0){ result = -5; break; }
+        if ((timeout & 0xFF) == 0 &&
+                (uhci_get_ticks() - start_tick) > BULK_TIMEOUT_TICKS)
+        {
+            result = -5;
+            break;
+        }
+
+        uint32_t st = tds[num_tds - 1].status;
+        if (!(st & TD_CTRL_ACTIVE))
+        {
+            uint32_t hard_bad = TD_CTRL_STALLED | TD_CTRL_DBUFERR |
+                                TD_CTRL_BABBLE  | TD_CTRL_CRCTIMEO;
+
+            int hard_err  = 0;
+            int nak_seen  = 0;
+            for (uint32_t k = 0; k < num_tds; k++)
+            {
+                uint32_t kst = tds[k].status;
+                if (kst & hard_bad)
+                {
+                    hard_err = 1;
+                    break;
+                }
+                if (kst & TD_CTRL_NAK) nak_seen = 1;
+            }
+            if (hard_err)
+            {
+                result = -2;
+                break;
+            }
+
+            if (nak_seen)
+            {
+                //Retry: toggle-механизм USB гарантирует, что уже ACK'нутые пакеты не будут приняты
+                // повторно (discard+ACK)
+                if (++nak_retries > 1000)
+                {
+                    result = -5;
+                    break;
+                }
+                for (uint32_t i = 0; i < num_tds; i++)
+                {
+                    tds[i].status = TD_CTRL_ACTIVE | TD_CTRL_MAXERR_3;
+                    if (i == num_tds - 1) tds[i].status |= TD_CTRL_IOC;
+                    if (dir_in) tds[i].status |= TD_CTRL_SPD;
+                }
+                uhci_wmb();
+                continue;
+            }
+
+            //Все TD успешно завершены
+            *toggle = cur_toggle;
+            result = (int)len;
+            break;
         }
     }
-    if (result == -3) uhci_dbg_timeout++;
 
-    uhci_bulk_queue_enable(hc, 0);
-    /* Снять ACTIVE со всех TD до возврата в пул (иначе следующий
-       владелец кольца увидит мусор) */
-    for (uint32_t k = 0; k < num_tds; k++){
-        tds[k].status = 0;
-        tds[k].link   = TD_LINK_TERM;
+    //Снять ACTIVE со всех TD
+    for (uint32_t k = 0; k < num_tds; k++)
+    {
+        tds[k].status &= ~TD_CTRL_ACTIVE;
     }
-    ring_release(hc, 1, num_tds);
+
+    uhci_rmb();   //для IN-передач: данные точно видны CPU
+
+    for (int i = 0; i < 1024; i++)
+        *(uint32_t*)&frame_list_ptr[i*4] = TD_LINK_TERM;
 
     return result;
 }
+
+
+
+int uhci_check_alignment(void)
+{
+    //Если структуры ещё не выделены — это ошибка порядка вызова
+    if (!frame_list_ptr || !control_qh_ptr || !control_tds_ptr ||
+            !bulk_qh_ptr || !bulk_tds_ptr || !setup_static_ptr)
+    {
+        return -1;
+    }
+
+    int bad = 0;
+    if ((frame_list_phys   & 0xFFF) != 0) bad |= 1;
+    if ((control_qh_phys   & 0x0F)  != 0) bad |= 2;
+    if ((control_tds_phys  & 0x0F)  != 0) bad |= 4;
+    if ((bulk_qh_phys      & 0x0F)  != 0) bad |= 8;
+    if ((bulk_tds_phys     & 0x0F)  != 0) bad |= 16;
+    if ((setup_static_phys & 0x0F)  != 0) bad |= 32;
+
+    return bad;
+}
+

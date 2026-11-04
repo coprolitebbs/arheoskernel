@@ -18,11 +18,12 @@
 #include "../../include/ustd.h"
 #include "../../include/umemory.h"
 
-int main(int argc, char *argv[]){
+int main(int argc, char *argv[])
+{
 
     clear_screen();
 
-    //Выводим стартовое приветствие прямо в верхнее окно логов терминала через STDOUT!
+    //Выводим стартовое приветствие прямо в верхнее окно логов терминала через STDOUT
     printf("==================================================\n");
     printf(" ARheOS TTY Cooked Core - Stream Console Mode  \n");
     printf("==================================================\n");
@@ -34,22 +35,26 @@ int main(int argc, char *argv[]){
     //char line_buffer[4095];
     uint32_t iteration_count = 0;
 
-    while (1){
+    while (1)
+    {
         //Полностью зануляем буфер перед чтением
-        for (int i = 0; i < 4096; i++){
+        for (int i = 0; i < 4096; i++)
+        {
             line_buffer[i] = 0;
         }
         //Задача уходит в глубокий сон ядра до нажатия Enter
         int bytes_received = u_read(STDIN, line_buffer, 4095);
 
         //Проверка
-        if (bytes_received >= 0){
+        if (bytes_received >= 0)
+        {
             iteration_count++; //Посчитали готовую строку лога
             //Выводим данные последовательным потоком
             printf("[Iter: %d] u_read returned: %d bytes\n", iteration_count, bytes_received);
             printf("  Raw dump (HEX codes): ");
             int limit = (bytes_received > 8) ? 8 : bytes_received;
-            for (int i = 0; i < limit; i++){
+            for (int i = 0; i < limit; i++)
+            {
                 uint32_t char_code = (uint32_t)((unsigned char)line_buffer[i]);
                 printf("0x%x ", char_code);
             }
@@ -57,7 +62,9 @@ int main(int argc, char *argv[]){
 
             printf("  String text: \"%s\"\n\n", line_buffer);
 
-        } else {
+        }
+        else
+        {
             //Если прилетел ложный 0 или ошибка - уступаем квант времени
             yield();
         }

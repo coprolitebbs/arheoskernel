@@ -45,7 +45,8 @@ boot_info_t *main_boot_info = 0;
 
 
 
-int fat12_read_file_at(fat12_fs_t *vol,uint16_t start_cluster,uint32_t position,void *buffer,uint32_t size){
+int fat12_read_file_at(fat12_fs_t *vol,uint16_t start_cluster,uint32_t position,void *buffer,uint32_t size)
+{
     if (!vol || !buffer) return FS_IO_ERROR;
     if (!vol->mounted) return FS_IO_ERROR;
     if (size == 0) return 0;
@@ -62,7 +63,8 @@ int fat12_read_file_at(fat12_fs_t *vol,uint16_t start_cluster,uint32_t position,
     //position = 2 * cluster_size -> третий кластер
     uint32_t cluster_index = position / cluster_size;
     uint32_t offset_in_cluster = position % cluster_size;
-    for (uint32_t i = 0; i < cluster_index; i++){
+    for (uint32_t i = 0; i < cluster_index; i++)
+    {
         uint16_t next = fat12_get_next_cluster(vol,cluster);
         //FAT12 EOF
         if (next >= 0xFF8) return FS_CORRUPTED;
@@ -75,7 +77,8 @@ int fat12_read_file_at(fat12_fs_t *vol,uint16_t start_cluster,uint32_t position,
     uint8_t *dst = (uint8_t *)buffer;
     uint32_t remaining = size;
     //Читаем файл кластер за кластером
-    while (remaining > 0){
+    while (remaining > 0)
+    {
         //LBA первого сектора текущего кластера: * data_start + (cluster - 2) * sectors_per_cluster
         uint32_t cluster_lba = vol->data_start + ((uint32_t)(cluster - 2) * vol->sectors_per_cluster);
         //Сколько байт осталось в текущем кластере после offset_in_cluster
@@ -93,7 +96,8 @@ int fat12_read_file_at(fat12_fs_t *vol,uint16_t start_cluster,uint32_t position,
         //Максимально нам понадобится sectors_per_cluster * 512 байт
         uint8_t sector_buffer[512];
         //Простой случай: читаем целое число секторов прямо в пользовательский buffer
-        if (sector_offset == 0 && to_read >= vol->bytes_per_sector){
+        if (sector_offset == 0 && to_read >= vol->bytes_per_sector)
+        {
             uint32_t full_sectors = to_read / vol->bytes_per_sector;
             uint32_t bytes = full_sectors * vol->bytes_per_sector;
             int r = fat12_read_sectors(vol,cluster_lba + first_sector,full_sectors,dst);
@@ -104,7 +108,8 @@ int fat12_read_file_at(fat12_fs_t *vol,uint16_t start_cluster,uint32_t position,
             if (remaining == 0) break;
             offset_in_cluster += bytes;
             //Если дошли до конца кластера
-            if (offset_in_cluster >= cluster_size){
+            if (offset_in_cluster >= cluster_size)
+            {
                 offset_in_cluster = 0;
                 uint16_t next = fat12_get_next_cluster(vol,cluster);
                 if (next >= 0xFF8) return FS_CORRUPTED;
@@ -126,7 +131,8 @@ int fat12_read_file_at(fat12_fs_t *vol,uint16_t start_cluster,uint32_t position,
         remaining -= chunk;
         offset_in_cluster += chunk;
         //Если закончили кластер — переходим к следующему
-        if (offset_in_cluster >= cluster_size){
+        if (offset_in_cluster >= cluster_size)
+        {
             offset_in_cluster = 0;
             if (remaining == 0) break;
             uint16_t next = fat12_get_next_cluster(vol,cluster);
@@ -141,14 +147,16 @@ int fat12_read_file_at(fat12_fs_t *vol,uint16_t start_cluster,uint32_t position,
 }
 
 
-static int fat12_make_83(const char *src,char out[11]){
+static int fat12_make_83(const char *src,char out[11])
+{
     if (!src || !out) return FS_IO_ERROR;
     //Заполняем всё пробелами
     for (int i = 0; i < 11; i++) out[i] = ' ';
     int pos = 0;
     int ext = 0;
     //Имя файла
-    while (*src && *src != '.'){
+    while (*src && *src != '.')
+    {
         if (pos >= 8) return FS_INVALID_PATH;
         char c = *src++;
         //FAT 8.3 используем в верхнем регистре
@@ -156,11 +164,13 @@ static int fat12_make_83(const char *src,char out[11]){
         out[pos++] = c;
     }
     //Расширение
-    if (*src == '.'){
+    if (*src == '.')
+    {
         src++;
         ext = 1;
         int ext_pos = 0;
-        while (*src){
+        while (*src)
+        {
             if (ext_pos >= 3) return FS_INVALID_PATH;
             char c = *src++;
             if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
@@ -175,7 +185,8 @@ static int fat12_make_83(const char *src,char out[11]){
 
 
 
-static int fat12_root_readdir(fat12_file_t *file,fs_dirent_t *out){
+static int fat12_root_readdir(fat12_file_t *file,fs_dirent_t *out)
+{
     if (!file || !out) return FS_IO_ERROR;
     fat12_fs_t *vol = file->vol;
     if (!vol || !vol->mounted) return FS_IO_ERROR;
@@ -184,7 +195,8 @@ static int fat12_root_readdir(fat12_file_t *file,fs_dirent_t *out){
     //Конец каталога
     if (file->position >= root_bytes) return FS_EOF;
     uint8_t buffer[512];
-    while (file->position < root_bytes){
+    while (file->position < root_bytes)
+    {
         uint32_t sector_index = file->position / vol->bytes_per_sector;
         uint32_t entry_offset = file->position % vol->bytes_per_sector;
         uint32_t lba = vol->root_start + sector_index;
@@ -202,8 +214,10 @@ static int fat12_root_readdir(fat12_file_t *file,fs_dirent_t *out){
         if ((entry->attr & 0x0F) == 0x0F) continue;
         //Пока просто возвращаем FAT 8.3 имя в обычном виде
         int n = 0;
-        for (int i = 0; i < 11 && n < 255; i++){
-            if (i == 8){
+        for (int i = 0; i < 11 && n < 255; i++)
+        {
+            if (i == 8)
+            {
                 //Если есть расширение
                 if (entry->name[8] != ' ') out->name[n++] = '.';
             }
@@ -226,54 +240,64 @@ static int fat12_root_readdir(fat12_file_t *file,fs_dirent_t *out){
 }
 
 
-// Запись значения в RAM-копию таблицы FAT (Логика обратная fat12_get_next_cluster)
-static void fat12_set_cluster_value(fat12_fs_t *vol, uint16_t cluster, uint16_t value){
+//Запись значения в RAM-копию таблицы FAT (Логика обратная fat12_get_next_cluster)
+static void fat12_set_cluster_value(fat12_fs_t *vol, uint16_t cluster, uint16_t value)
+{
     uint32_t offset = cluster + (cluster / 2);
     value &= 0x0FFF;
-    if (cluster & 1) {
+    if (cluster & 1)
+    {
         vol->fat[offset] = (vol->fat[offset] & 0x0F) | ((value & 0x0F) << 4);
         vol->fat[offset + 1] = (value >> 4) & 0xFF;
-    } else {
+    }
+    else
+    {
         vol->fat[offset] = value & 0xFF;
         vol->fat[offset + 1] = (vol->fat[offset + 1] & 0xF0) | ((value >> 8) & 0x0F);
     }
 }
 
-// Принудительный сброс FAT из RAM на дискету (пишем в обе копии FAT для надежности)
-static int fat12_flush_fat(fat12_fs_t *vol){
-    // Пишем в FAT #1
+//Принудительный сброс FAT из RAM на дискету (пишем в обе копии FAT для надежности)
+static int fat12_flush_fat(fat12_fs_t *vol)
+{
+    //Пишем в FAT #1
     int r = fat12_write_sectors(vol, vol->reserved_sectors, vol->sectors_per_fat, vol->fat);
     if (r != FS_OK) return r;
-    // Пишем в FAT #2 (если она есть)
-    if (vol->fat_count > 1) {
+    //Пишем в FAT #2 (если она есть)
+    if (vol->fat_count > 1)
+    {
         fat12_write_sectors(vol, vol->reserved_sectors + vol->sectors_per_fat, vol->sectors_per_fat, vol->fat);
     }
     return FS_OK;
 }
 
-// Поиск первого свободного кластера (содержит 0x000) и маркировка его как EOF (0xFFF)
-static int fat12_allocate_cluster(fat12_fs_t *vol, uint16_t *out_cluster){
-    // Кластеры 0 и 1 зарезервированы, ищем со 2-го до конца диска
+//Поиск первого свободного кластера (содержит 0x000) и маркировка его как EOF (0xFFF)
+static int fat12_allocate_cluster(fat12_fs_t *vol, uint16_t *out_cluster)
+{
+    //Кластеры 0 и 1 зарезервированы, ищем со 2-го до конца диска
     uint32_t max_clusters = (vol->sectors_per_fat * vol->bytes_per_sector * 2) / 3;
 
-    for (uint16_t c = 2; c < max_clusters; c++){
-        if (fat12_get_next_cluster(vol, c) == 0x000) {
-            fat12_set_cluster_value(vol, c, 0xFFF); // Временно помечаем как конец файла
+    for (uint16_t c = 2; c < max_clusters; c++)
+    {
+        if (fat12_get_next_cluster(vol, c) == 0x000)
+        {
+            fat12_set_cluster_value(vol, c, 0xFFF); //Временно помечаем как конец файла
             *out_cluster = c;
             return FS_OK;
         }
     }
-    return FS_IO_ERROR; // Диск заполнен (No space left on device)
+    return FS_IO_ERROR; //Диск заполнен (No space left on device)
 }
 
-static int fat12_update_dirent(fat12_fs_t *vol, uint16_t parent_cluster, uint32_t entry_id, uint16_t start_cluster, uint32_t file_size){
+static int fat12_update_dirent(fat12_fs_t *vol, uint16_t parent_cluster, uint32_t entry_id, uint16_t start_cluster, uint32_t file_size)
+{
     uint32_t entries_per_sector = vol->bytes_per_sector / sizeof(fat12_dirent_t);
     uint32_t sector_index = entry_id / entries_per_sector;
     uint32_t entry_offset = (entry_id % entries_per_sector) * sizeof(fat12_dirent_t);
 
     uint8_t buffer[512] __attribute__((aligned(4)));
 
-    // Вычисляем старт чтения секторов в зависимости от типа родительской папки
+    //Вычисляем старт чтения секторов в зависимости от типа родительской папки
     uint32_t scan_start = (parent_cluster == 0) ? vol->root_start : (vol->data_start + (uint32_t)(parent_cluster - 2) * vol->sectors_per_cluster);
     uint32_t lba = scan_start + sector_index;
 
@@ -288,13 +312,15 @@ static int fat12_update_dirent(fat12_fs_t *vol, uint16_t parent_cluster, uint32_
 }
 
 
-static int fat12_write_file_at(fat12_fs_t *vol, uint16_t *start_cluster, uint32_t position, const void *buffer, uint32_t size){
+static int fat12_write_file_at(fat12_fs_t *vol, uint16_t *start_cluster, uint32_t position, const void *buffer, uint32_t size)
+{
     if (!vol || !buffer || size == 0) return 0;
 
     uint32_t cluster_size = vol->sectors_per_cluster * vol->bytes_per_sector;
 
-    // Если у файла еще нет кластеров (новый пустой файл)
-    if (*start_cluster < 2){
+    //Если у файла еще нет кластеров (новый пустой файл)
+    if (*start_cluster < 2)
+    {
         uint16_t new_c;
         if (fat12_allocate_cluster(vol, &new_c) != FS_OK) return FS_IO_ERROR;
         *start_cluster = new_c;
@@ -304,10 +330,12 @@ static int fat12_write_file_at(fat12_fs_t *vol, uint16_t *start_cluster, uint32_
     uint32_t cluster_index = position / cluster_size;
     uint32_t offset_in_cluster = position % cluster_size;
 
-    // Шагаем до нужной позиции
-    for (uint32_t i = 0; i < cluster_index; i++){
+    //Шагаем до нужной позиции
+    for (uint32_t i = 0; i < cluster_index; i++)
+    {
         uint16_t next = fat12_get_next_cluster(vol, cluster);
-        if (next >= 0xFF8){ // Достигли конца файла, но позиция записи лежит дальше, расширим файл
+        if (next >= 0xFF8)  //Достигли конца файла, но позиция записи лежит дальше, расширим файл
+        {
             uint16_t new_c;
             if (fat12_allocate_cluster(vol, &new_c) != FS_OK) return FS_IO_ERROR;
             fat12_set_cluster_value(vol, cluster, new_c);
@@ -319,7 +347,8 @@ static int fat12_write_file_at(fat12_fs_t *vol, uint16_t *start_cluster, uint32_
     const uint8_t *src = (const uint8_t *)buffer;
     uint32_t remaining = size;
 
-    while (remaining > 0){
+    while (remaining > 0)
+    {
         uint32_t cluster_lba = vol->data_start + ((uint32_t)(cluster - 2) * vol->sectors_per_cluster);
         uint32_t available = cluster_size - offset_in_cluster;
         uint32_t to_write = remaining;
@@ -330,8 +359,9 @@ static int fat12_write_file_at(fat12_fs_t *vol, uint16_t *start_cluster, uint32_
 
         uint8_t sector_buffer[512];
 
-        // Простой случай- пишем полный сектор/сектора напрямую из буфера
-        if (sector_offset == 0 && to_write >= vol->bytes_per_sector) {
+        //Простой случай- пишем полный сектор/сектора напрямую из буфера
+        if (sector_offset == 0 && to_write >= vol->bytes_per_sector)
+        {
             uint32_t full_sectors = to_write / vol->bytes_per_sector;
             uint32_t bytes = full_sectors * vol->bytes_per_sector;
 
@@ -343,7 +373,8 @@ static int fat12_write_file_at(fat12_fs_t *vol, uint16_t *start_cluster, uint32_
             offset_in_cluster += bytes;
         }
         //Сложный случай (Read-Modify-Write) - пишем часть сектора
-        else {
+        else
+        {
             //Читаем старый сектор, чтобы сохранить неизменяемые байты
             int r = fat12_read_sectors(vol, cluster_lba + first_sector, 1, sector_buffer);
             if (r != FS_OK) return r;
@@ -352,7 +383,7 @@ static int fat12_write_file_at(fat12_fs_t *vol, uint16_t *start_cluster, uint32_
             uint32_t chunk = to_write;
             if (chunk > available_in_sector) chunk = available_in_sector;
 
-            // Накладываем новые данные поверх старых
+            //Накладываем новые данные поверх старых
             memcpy(sector_buffer + sector_offset, src, chunk);
             // Пишем сектор обратно
             r = fat12_write_sectors(vol, cluster_lba + first_sector, 1, sector_buffer);
@@ -363,13 +394,15 @@ static int fat12_write_file_at(fat12_fs_t *vol, uint16_t *start_cluster, uint32_
             offset_in_cluster += chunk;
         }
 
-        // Если заполнили текущий кластер и данные еще остались, выделяем следующий
-        if (offset_in_cluster >= cluster_size){
+        //Если заполнили текущий кластер и данные еще остались, выделяем следующий
+        if (offset_in_cluster >= cluster_size)
+        {
             offset_in_cluster = 0;
             if (remaining == 0) break;
 
             uint16_t next = fat12_get_next_cluster(vol, cluster);
-            if (next >= 0xFF8){
+            if (next >= 0xFF8)
+            {
                 uint16_t new_c;
                 if (fat12_allocate_cluster(vol, &new_c) != FS_OK) return FS_IO_ERROR;
                 fat12_set_cluster_value(vol, cluster, new_c);
@@ -378,14 +411,15 @@ static int fat12_write_file_at(fat12_fs_t *vol, uint16_t *start_cluster, uint32_
             cluster = next;
         }
     }
-    // Сохраняем изменения таблицы FAT на физический диск
+    //Сохраняем изменения таблицы FAT на физический диск
     fat12_flush_fat(vol);
 
     return (int)size;
 }
 
-// Функция перевода упакованных даты и времени MS-DOS в Unix Timestamp (секунды с 1970 года)
-static uint32_t fat12_dos_to_unix_time(uint16_t dos_date, uint16_t dos_time){
+//Функция перевода упакованных даты и времени MS-DOS в Unix Timestamp (секунды с 1970 года)
+static uint32_t fat12_dos_to_unix_time(uint16_t dos_date, uint16_t dos_time)
+{
     if (dos_date == 0) return 0; // Время не установлено
 
     uint32_t second = (dos_time & 0x1F) * 2;
@@ -394,33 +428,36 @@ static uint32_t fat12_dos_to_unix_time(uint16_t dos_date, uint16_t dos_time){
 
     uint32_t day    = dos_date & 0x1F;
     uint32_t month  = (dos_date >> 5) & 0x0F;
-    uint32_t year   = ((dos_date >> 9) & 0x7F) + 1980; // Год FAT начинается с 1980
+    uint32_t year   = ((dos_date >> 9) & 0x7F) + 1980; //Год FAT начинается с 1980
 
-    // Простой и быстрый алгоритм подсчета секунд для ядра (без тяжелых библиотек)
-    // Массив количества дней с начала года до текущего месяца (для обычного года)
-    static const uint16_t days_before_month[] = {
+    //Простой и быстрый алгоритм подсчета секунд для ядра (без тяжелых библиотек)
+    //Массив количества дней с начала года до текущего месяца (для обычного года)
+    static const uint16_t days_before_month[] =
+    {
         0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
     };
     if (month < 1 || month > 12 || day < 1 || day > 31) return 0;
 
-    // Считаем количество прошедших лет с 1970 года
+    //Считаем количество прошедших лет с 1970 года
     uint32_t total_years = year - 1970;
-    // Считаем количество високосных дней с 1970 года (каждый 4-й год)
-    // 1972 был первым високосным годом после 1970
+    //Считаем количество високосных дней с 1970 года (каждый 4-й год)
+    //1972 был первым високосным годом после 1970
     uint32_t leap_days = (total_years + 1) / 4;
-    // Считаем общее количество дней
+    //Считаем общее количество дней
     uint32_t total_days = total_years * 365 + leap_days + days_before_month[month] + (day - 1);
-    // Корректировка, если текущий год високосный и мы еще не прошли февраль
-    if ((year % 4 == 0) && (month <= 2)){
+    //Корректировка, если текущий год високосный и мы еще не прошли февраль
+    if ((year % 4 == 0) && (month <= 2))
+    {
         total_days--;
     }
-    // Переводим всё в секунды
+    //Переводим всё в секунды
     uint32_t unix_timestamp = (total_days * 86400) + (hour * 3600) + (minute * 60) + second;
     return unix_timestamp;
 }
 
 
-int fat12_lookup_in_dir(fat12_fs_t *vol, uint16_t dir_cluster, const char *name83, fat12_dirent_t *out_entry, uint32_t *out_entry_id){
+int fat12_lookup_in_dir(fat12_fs_t *vol, uint16_t dir_cluster, const char *name83, fat12_dirent_t *out_entry, uint32_t *out_entry_id)
+{
     if (!vol || !name83 || !out_entry || !out_entry_id) return FS_IO_ERROR;
     if (!vol->mounted) return FS_IO_ERROR;
 
@@ -428,20 +465,26 @@ int fat12_lookup_in_dir(fat12_fs_t *vol, uint16_t dir_cluster, const char *name8
     uint32_t entries_per_sector = vol->bytes_per_sector / sizeof(fat12_dirent_t);
     uint32_t current_entry_index = 0;
 
-    //СЦЕНАРИЙ 1- поиск в корневом каталоге дискеты (у него фиксированные секторы)
-    if (dir_cluster == 0){
-        for (uint32_t sector = 0; sector < vol->root_size; sector++){
+    //Сценарий 1- поиск в корневом каталоге дискеты (у него фиксированные секторы)
+    if (dir_cluster == 0)
+    {
+        for (uint32_t sector = 0; sector < vol->root_size; sector++)
+        {
             uint32_t lba = vol->root_start + sector;
             if (fat12_read_sectors(vol, lba, 1, buffer) != FS_OK) return FS_IO_ERROR;
 
             fat12_dirent_t *entries = (fat12_dirent_t *)buffer;
-            for (uint32_t i = 0; i < entries_per_sector; i++){
+            for (uint32_t i = 0; i < entries_per_sector; i++)
+            {
                 uint8_t first = (uint8_t)entries[i].name[0];
-                if (first == 0x00) return FS_NOT_FOUND; // Конец каталога
-                if (first == 0xE5 || (entries[i].attr & 0x0F) == 0x0F) {
-                    current_entry_index++; continue; // Удален или LFN
+                if (first == 0x00) return FS_NOT_FOUND; //Конец каталога
+                if (first == 0xE5 || (entries[i].attr & 0x0F) == 0x0F)
+                {
+                    current_entry_index++;
+                    continue; //Удален или LFN
                 }
-                if (memcmp(entries[i].name, name83, 11) == 0){
+                if (memcmp(entries[i].name, name83, 11) == 0)
+                {
                     memcpy(out_entry, &entries[i], sizeof(fat12_dirent_t));
                     *out_entry_id = current_entry_index;
 
@@ -453,34 +496,40 @@ int fat12_lookup_in_dir(fat12_fs_t *vol, uint16_t dir_cluster, const char *name8
         return FS_NOT_FOUND;
     }
 
-    //СЦЕНАРИЙ 2 - поиск внутри подкаталога (читаем секторы через цепочку кластеров в FAT)
+    //Сценарий 2 - поиск внутри подкаталога (читаем секторы через цепочку кластеров в FAT)
     uint16_t cluster = dir_cluster;
     uint32_t cluster_size_sectors = vol->sectors_per_cluster;
 
-    while (cluster < 0xFF8){
+    while (cluster < 0xFF8)
+    {
         if (cluster < 2 || cluster == 0xFF7) return FS_CORRUPTED;
         uint32_t cluster_lba = vol->data_start + ((uint32_t)(cluster - 2) * cluster_size_sectors);
 
-        for (uint32_t sector = 0; sector < cluster_size_sectors; sector++){
+        for (uint32_t sector = 0; sector < cluster_size_sectors; sector++)
+        {
             if (fat12_read_sectors(vol, cluster_lba + sector, 1, buffer) != FS_OK) return FS_IO_ERROR;
 
             fat12_dirent_t *entries = (fat12_dirent_t *)buffer;
-            for (uint32_t i = 0; i < entries_per_sector; i++){
+            for (uint32_t i = 0; i < entries_per_sector; i++)
+            {
                 uint8_t first = (uint8_t)entries[i].name[0];
                 if (first == 0x00) return FS_NOT_FOUND;
-                if (first == 0xE5 || (entries[i].attr & 0x0F) == 0x0F){
-                    current_entry_index++; continue;
+                if (first == 0xE5 || (entries[i].attr & 0x0F) == 0x0F)
+                {
+                    current_entry_index++;
+                    continue;
                 }
 
-                if (memcmp(entries[i].name, name83, 11) == 0){
+                if (memcmp(entries[i].name, name83, 11) == 0)
+                {
                     memcpy(out_entry, &entries[i], sizeof(fat12_dirent_t));
-                    *out_entry_id = current_entry_index; // Порядковый номер внутри этого подкаталога
+                    *out_entry_id = current_entry_index; //Порядковый номер внутри этого подкаталога
                     return FS_OK;
                 }
                 current_entry_index++;
             }
         }
-        // Переходим к следующему кластеру подкаталога по таблице FAT
+        //Переходим к следующему кластеру подкаталога по таблице FAT
         cluster = fat12_get_next_cluster(vol, cluster);
     }
 
@@ -488,9 +537,10 @@ int fat12_lookup_in_dir(fat12_fs_t *vol, uint16_t dir_cluster, const char *name8
 }
 
 
-int fat12_find_parent_cluster(fat12_fs_t *vol, const char *path, uint16_t *out_parent_cluster, char out_child_name83[11]){
+int fat12_find_parent_cluster(fat12_fs_t *vol, const char *path, uint16_t *out_parent_cluster, char out_child_name83[11])
+{
     if (!vol || !path || !out_parent_cluster || !out_child_name83) return FS_IO_ERROR;
-    uint16_t current_dir_cluster = 0; // Стартуем с корня (0)
+    uint16_t current_dir_cluster = 0; //Стартуем с корня (0)
 
     //Копируем длинный путь VFS в зону .bss драйвера
     strncpy((char *)fat12_path_buffer_ptr, path, FAT12_PATH_MAX - 1);
@@ -506,25 +556,26 @@ int fat12_find_parent_cluster(fat12_fs_t *vol, const char *path, uint16_t *out_p
 
     if (token == NULL) return FS_INVALID_PATH;
 
-    while (next_token != NULL){
+    while (next_token != NULL)
+    {
         char token83[11];
         if (fat12_make_83(token, token83) != FS_OK) return FS_INVALID_PATH;
 
         fat12_dirent_t dir_entry;
         uint32_t dummy_id;
 
-        // Ищем подпапку на текущем уровне
+        //Ищем подпапку на текущем уровне
         int r = fat12_lookup_in_dir(vol, current_dir_cluster, token83, &dir_entry, &dummy_id);
         if (r != FS_OK) return FS_NOT_FOUND;
 
-        // Проверяем, что это действительно папка, а не обычный файл
+        //Проверяем, что это действительно папка, а не обычный файл
         if (!(dir_entry.attr & 0x10)) return FS_INVALID_PATH;
 
-        current_dir_cluster = dir_entry.cluster_low; // Спускаемся внутрь
+        current_dir_cluster = dir_entry.cluster_low; //Спускаемся внутрь
         token = next_token;
         next_token = strtok_r(NULL, "/", &saveptr);
     }
-    // В token осталось финальное имя файла. Конвертируем его в 8.3 наружу в драйвер
+    //В token осталось финальное имя файла. Конвертируем его в 8.3 наружу в драйвер
     if (fat12_make_83(token, out_child_name83) != FS_OK) return FS_INVALID_PATH;
     *out_parent_cluster = current_dir_cluster;
 
@@ -535,18 +586,21 @@ int fat12_find_parent_cluster(fat12_fs_t *vol, const char *path, uint16_t *out_p
 //Освобождает всю цепочку кластеров, начиная со start_cluster
 //Кластеры < 2 и >= 0xFF8 игнорируются (это не данные, а маркеры FAT)
 //Возвращает FS_OK или код ошибки от fat12_flush_fat
-static int fat12_free_chain(fat12_fs_t *vol, uint16_t start_cluster){
+static int fat12_free_chain(fat12_fs_t *vol, uint16_t start_cluster)
+{
     if (!vol || !vol->mounted) return FS_IO_ERROR;
     uint16_t cluster = start_cluster;
     bool freed_any = false;
-    while (cluster >= 2 && cluster < 0xFF8){
+    while (cluster >= 2 && cluster < 0xFF8)
+    {
         uint16_t next = fat12_get_next_cluster(vol, cluster);
         fat12_set_cluster_value(vol, cluster, 0x000);
         cluster = next;
         freed_any = true;
     }
     //Если реально освободили хоть один кластер — сбрасываем FAT на диск
-    if (freed_any){
+    if (freed_any)
+    {
         return fat12_flush_fat(vol);
     }
     return FS_OK;
@@ -558,7 +612,8 @@ static int fat12_free_chain(fat12_fs_t *vol, uint16_t start_cluster){
 static int fat12_truncate_file(fat12_fs_t *vol,
                                uint16_t parent_cluster,
                                uint32_t entry_id,
-                               uint16_t start_cluster){
+                               uint16_t start_cluster)
+{
     if (!vol || !vol->mounted) return FS_IO_ERROR;
     //Обнуляем метаданные в dirent родителя start_cluster = 0, file_size = 0
     int r = fat12_update_dirent(vol, parent_cluster, entry_id, 0, 0);
@@ -574,17 +629,21 @@ static int fat12_truncate_file(fat12_fs_t *vol,
 
 //  -----  внешние функции  -----
 
-int fat12_mount(uint32_t drive){
-    for(int i = 0; i < FAT12_MAX_VOLUMES; ++i){
+int fat12_mount(uint32_t drive)
+{
+    for(int i = 0; i < FAT12_MAX_VOLUMES; ++i)
+    {
         fat12_fs_t *vol = &fat12_volumes_ptr[i];
         if(vol->drive == drive && vol->mounted == 1) return FS_OK;
     }
     int fnd = -1;
-    for(int i = 0; i < FAT12_MAX_VOLUMES; ++i){
+    for(int i = 0; i < FAT12_MAX_VOLUMES; ++i)
+    {
         fat12_fs_t *vol = &fat12_volumes_ptr[i];
-        if(vol->mounted == 0) {
-                fnd = i;
-                break;
+        if(vol->mounted == 0)
+        {
+            fnd = i;
+            break;
         }
     }
     if(fnd == -1) return FS_TOO_MANY;
@@ -616,12 +675,14 @@ int fat12_mount(uint32_t drive){
 }
 
 
-int fat12_unmount(void *volume){
+int fat12_unmount(void *volume)
+{
     if (!volume) return FS_IO_ERROR;
     fat12_fs_t *vol = (fat12_fs_t *)volume;
     if (!vol->mounted) return FS_IO_ERROR;
     //Проверяем открытые файлы/каталоги этого тома
-    for (int fd = 0; fd < FAT12_MAX_OPEN_FILES; fd++){
+    for (int fd = 0; fd < FAT12_MAX_OPEN_FILES; fd++)
+    {
         fat12_file_t *file = &fat12_files_ptr[fd];
         if (!file->used) continue;
         if (file->vol == vol) return FS_ACCESS_DENIED;
@@ -632,7 +693,8 @@ int fat12_unmount(void *volume){
 }
 
 
-int fat12_lookup(void *vol_ptr, const char *name, void *out_ptr, uint32_t *out_entry_id){
+int fat12_lookup(void *vol_ptr, const char *name, void *out_ptr, uint32_t *out_entry_id)
+{
     if (!vol_ptr || !name || !out_ptr || !out_entry_id) return FS_IO_ERROR;
     fat12_fs_t *vol = (fat12_fs_t *)vol_ptr;
 
@@ -640,7 +702,8 @@ int fat12_lookup(void *vol_ptr, const char *name, void *out_ptr, uint32_t *out_e
     char name83[11];
 
     int r = fat12_find_parent_cluster(vol, name, &parent_cluster, name83);
-    if (r != FS_OK){
+    if (r != FS_OK)
+    {
         // Если подкаталогов нет, ищем просто в корне
         if (fat12_make_83(name, name83) != FS_OK) return FS_INVALID_PATH;
         parent_cluster = 0;
@@ -649,7 +712,8 @@ int fat12_lookup(void *vol_ptr, const char *name, void *out_ptr, uint32_t *out_e
     return fat12_lookup_in_dir(vol, parent_cluster, name83, (fat12_dirent_t *)out_ptr, out_entry_id);
 }
 
-int fat12_touch(void *vol_ptr, const char *path){
+int fat12_touch(void *vol_ptr, const char *path)
+{
     if (!vol_ptr || !path) return FS_IO_ERROR;
     fat12_fs_t *vol = (fat12_fs_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
@@ -659,7 +723,8 @@ int fat12_touch(void *vol_ptr, const char *path){
 
     //Находим кластер родительской папки и имя файла в формате 8.3
     int r = fat12_find_parent_cluster(vol, path, &parent_cluster, name83);
-    if (r != FS_OK){
+    if (r != FS_OK)
+    {
         // Если подкаталогов нет в пути, значит создаем в корне
         if (fat12_make_83(path, name83) != FS_OK) return FS_INVALID_PATH;
         parent_cluster = 0;
@@ -668,7 +733,8 @@ int fat12_touch(void *vol_ptr, const char *path){
     //Проверяем, существует ли уже файл с таким именем СТРОГО в этой папке
     fat12_dirent_t dummy_entry;
     uint32_t dummy_id;
-    if (fat12_lookup_in_dir(vol, parent_cluster, name83, &dummy_entry, &dummy_id) == FS_OK){
+    if (fat12_lookup_in_dir(vol, parent_cluster, name83, &dummy_entry, &dummy_id) == FS_OK)
+    {
         return FS_ALREADY_EXISTS;
     }
 
@@ -679,7 +745,8 @@ int fat12_touch(void *vol_ptr, const char *path){
     uint8_t buffer[512] __attribute__((aligned(4)));
     uint32_t entries_per_sector = vol->bytes_per_sector / sizeof(fat12_dirent_t);
 
-    for (uint32_t sector = 0; sector < scan_sectors; sector++){
+    for (uint32_t sector = 0; sector < scan_sectors; sector++)
+    {
         uint32_t lba = scan_start + sector;
 
         r = fat12_read_sectors(vol, lba, 1, buffer);
@@ -687,10 +754,12 @@ int fat12_touch(void *vol_ptr, const char *path){
 
         fat12_dirent_t *entries = (fat12_dirent_t *)buffer;
 
-        for (uint32_t i = 0; i < entries_per_sector; i++){
+        for (uint32_t i = 0; i < entries_per_sector; i++)
+        {
             uint8_t first_byte = (uint8_t)entries[i].name[0];
-            // Нашли свободный или удаленный слот (0x00 или 0xE5)
-            if (first_byte == 0x00 || first_byte == 0xE5){
+            //Нашли свободный или удаленный слот (0x00 или 0xE5)
+            if (first_byte == 0x00 || first_byte == 0xE5)
+            {
                 memset(&entries[i], 0, sizeof(fat12_dirent_t));
                 memcpy(entries[i].name, name83, 11);
                 entries[i].attr = 0x20; // Флаг - Архивный файл (Regular File)
@@ -698,28 +767,32 @@ int fat12_touch(void *vol_ptr, const char *path){
                 entries[i].size = 0;
                 entries[i].modify_date = 0x5C21; // Условная DOS дата
                 entries[i].modify_time = 0x0000;
-                // Записываем измененный сектор каталога обратно на диск
+                //Записываем измененный сектор каталога обратно на диск
                 return fat12_write_sectors(vol, lba, 1, buffer);
             }
         }
     }
 
-    return FS_NO_SPACE; // Свободных слотов в этой директории больше нет
+    return FS_NO_SPACE; //Свободных слотов в этой директории больше нет
 }
 
 
 
-int fat12_open(void *vol_ptr, const char *name, uint32_t flags){
+int fat12_open(void *vol_ptr, const char *name, uint32_t flags)
+{
     if (!vol_ptr || !name) return FS_IO_ERROR;
     fat12_fs_t *vol = (fat12_fs_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
 
     //Особый случай: открытие корня "/"
-    if (strcmp(name, "/") == 0){
-        // Корень — каталог, операции записи и TRUNCATE запрещены
+    if (strcmp(name, "/") == 0)
+    {
+        //Корень — каталог, операции записи и TRUNCATE запрещены
         if ((flags & FS_OPEN_WRITE) || (flags & FS_OPEN_TRUNCATE)) return FS_ACCESS_DENIED;
-        for (int fd = 0; fd < FAT12_MAX_OPEN_FILES; fd++) {
-            if (fat12_files_ptr[fd].used == 0) {
+        for (int fd = 0; fd < FAT12_MAX_OPEN_FILES; fd++)
+        {
+            if (fat12_files_ptr[fd].used == 0)
+            {
                 fat12_files_ptr[fd].used = 1;
                 fat12_files_ptr[fd].vol = vol;
                 fat12_files_ptr[fd].start_cluster = 0;
@@ -738,7 +811,8 @@ int fat12_open(void *vol_ptr, const char *name, uint32_t flags){
     char name83[11];
 
     int r = fat12_find_parent_cluster(vol, name, &parent_cluster, name83);
-    if (r != FS_OK){
+    if (r != FS_OK)
+    {
         if (fat12_make_83(name, name83) != FS_OK) return FS_INVALID_PATH;
         parent_cluster = 0;
     }
@@ -747,7 +821,8 @@ int fat12_open(void *vol_ptr, const char *name, uint32_t flags){
     uint32_t entry_id = 0;
     r = fat12_lookup_in_dir(vol, parent_cluster, name83, &entry, &entry_id);
 
-    if (r == FS_NOT_FOUND && (flags & FS_OPEN_CREATE)){
+    if (r == FS_NOT_FOUND && (flags & FS_OPEN_CREATE))
+    {
         //Вызываем вашу отлаженную функцию fat12_touch для создания пустого файла
         int touch_res = fat12_touch(vol, name);
         if (touch_res != FS_OK) return touch_res; //Возвращаем ошибку, если диск переполнен
@@ -761,20 +836,26 @@ int fat12_open(void *vol_ptr, const char *name, uint32_t flags){
     //Проверки прав
     bool is_dir      = (entry.attr & 0x10) != 0;   //FAT subdirectory bit
     bool is_readonly = (entry.attr & 0x01) != 0;   //FAT read-only bit
-    if (flags & FS_OPEN_WRITE){
+    if (flags & FS_OPEN_WRITE)
+    {
         //Каталог на запись не открываем
         if (is_dir) return FS_ACCESS_DENIED;
         //Readonly-файл на запись не открываем
         if (is_readonly) return FS_ACCESS_DENIED;
     }
     //TRUNCATE — деструктивная операция, без права записи не имеет смысла
-    if ((flags & FS_OPEN_TRUNCATE) && !(flags & FS_OPEN_WRITE)){
+    if ((flags & FS_OPEN_TRUNCATE) && !(flags & FS_OPEN_WRITE))
+    {
         return FS_ACCESS_DENIED;
     }
-    if (flags & FS_OPEN_TRUNCATE){
-        if (is_dir){
+    if (flags & FS_OPEN_TRUNCATE)
+    {
+        if (is_dir)
+        {
             //TRUNCATE на каталоге молча игнорируем
-        } else {
+        }
+        else
+        {
             int tr = fat12_truncate_file(vol, parent_cluster, entry_id, entry.cluster_low);
             if (tr != FS_OK) return tr;
             //Синхронизируем локальную копию dirent, чтобы заполнение fat12_files_ptr ниже взяло актуальные 0
@@ -784,8 +865,10 @@ int fat12_open(void *vol_ptr, const char *name, uint32_t flags){
     }
 
     //Ищем свободное место в таблице дескрипторов файлов
-    for (int fd = 0; fd < FAT12_MAX_OPEN_FILES; fd++){
-        if (fat12_files_ptr[fd].used == 0) {
+    for (int fd = 0; fd < FAT12_MAX_OPEN_FILES; fd++)
+    {
+        if (fat12_files_ptr[fd].used == 0)
+        {
             fat12_files_ptr[fd].used = 1;
             fat12_files_ptr[fd].vol = vol;
             fat12_files_ptr[fd].start_cluster = entry.cluster_low;
@@ -813,7 +896,8 @@ int fat12_open(void *vol_ptr, const char *name, uint32_t flags){
 
 
 
-int fat12_close(int fd){
+int fat12_close(int fd)
+{
     if (fd < 0 || fd >= FAT12_MAX_OPEN_FILES) return FS_IO_ERROR;
     if (!fat12_files_ptr[fd].used) return FS_IO_ERROR;
     fat12_files_ptr[fd].used = 0;
@@ -821,7 +905,8 @@ int fat12_close(int fd){
 }
 
 
-int fat12_read(int fd,void *buffer,uint32_t size){
+int fat12_read(int fd,void *buffer,uint32_t size)
+{
     if (fd < 0 || fd >= FAT12_MAX_OPEN_FILES) return FS_IO_ERROR;
     fat12_file_t *file = &fat12_files_ptr[fd];
 
@@ -840,7 +925,8 @@ int fat12_read(int fd,void *buffer,uint32_t size){
 
 
 
-int fat12_write(int fd, const void *buffer, uint32_t size){
+int fat12_write(int fd, const void *buffer, uint32_t size)
+{
     if (fd < 0 || fd >= FAT12_MAX_OPEN_FILES) return FS_IO_ERROR;
 
     fat12_file_t *file = &fat12_files_ptr[fd];
@@ -856,7 +942,8 @@ int fat12_write(int fd, const void *buffer, uint32_t size){
     if (r < 0) return r;
 
     file->position += r;
-    if (file->position > file->file_size){
+    if (file->position > file->file_size)
+    {
         file->file_size = file->position;
     }
 
@@ -869,7 +956,8 @@ int fat12_write(int fd, const void *buffer, uint32_t size){
 }
 
 
-int fat12_seek(int fd,uint32_t position){
+int fat12_seek(int fd,uint32_t position)
+{
     if (fd < 0 || fd >= FAT12_MAX_OPEN_FILES) return FS_IO_ERROR;
     fat12_file_t *file = &fat12_files_ptr[fd];
     if (!file->used) return FS_IO_ERROR;
@@ -879,7 +967,8 @@ int fat12_seek(int fd,uint32_t position){
 }
 
 
-int fat12_tell(int fd){
+int fat12_tell(int fd)
+{
     if (fd < 0 || fd >= FAT12_MAX_OPEN_FILES) return FS_IO_ERROR;
     fat12_file_t *file = &fat12_files_ptr[fd];
     if (!file->used) return FS_IO_ERROR;
@@ -887,26 +976,30 @@ int fat12_tell(int fd){
 }
 
 
-int fat12_readdir(int dir, fs_dirent_t *entry){
+int fat12_readdir(int dir, fs_dirent_t *entry)
+{
     if (dir < 0 || dir >= FAT12_MAX_OPEN_FILES || !entry) return FS_IO_ERROR;
 
     fat12_file_t *file = &fat12_files_ptr[dir];
     if (!file->used) return FS_IO_ERROR;
-    if (!(file->attributes & FS_ATTR_DIRECTORY) && !(file->attributes & 0x10)) {
+    if (!(file->attributes & FS_ATTR_DIRECTORY) && !(file->attributes & 0x10))
+    {
         return FS_ACCESS_DENIED;
     }
 
     fat12_fs_t *vol = file->vol;
-    uint32_t entry_size = sizeof(fat12_dirent_t); // 32 байта
+    uint32_t entry_size = sizeof(fat12_dirent_t); //32 байта
 
-    // Сценарий 1 — КОРНЕВОЙ каталог дискеты (start_cluster == 0)
-    if (file->start_cluster == 0) {
+    //Сценарий 1 — КОРНЕВОЙ каталог дискеты (start_cluster == 0)
+    if (file->start_cluster == 0)
+    {
         uint32_t root_bytes = vol->root_size * vol->bytes_per_sector;
         if (file->position >= root_bytes) return FS_NOT_FOUND;
 
         uint8_t sector_buf[512] __attribute__((aligned(4)));
 
-        while (file->position < root_bytes){
+        while (file->position < root_bytes)
+        {
             uint32_t sector_index = file->position / vol->bytes_per_sector;
             uint32_t entry_offset = file->position % vol->bytes_per_sector;
             uint32_t lba = vol->root_start + sector_index;
@@ -919,16 +1012,17 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
             if (first == 0x00) return FS_NOT_FOUND;
             if (first == 0xE5 || (fat_entry->attr & 0x0F) == 0x0F) continue;
 
-            // 8.3 → читаемое имя
+            //8.3 -> читаемое имя
             int n = 0;
-            for (int i = 0; i < 11; i++){
+            for (int i = 0; i < 11; i++)
+            {
                 if (i == 8 && fat_entry->name[8] != ' ') entry->name[n++] = '.';
                 if (fat_entry->name[i] == ' ') continue;
                 entry->name[n++] = fat_entry->name[i];
             }
             entry->name[n] = '\0';
 
-            // Полностью заполняем все поля структуры
+            //Полностью заполняем все поля структуры
             entry->inode      = file->position / entry_size;
             entry->id         = entry->inode;
             entry->size       = fat_entry->size;
@@ -945,20 +1039,23 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
         return FS_NOT_FOUND;
     }
 
-    // Сценарий 2 — подкаталог области данных (start_cluster >= 2)
+    //Сценарий 2 — подкаталог области данных (start_cluster >= 2)
     uint32_t cluster_size = vol->sectors_per_cluster * vol->bytes_per_sector;
     uint8_t block_buf[512] __attribute__((aligned(4)));
 
-    while (true) {
+    while (true)
+    {
         uint32_t cluster_index = file->position / cluster_size;
         uint32_t offset_in_cluster = file->position % cluster_size;
 
         uint16_t cluster = file->start_cluster;
         bool cluster_valid = true;
 
-        for (uint32_t i = 0; i < cluster_index; i++){
+        for (uint32_t i = 0; i < cluster_index; i++)
+        {
             uint16_t next = fat12_get_next_cluster(vol, cluster);
-            if (next >= 0xFF8 || next < 2 || next == 0xFF7){
+            if (next >= 0xFF8 || next < 2 || next == 0xFF7)
+            {
                 cluster_valid = false;
                 break;
             }
@@ -971,7 +1068,8 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
         uint32_t sector_in_cluster = offset_in_cluster / vol->bytes_per_sector;
         uint32_t entry_offset_in_sector = offset_in_cluster % vol->bytes_per_sector;
 
-        if (fat12_read_sectors(vol, cluster_lba + sector_in_cluster, 1, block_buf) != FS_OK){
+        if (fat12_read_sectors(vol, cluster_lba + sector_in_cluster, 1, block_buf) != FS_OK)
+        {
             return FS_IO_ERROR;
         }
 
@@ -984,7 +1082,8 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
         if (first == 0xE5 || (fat_entry->attr & 0x0F) == 0x0F) continue;
 
         int n = 0;
-        for (int i = 0; i < 11; i++){
+        for (int i = 0; i < 11; i++)
+        {
             if (i == 8 && fat_entry->name[8] != ' ') entry->name[n++] = '.';
             if (fat_entry->name[i] == ' ') continue;
             entry->name[n++] = fat_entry->name[i];
@@ -1007,14 +1106,16 @@ int fat12_readdir(int dir, fs_dirent_t *entry){
 }
 
 
-int fat12_stat(void *vol_ptr, const char *path, fs_stat_t *st){
+int fat12_stat(void *vol_ptr, const char *path, fs_stat_t *st)
+{
     if (!vol_ptr || !path || !st) return FS_IO_ERROR;
     fat12_fs_t *vol = (fat12_fs_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
 
     //Особый случай - запрос информации о корневом каталоге "/"
-    if (path[0] == '/' && path[1] == '\0'){
-        st->size = 0; // Для каталогов в FAT размер традиционно 0
+    if (path[0] == '/' && path[1] == '\0')
+    {
+        st->size = 0; //Для каталогов в FAT размер традиционно 0
         st->attributes = FS_ATTR_DIRECTORY;
         st->create_time = 0;
         st->modify_time = 0;
@@ -1025,8 +1126,9 @@ int fat12_stat(void *vol_ptr, const char *path, fs_stat_t *st){
     char name83[11];
 
     int r = fat12_find_parent_cluster(vol, path, &parent_cluster, name83);
-    if (r != FS_OK){
-        // Если подкаталогов нет в пути, значит элемент лежит в корне
+    if (r != FS_OK)
+    {
+        //Если подкаталогов нет в пути, значит элемент лежит в корне
         if (fat12_make_83(path, name83) != FS_OK) return FS_INVALID_PATH;
         parent_cluster = 0;
     }
@@ -1041,14 +1143,14 @@ int fat12_stat(void *vol_ptr, const char *path, fs_stat_t *st){
     st->size = entry.size;
     st->attributes = 0;
 
-    // Конвертируем DOS-атрибуты в системные флаги VFS
+    //Конвертируем DOS-атрибуты в системные флаги VFS
     if (entry.attr & 0x01) st->attributes |= FS_ATTR_READONLY;
     if (entry.attr & 0x02) st->attributes |= FS_ATTR_HIDDEN;
     if (entry.attr & 0x04) st->attributes |= FS_ATTR_SYSTEM;
     if (entry.attr & 0x10) st->attributes |= FS_ATTR_DIRECTORY;
     if (entry.attr & 0x20) st->attributes |= FS_ATTR_ARCHIVE;
 
-    // Декодируем DOS-время в Unix Timestamp с помощью вашей функции
+    //Декодируем DOS-время в Unix Timestamp
     st->create_time = fat12_dos_to_unix_time(entry.create_date, entry.create_time);
     st->modify_time = fat12_dos_to_unix_time(entry.modify_date, entry.modify_time);
 
@@ -1056,9 +1158,11 @@ int fat12_stat(void *vol_ptr, const char *path, fs_stat_t *st){
 }
 
 
-void *fat12_get_volume(uint32_t id){
+void *fat12_get_volume(uint32_t id)
+{
     if(id >= FAT12_MAX_VOLUMES) return 0;
-    for(int i = 0; i < FAT12_MAX_VOLUMES; ++i){
+    for(int i = 0; i < FAT12_MAX_VOLUMES; ++i)
+    {
         fat12_fs_t *vol = &fat12_volumes_ptr[i];
         if(vol->drive == id && vol->mounted == 1) return vol;
     }
@@ -1067,7 +1171,8 @@ void *fat12_get_volume(uint32_t id){
 }
 
 
-int fat12_mkdir(void *vol_ptr, const char *path){
+int fat12_mkdir(void *vol_ptr, const char *path)
+{
     if (!vol_ptr || !path) return FS_IO_ERROR;
     fat12_fs_t *vol = (fat12_fs_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
@@ -1076,14 +1181,17 @@ int fat12_mkdir(void *vol_ptr, const char *path){
     char name83[11];
 
     int r = fat12_find_parent_cluster(vol, path, &parent_cluster, name83);
-    if (r != FS_OK){
+    if (r != FS_OK)
+    {
         if (fat12_make_83(path, name83) != FS_OK) return FS_INVALID_PATH;
         parent_cluster = 0;
     }
 
     // Проверяем, что такого имени еще нет
-    fat12_dirent_t dummy; uint32_t dummy_id;
-    if (fat12_lookup_in_dir(vol, parent_cluster, name83, &dummy, &dummy_id) == FS_OK){
+    fat12_dirent_t dummy;
+    uint32_t dummy_id;
+    if (fat12_lookup_in_dir(vol, parent_cluster, name83, &dummy, &dummy_id) == FS_OK)
+    {
         return FS_ALREADY_EXISTS;
     }
 
@@ -1097,39 +1205,45 @@ int fat12_mkdir(void *vol_ptr, const char *path){
     uint32_t entries_per_sector = vol->bytes_per_sector / sizeof(fat12_dirent_t);
 
     fat12_dirent_t *dot = (fat12_dirent_t *)&local_buf[0];
-    memset(dot->name, ' ', 11); dot->name[0] = '.';
+    memset(dot->name, ' ', 11);
+    dot->name[0] = '.';
     dot->attr = 0x10; // Subdirectory
     dot->cluster_low = new_cluster;
 
     fat12_dirent_t *dotdot = (fat12_dirent_t *)&local_buf[sizeof(fat12_dirent_t)];
-    memset(dotdot->name, ' ', 11); dotdot->name[0] = '.'; dotdot->name[1] = '.';
+    memset(dotdot->name, ' ', 11);
+    dotdot->name[0] = '.';
+    dotdot->name[1] = '.';
     dotdot->attr = 0x10;
-    dotdot->cluster_low = parent_cluster; // Указывает на родителя
+    dotdot->cluster_low = parent_cluster; //Указывает на родителя
 
-    // Физически пишем этот сектор в область данных нового кластера
+    //Физически пишем этот сектор в область данных нового кластера
     uint32_t new_cluster_lba = vol->data_start + ((uint32_t)(new_cluster - 2) * vol->sectors_per_cluster);
     if (fat12_write_sectors(vol, new_cluster_lba, 1, local_buf) != FS_OK) return FS_IO_ERROR;
 
-    // Теперь вставляем запись о новой папке в родительский каталог
+    //Теперь вставляем запись о новой папке в родительский каталог
     uint32_t scan_start = (parent_cluster == 0) ? vol->root_start : (vol->data_start + (uint32_t)(parent_cluster - 2) * vol->sectors_per_cluster);
     uint32_t scan_sectors = (parent_cluster == 0) ? vol->root_size : vol->sectors_per_cluster;
 
-    // В условии цикла теперь проверяется правильная переменная 's'
-    for (uint32_t s = 0; s < scan_sectors; s++) {
+    //В условии цикла теперь проверяется правильная переменная 's'
+    for (uint32_t s = 0; s < scan_sectors; s++)
+    {
         if (fat12_read_sectors(vol, scan_start + s, 1, local_buf) != FS_OK) return FS_IO_ERROR;
         fat12_dirent_t *entries = (fat12_dirent_t *)local_buf;
 
-        for (uint32_t i = 0; i < entries_per_sector; i++) {
+        for (uint32_t i = 0; i < entries_per_sector; i++)
+        {
             uint8_t first = entries[i].name[0];
-            if (first == 0x00 || first == 0xE5) {
-                // Нашли пустой слот!
+            if (first == 0x00 || first == 0xE5)
+            {
+                //найден пустой слот
                 memset(&entries[i], 0, sizeof(fat12_dirent_t));
                 memcpy(entries[i].name, name83, 11);
                 entries[i].attr = 0x10; // КАТАЛОГ
                 entries[i].cluster_low = new_cluster;
                 entries[i].size = 0;
 
-                // Сбрасываем обновленный сектор родителя на диск
+                //Сбрасываем обновленный сектор родителя на диск
                 return fat12_write_sectors(vol, scan_start + s, 1, local_buf);
             }
         }
@@ -1139,7 +1253,8 @@ int fat12_mkdir(void *vol_ptr, const char *path){
 }
 
 
-int fat12_unlink(void *vol_ptr, const char *path){
+int fat12_unlink(void *vol_ptr, const char *path)
+{
     if (!vol_ptr || !path) return FS_IO_ERROR;
     fat12_fs_t *vol = (fat12_fs_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
@@ -1148,32 +1263,24 @@ int fat12_unlink(void *vol_ptr, const char *path){
     char name83[11];
 
     int r = fat12_find_parent_cluster(vol, path, &parent_cluster, name83);
-    if (r != FS_OK) {
+    if (r != FS_OK)
+    {
         if (fat12_make_83(path, name83) != FS_OK) return FS_INVALID_PATH;
         parent_cluster = 0;
     }
 
     fat12_dirent_t entry;
     uint32_t entry_id = 0;
-    // Находим файл
-    if (fat12_lookup_in_dir(vol, parent_cluster, name83, &entry, &entry_id) != FS_OK) {
+    //Находим файл
+    if (fat12_lookup_in_dir(vol, parent_cluster, name83, &entry, &entry_id) != FS_OK)
+    {
         return FS_NOT_FOUND;
     }
 
-    // Не разрешаем удалять папки через unlink
+    //Не разрешаем удалять папки через unlink
     if (entry.attr & 0x10) return FS_ACCESS_DENIED;
 
-    // Освобождаем цепочку кластеров файла в таблице FAT
-    /*
-    uint16_t cluster = entry.cluster_low;
-    while (cluster >= 2 && cluster < 0xFF8) {
-        uint16_t next = fat12_get_next_cluster(vol, cluster);
-        fat12_set_cluster_value(vol, cluster, 0x000); //Помечаем кластер как свободный
-        cluster = next;
-    }
-    fat12_flush_fat(vol); // Сбрасываем изменения таблицы FAT на дискету
-    */
-    // Освобождаем цепочку кластеров файла в таблице FAT
+    //Освобождаем цепочку кластеров файла в таблице FAT
     int fc_res = fat12_free_chain(vol, entry.cluster_low);
     if (fc_res != FS_OK) return fc_res;
 
@@ -1195,7 +1302,8 @@ int fat12_unlink(void *vol_ptr, const char *path){
 }
 
 
-int fat12_rmdir(void *vol_ptr, const char *path){
+int fat12_rmdir(void *vol_ptr, const char *path)
+{
     if (!vol_ptr || !path) return FS_IO_ERROR;
     fat12_fs_t *vol = (fat12_fs_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
@@ -1205,7 +1313,8 @@ int fat12_rmdir(void *vol_ptr, const char *path){
 
     //Находим кластер родительской папки и имя удаляемой папки в формате 8.3
     int r = fat12_find_parent_cluster(vol, path, &parent_cluster, name83);
-    if (r != FS_OK) {
+    if (r != FS_OK)
+    {
         if (fat12_make_83(path, name83) != FS_OK) return FS_INVALID_PATH;
         parent_cluster = 0;
     }
@@ -1219,31 +1328,35 @@ int fat12_rmdir(void *vol_ptr, const char *path){
     if (!(entry.attr & 0x10)) return FS_ACCESS_DENIED;
 
     uint16_t target_cluster = entry.cluster_low;
-    if (target_cluster < 2) return FS_CORRUPTED; // Корень удалять нельзя
+    if (target_cluster < 2) return FS_CORRUPTED; //Корень удалять нельзя
 
     uint32_t cluster_size_sectors = vol->sectors_per_cluster;
     uint32_t entries_per_sector = vol->bytes_per_sector / sizeof(fat12_dirent_t);
 
-    // Теперь это честный 512-байтовый массив на стеке
+    //Теперь это честный 512-байтовый массив на стеке
     uint8_t buffer[512] __attribute__((aligned(4)));
 
     uint16_t scan_cluster = target_cluster;
-    while (scan_cluster >= 2 && scan_cluster < 0xFF8){
+    while (scan_cluster >= 2 && scan_cluster < 0xFF8)
+    {
         uint32_t cluster_lba = vol->data_start + ((uint32_t)(scan_cluster - 2) * cluster_size_sectors);
 
-        for (uint32_t s = 0; s < cluster_size_sectors; s++){
+        for (uint32_t s = 0; s < cluster_size_sectors; s++)
+        {
             if (fat12_read_sectors(vol, cluster_lba + s, 1, buffer) != FS_OK) return FS_IO_ERROR;
             fat12_dirent_t *sub_entries = (fat12_dirent_t *)buffer;
 
-            for (uint32_t i = 0; i < entries_per_sector; i++){
+            for (uint32_t i = 0; i < entries_per_sector; i++)
+            {
                 uint8_t first = (uint8_t)sub_entries[i].name[0];
 
-                if (first == 0x00) break; // Дальше записей в секторе нет
-                if (first == 0xE5 || (sub_entries[i].attr & 0x0F) == 0x0F) continue; // Удален или LFN
-                // В FAT12 пустая папка содержит только записи "." и "..".
-                // Если мы встретили имя, которое не начинается с точки — каталог не пуст
-                if (sub_entries[i].name[0] != '.') {
-                    return FS_ACCESS_DENIED; // Ошибка: каталог содержит файлы, удаление запрещено
+                if (first == 0x00) break; //Дальше записей в секторе нет
+                if (first == 0xE5 || (sub_entries[i].attr & 0x0F) == 0x0F) continue; //Удален или LFN
+                //В FAT12 пустая папка содержит только записи "." и ".."
+                //Если поймали имя, которое не начинается с точки — каталог не пуст
+                if (sub_entries[i].name[0] != '.')
+                {
+                    return FS_ACCESS_DENIED; //Ошибка: каталог содержит файлы, удаление запрещено
                 }
             }
         }
@@ -1251,15 +1364,6 @@ int fat12_rmdir(void *vol_ptr, const char *path){
     }
 
     //Освободим цепочку кластеров удаляемой папки в FAT
-    /*uint16_t free_cluster = target_cluster;
-    while (free_cluster >= 2 && free_cluster < 0xFF8) {
-        uint16_t next = fat12_get_next_cluster(vol, free_cluster);
-        fat12_set_cluster_value(vol, free_cluster, 0x000); // Обнуляем кластер в FAT
-        free_cluster = next;
-    }
-    fat12_flush_fat(vol); // Сбрасываем обновленную FAT на дискету
-    */
-    // Освободим цепочку кластеров удаляемой папки в FAT
     int fc_res = fat12_free_chain(vol, target_cluster);
     if (fc_res != FS_OK) return fc_res;
 
@@ -1272,70 +1376,78 @@ int fat12_rmdir(void *vol_ptr, const char *path){
     if (fat12_read_sectors(vol, target_lba, 1, buffer) != FS_OK) return FS_IO_ERROR;
 
     fat12_dirent_t *parent_entries = (fat12_dirent_t *)(buffer + entry_offset);
-    parent_entries->name[0] = 0xE5; // Выставляем маркер DOS-удаления
+    parent_entries->name[0] = 0xE5; //Выставляем маркер DOS-удаления
 
     return fat12_write_sectors(vol, target_lba, 1, buffer);
 }
 
 
 
-int fat12_rename(void *vol_ptr, const char *oldpath, const char *newpath){
+int fat12_rename(void *vol_ptr, const char *oldpath, const char *newpath)
+{
     if (!vol_ptr || !oldpath || !newpath) return FS_IO_ERROR;
     fat12_fs_t *vol = (fat12_fs_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
 
-    /* 1. Old 8.3 */
+    //Old 8.3
     uint16_t old_parent = 0;
     char old_name83[11];
     int r = fat12_find_parent_cluster(vol, oldpath, &old_parent, old_name83);
-    if (r != FS_OK){
+    if (r != FS_OK)
+    {
         if (fat12_make_83(oldpath, old_name83) != FS_OK) return FS_INVALID_PATH;
         old_parent = 0;
     }
 
-    /* 2. New 8.3 */
+    //New 8.3
     uint16_t new_parent = 0;
     char new_name83[11];
     r = fat12_find_parent_cluster(vol, newpath, &new_parent, new_name83);
-    if (r != FS_OK){
+    if (r != FS_OK)
+    {
         if (fat12_make_83(newpath, new_name83) != FS_OK) return FS_INVALID_PATH;
         new_parent = 0;
     }
 
-    /* 3. Fast-path: одна и та же директория */
+    //Fast-path: одна и та же директория
     if (old_parent != new_parent) return FS_NOT_SUPPORTED;
 
-    /* 4. Old entry должен существовать */
+    //Old entry должен существовать
     fat12_dirent_t old_entry;
     uint32_t old_entry_id = 0;
     r = fat12_lookup_in_dir(vol, old_parent, old_name83, &old_entry, &old_entry_id);
     if (r != FS_OK) return r;
 
-    /* 5. Приёмник не должен существовать */
+    //Приёмник не должен существовать
     fat12_dirent_t tmp_entry;
     uint32_t tmp_entry_id = 0;
-    if (fat12_lookup_in_dir(vol, new_parent, new_name83, &tmp_entry, &tmp_entry_id) == FS_OK){
+    if (fat12_lookup_in_dir(vol, new_parent, new_name83, &tmp_entry, &tmp_entry_id) == FS_OK)
+    {
         if (memcmp(old_name83, new_name83, 11) == 0) return FS_OK;
         return FS_NOT_SUPPORTED;
     }
 
-    /* 6. Находим абсолютный LBA и смещение внутри сектора */
+    //Находим абсолютный LBA и смещение внутри сектора
     uint32_t byte_offset = old_entry_id * sizeof(fat12_dirent_t);
     uint32_t lba;
     uint32_t entry_offset_in_sector;
 
-    if (old_parent == 0){
+    if (old_parent == 0)
+    {
         uint32_t sector_index = byte_offset / vol->bytes_per_sector;
         if (sector_index >= vol->root_size) return FS_CORRUPTED;
         lba = vol->root_start + sector_index;
         entry_offset_in_sector = byte_offset % vol->bytes_per_sector;
-    } else {
+    }
+    else
+    {
         uint32_t cluster_bytes = vol->sectors_per_cluster * vol->bytes_per_sector;
         uint32_t cluster_index = byte_offset / cluster_bytes;
         uint32_t offset_in_cluster = byte_offset % cluster_bytes;
 
         uint16_t cur = old_parent;
-        for (uint32_t k = 0; k < cluster_index; k++){
+        for (uint32_t k = 0; k < cluster_index; k++)
+        {
             uint16_t nxt = fat12_get_next_cluster(vol, cur);
             if (nxt >= 0xFF8 || nxt < 2) return FS_CORRUPTED;
             cur = nxt;
@@ -1345,7 +1457,7 @@ int fat12_rename(void *vol_ptr, const char *oldpath, const char *newpath){
         entry_offset_in_sector = offset_in_cluster % vol->bytes_per_sector;
     }
 
-    /* 7. Читаем сектор, проверяем что это действительно та запись, меняем имя */
+    //Читаем сектор, проверяем что это действительно та запись, меняем имя
     uint8_t buffer[512] __attribute__((aligned(4)));
     r = fat12_read_sectors(vol, lba, 1, buffer);
     if (r != FS_OK) return r;
@@ -1361,27 +1473,61 @@ int fat12_rename(void *vol_ptr, const char *oldpath, const char *newpath){
 }
 
 
+int fat12_statfs(void *volume, fs_statfs_t *statfs)
+{
+    fat12_fs_t *fs = (fat12_fs_t *)volume;
+    if (!fs || !fs->mounted) return FS_IO_ERROR;
+    if (fs->bytes_per_sector == 0 || fs->sectors_per_cluster == 0) return FS_CORRUPTED;
+
+    uint32_t cluster_bytes = fs->bytes_per_sector * fs->sectors_per_cluster;
+
+    //Точное число кластеров данных на диске:
+    //data_start — LBA первого сектора области данных (после reserved+FAT+root),
+    //total_sectors — общее число секторов тома из BPB
+    uint32_t total_cl = 0;
+    if (fs->total_sectors > fs->data_start)
+    {
+        total_cl = (fs->total_sectors - fs->data_start) / fs->sectors_per_cluster;
+    }
+
+    //Верхняя граница записей FAT12 — та же формула, что в fat12_allocate_cluster().
+    //Кластеры нумеруются с 2, поэтому в FAT реально помещается fat_max записей,
+    //но на дискете их заведомо меньше — iter ограничиваем total_cl + 2
+    uint32_t fat_max = (fs->sectors_per_fat * fs->bytes_per_sector * 2) / 3;
+    uint32_t limit   = total_cl + 2;
+    if (limit > fat_max) limit = fat_max;
+
+    //Свободные кластеры — записи 0x000 в RAM-копии FAT
+    uint32_t free_cl = 0;
+    for (uint32_t c = 2; c < limit; c++)
+    {
+        if (fat12_get_next_cluster(fs, c) == 0x000) free_cl++;
+    }
+
+    statfs->block_size   = cluster_bytes;
+    statfs->total_blocks = total_cl;
+    statfs->free_blocks  = free_cl;
+    statfs->total_inodes = 0;   //в FAT12 нет inode — как у Linux vfat
+    statfs->free_inodes  = 0;
+    return FS_OK;
+}
 
 
 
-
-void fs_init(struct boot_info *boot){
-    //fat12_mount(boot);
-    //for(int i = 0 ; i < FAT12_MAX_OPEN_FILES; i++){
-        //fat12_files[i].used = 0;
-    //}
+void fs_init(struct boot_info *boot)
+{
     main_boot_info = boot;
 }
 
 
-void driver_main(struct boot_info *boot){
+void driver_main(struct boot_info *boot)
+{
     fs_init(boot);
 
     description_driver_api_t *descr_api_ptr = &descr_api;
     descr_api_ptr->type = DESCR_FILESYSTEM_DRIVER;
 
     api_ptr = &api;
-    //fs_driver_api_t *a = &api;
 
     api_ptr->mount = fat12_mount;
     api_ptr->unmount = fat12_unmount;
@@ -1401,14 +1547,17 @@ void driver_main(struct boot_info *boot){
     api_ptr->unlink = fat12_unlink;
     api_ptr->rename = fat12_rename;
     //api_ptr->set_floppy_irq_fired_ptr = set_floppy_irq_fired_ptr;
+    api_ptr->statfs = fat12_statfs;
 
     fat12_files_ptr = fat12_files;
-    for(int i = 0 ; i < FAT12_MAX_OPEN_FILES; i++){
+    for(int i = 0 ; i < FAT12_MAX_OPEN_FILES; i++)
+    {
         fat12_files_ptr[i].used = 0;
     }
 
     fat12_volumes_ptr = fat12_volumes;
-    for(int i = 0 ; i < FAT12_MAX_VOLUMES; i++){
+    for(int i = 0 ; i < FAT12_MAX_VOLUMES; i++)
+    {
         fat12_volumes_ptr[i].mounted = 0;
     }
 
@@ -1418,7 +1567,8 @@ void driver_main(struct boot_info *boot){
 }
 
 
-description_driver_api_t *driver_get_api(void){
+description_driver_api_t *driver_get_api(void)
+{
     return &descr_api;
 }
 

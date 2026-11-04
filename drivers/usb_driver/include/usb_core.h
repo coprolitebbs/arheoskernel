@@ -101,52 +101,43 @@ typedef struct {
        после SET_CONFIGURATION */
     uint8_t  bulk_in_toggle;
     uint8_t  bulk_out_toggle;
+    uint16_t ep0_max_pkt;   //для control-transfer recovery (BOT reset)
 } usb_msc_iface_t;
 
-/* ---------------- USB-устройство (результат enumeration) ----------------
-   Адресация устройства: пара (hc_idx, port) + выданный dev_addr.
-   hc_idx — слот UHCI-контроллера (uhci_hc_ptrs[hc_idx]), порт 0/1. */
-#define USB_ADDR_MAX      127     /* 7-bit адрес; 0 зарезервирован под bus reset */
+
+//Обобщённый хост-контроллер: UHCI или EHCI.
+//Позволяет usb_core/usb_msc работать с любым типом контроллера
+//через общий API, не зная деталей.
+typedef enum { USB_HC_UHCI = 0, USB_HC_EHCI = 1 } usb_hc_type_t;
 
 typedef struct {
-    int      hc_idx;              /* индекс HC в uhci_hc_ptrs[] */
-    int      port;                /* root-порт 0..1 */
-    uint8_t  dev_addr;            /* выданный USB-адрес (1..USB_ADDR_MAX) */
-    uint8_t  cfg_value;           /* bConfigurationValue активной конфигурации */
-    uint16_t ep0_max_pkt;
-    usb_device_desc_t desc;
-    uint8_t  is_msc;              /* найден MSC/BOT интерфейс */
-    usb_msc_iface_t msc;
-    uint32_t sector_count;        /* валидно при is_msc */
-    uint32_t sector_size;
-    int      block_id;            /* id в блочном драйвере, -1 если нет */
-    char     name[16];            /* "usbN" для register_device */
-} usb_device_t;
+    usb_hc_type_t type;
+    void *hc;   // uhci_hc_t* или ehci_hc_t*
+} usb_hc_t;
 
-extern usb_device_t usb_devices[];
-extern int          usb_device_count;
 
-/* Выдать следующий свободный USB-адрес (1..USB_ADDR_MAX) */
-uint8_t usb_alloc_dev_addr(void);
+//Обёртки: диспетчеризуют на uhci_* или ehci_* по полю type
+int usb_hc_control_transfer(usb_hc_t *hc, uint8_t addr,
+                            const uint8_t *setup,
+                            void *buf, uint16_t len, int in, uint16_t maxpkt);
+int usb_hc_bulk_transfer(usb_hc_t *hc, uint8_t addr, uint8_t ep,
+                         uint16_t maxpkt, uint8_t *toggle,
+                         void *buf, uint32_t len, int in);
+int usb_hc_port_connected(usb_hc_t *hc, int port);
+int usb_hc_port_reset(usb_hc_t *hc, int port);
+uint32_t usb_hc_port_status(usb_hc_t *hc, int port);
 
-/* Прототипы */
-uhci_hc_t *usb_get_hc(int hc_idx);
 
-int usb_enumerate(uhci_hc_t *hc, int port, uint8_t addr,
-                  usb_device_desc_t *out_desc);
+//Прототипы
+int usb_enumerate(usb_hc_t *hc, int port, uint8_t want_addr,
+                  usb_device_desc_t *out_desc, uint8_t *out_addr);
 
-/* Полный цикл: hard reset -> включение порта -> GET_DESC(8)@0 ->
-   SET_ADDRESS(addr) -> GET_DESC(18)@addr. Возвращает 0 при успехе. */
-int usb_enumerate_device(usb_device_t *dev, uint8_t addr);
-
-int usb_get_descriptor(uhci_hc_t *hc, uint8_t addr,
-                       uint8_t desc_type, uint8_t desc_index,
-                       void *buf, uint16_t want_len, uint16_t max_pkt);
-
-int usb_get_config_desc(uhci_hc_t *hc, uint8_t addr, void *buf,
+int usb_get_config_desc(usb_hc_t *hc, uint8_t addr, void *buf,
                         uint16_t want_len, uint16_t max_pkt);
-int usb_set_configuration(uhci_hc_t *hc, uint8_t addr, uint8_t cfg_val);
+int usb_set_configuration(usb_hc_t *hc, uint8_t addr, uint8_t cfg_val);
 int usb_parse_mass_storage(const void *config_buf, uint16_t total_len,
                            usb_msc_iface_t *out);
 
+void usb_scan_pci_controllers(void);
+int ehci_route_ports_to_uhci(void);
 #endif

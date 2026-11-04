@@ -101,6 +101,11 @@
 #define TD_CTRL_IOC         (1 << 24)
 #define TD_CTRL_LS          (1 << 26)
 #define TD_CTRL_SPD         (1 << 29)
+/* Error Counter (bits 27-28): сколько раз HC повторит транзакцию при
+   NAK/CRC/BitStuff перед тем как retire TD. 3 = 4 попытки.
+   После retire с NAK драйвер должен сам решить: retry или ошибка. */
+#define TD_CTRL_MAXERR_SHIFT 27
+#define TD_CTRL_MAXERR_3    (3u << TD_CTRL_MAXERR_SHIFT)
 
 
 /* Token */
@@ -117,6 +122,8 @@
 #define MAX_CONTROL_TDS   16
 #define MAX_BULK_TDS      64
 
+//#define PAGE_SIZE 4096
+
 /* Максимум UHCI-контроллеров (PCI class 0x0C/0x03/prog-if 0).
    Физические машины часто имеют 2 контроллера по 2 порта (ICH: USB#1/#2),
    поэтому одного hc на весь драйвер не хватает. */
@@ -128,6 +135,14 @@
    наша очередь — ограничено; MAX_CONTROL_TDS с запасом. */
 #define UHCI_CTRL_RING    64
 #define UHCI_BULK_RING    128
+
+
+#define UHCI_TICKS_PER_SEC  100
+#define UHCI_CTRL_TIMEOUT_SEC 2
+#define UHCI_BULK_TIMEOUT_SEC 5
+
+
+#define UHCI_MAX_CONTROLLERS 8
 
 /* ---------------- Структуры UHCI (все выровнены на 16) ---------------- */
 typedef struct {
@@ -170,6 +185,12 @@ typedef struct {
    валидными при повторном probe()/init(). */
 extern uhci_hc_t *uhci_hc_ptrs[UHCI_MAX_HC];
 extern int        uhci_hc_count;
+
+extern uint8_t *frame_list_ptr;
+extern uhci_qh_t *control_qh_ptr;
+extern uhci_td_t *control_tds_ptr;
+
+extern uint8_t uhci_dev_is_ls[128];
 
 /* PCI helpers */
 uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off);
@@ -227,10 +248,26 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
 
 /* Проверка состояния HC во время ожидания TD: HSE, Error, зависание */
 int uhci_hc_healthy(uhci_hc_t *hc);
+//int uhci_probe(uhci_hc_t *hc);
+int uhci_probe_all(void);
+
 
 /* Отладочные счётчики (пишет kernel via api->debugN) */
 extern uint32_t uhci_dbg_hse;
 extern uint32_t uhci_dbg_err;
 extern uint32_t uhci_dbg_timeout;
+
+extern uhci_hc_t uhci_hcs[8];
+extern int uhci_hc_count;
+
+int uhci_check_alignment(void);
+
+//void uhci_register_ptrs();
+/* DMA-структуры контроллера (Frame List, QH, TD-пулы, setup-буфер).
+   Вызываются из device_usb_start(): к этому моменту dma_alloc_ptr уже
+   установлен ядром (см. use_drivers.c). uhci_register_ptrs() удалён —
+   больше нет статических массивов, все структуры выделяются динамически. */
+int  uhci_alloc_structures(void);
+void uhci_free_structures(void);
 
 #endif

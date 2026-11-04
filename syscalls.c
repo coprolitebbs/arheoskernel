@@ -35,6 +35,7 @@
 #include "userspace/include/syscall.h"
 #include "include-kernel/usb_registry.h"
 #include "userspace/include/udevices_struct.h"
+#include "userspace/include/mount_structures.h"
 
 // Состояние модификаторов клавиатуры в ядре
 bool shift_pressed = false;
@@ -1228,29 +1229,35 @@ void systemcall_usb_count(struct regs *r){
     r->eax = usb_registry_count();
 }
 
+
+
 void systemcall_usb_get_dev(struct regs *r){
     int idx = (int)r->ebx;
     u_usb_dev_t *user_out = (u_usb_dev_t *)r->ecx;
 
-    if (!user_out || (uint32_t)user_out < 0x40000000){ r->eax = -1; return; }
+    if (!user_out || (uint32_t)user_out < 0x40000000){
+        r->eax = -1; return;
+    }
 
     usb_dev_record_t rec;
-    if (usb_registry_get(idx, &rec) != 0){ r->eax = -1; return; }
+    if (usb_registry_get(idx, &rec) != 0){
+        r->eax = -1; return;
+    }
 
-    user_out->vid           = rec.vid;
-    user_out->pid           = rec.pid;
-    user_out->dev_class     = rec.dev_class;
-    user_out->dev_subclass  = rec.dev_subclass;
-    user_out->dev_protocol  = rec.dev_protocol;
-    user_out->port          = rec.port;
-    user_out->block_id      = rec.block_id;
-    memcpy(user_out->manufacturer, rec.manufacturer, sizeof(rec.manufacturer));
-    memcpy(user_out->product,      rec.product,      sizeof(rec.product));
-    memcpy(user_out->serial,       rec.serial,       sizeof(rec.serial));
+    user_out->vid          = rec.vid;
+    user_out->pid          = rec.pid;
+    user_out->dev_class    = rec.dev_class;
+    user_out->dev_subclass = rec.dev_subclass;
+    user_out->dev_protocol = rec.dev_protocol;
+    user_out->port         = rec.port;
+    user_out->block_id     = rec.block_id;
+
+    for (int i = 0; i < USB_DEV_NAME_MAX;   i++) user_out->manufacturer[i] = rec.manufacturer[i];
+    for (int i = 0; i < USB_DEV_NAME_MAX;   i++) user_out->product[i]      = rec.product[i];
+    for (int i = 0; i < USB_DEV_SERIAL_MAX; i++) user_out->serial[i]       = rec.serial[i];
 
     r->eax = 0;
 }
-
 
 void systemcall_get_tty_cursor_pos(struct regs *r){
 if (!current_tty){
@@ -1261,6 +1268,44 @@ if (!current_tty){
     r->ebx = (uint32_t)(current_tty->cursor_y / current_tty->cell_h);
 }
 
+
+
+void systemcall_get_mount_count(struct regs *r){
+    r->eax = vfs_get_mount_count();
+}
+
+/* ebx = int idx, ecx = u_mount_info_t *user_out */
+void systemcall_get_mount_info(struct regs *r){
+    int idx = (int)r->ebx;
+    u_mount_info_t *user_out = (u_mount_info_t *)r->ecx;
+    if (!user_out || (uint32_t)user_out < 0x40000000){ r->eax = -1; return; }
+
+    char k_mp[256];
+    uint32_t k_drive = 0;
+    const char *k_fsname = "unknown";
+    fs_statfs_t k_st;
+    memset(&k_st, 0, sizeof(k_st));
+
+    int res = vfs_get_mount_info(idx, k_mp, sizeof(k_mp), &k_drive, &k_fsname, &k_st);
+    if (res != FS_OK && res != FS_NOT_SUPPORTED){ r->eax = res; return; }
+
+    memset(user_out, 0, sizeof(*user_out));
+    user_out->drive_id        = k_drive;
+    user_out->statfs_supported= (res == FS_OK) ? 1 : 0;
+    for (int i = 0; i < 255; i++){ user_out->mount_point[i] = k_mp[i]; if (!k_mp[i]) break; }
+    user_out->mount_point[255] = '\0';
+    for (int i = 0; i < 15; i++){ user_out->fs_name[i] = k_fsname[i]; if (!k_fsname[i]) break; }
+    user_out->fs_name[15] = '\0';
+
+    if (res == FS_OK){
+        user_out->block_size   = k_st.block_size;
+        user_out->total_blocks = k_st.total_blocks;
+        user_out->free_blocks  = k_st.free_blocks;
+        user_out->total_inodes = k_st.total_inodes;
+        user_out->free_inodes  = k_st.free_inodes;
+    }
+    r->eax = 0;
+}
 
 
 void syscalls_table_init(void){
@@ -1311,6 +1356,7 @@ void syscalls_table_init(void){
     syscalls_table[SYS_USB_COUNT].func = &systemcall_usb_count;
     syscalls_table[SYS_USB_GET_DEV].func = &systemcall_usb_get_dev;
     syscalls_table[SYS_GET_CURSOR_POS].func = &systemcall_get_tty_cursor_pos;
-
+    syscalls_table[SYS_GET_MOUNT_COUNT].func = &systemcall_get_mount_count;
+    syscalls_table[SYS_GET_MOUNT_INFO].func = &systemcall_get_mount_info;
 
 }

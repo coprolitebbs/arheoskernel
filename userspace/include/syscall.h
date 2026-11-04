@@ -75,6 +75,9 @@
 #define SYS_USB_GET_DEV           61   //ebx = idx, ecx = usb_dev_info_t*
 #define SYS_GET_CURSOR_POS        62
 
+#define SYS_GET_MOUNT_COUNT       63
+#define SYS_GET_MOUNT_INFO        64
+
 #define SYS_HALT_OS               99
 
 #define KBD_DRIVER_NOT_READY   -2

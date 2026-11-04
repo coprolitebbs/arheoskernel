@@ -42,6 +42,7 @@ typedef struct {
     void (*func)(struct regs *r);
 } syscall_vectors_table_t;
 
+
 extern syscall_vectors_table_t syscalls_table[MAX_SYSCALLS];
 
 //Вспомогательные макросы для вызова из ядра (если нужно)

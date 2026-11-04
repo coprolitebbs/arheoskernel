@@ -185,6 +185,7 @@ vbe_init:
     ;Успех без LFB
     mov al, 'N' ; No LFB
     call debug_char
+
     jmp .success_fill_vars
 
 .success_lfb:
@@ -215,7 +216,8 @@ vbe_init:
     mov [cs:vesa_pmi_len], cx
 
     movzx eax, word [cs:mode_info + 0x00] ;Берем смещение к SetWindow
-    add eax, mode_info                    ;Прибавляем базовый адрес буфера
+    ;add eax, mode_info                    ;Прибавляем базовый адрес буфера
+    add eax, vbe_ctrl_info
     mov [cs:vesa_pmi_off], eax
 
     ;PMI найден
@@ -243,10 +245,10 @@ vbe_init:
     mov [graphics_flags], eax
 
     ; Отладка
-    mov si, msg_pmi_ok
-    mov ah, 0x0E
-    mov bx, 0x0007
-    call .print_str_short
+    ;mov si, msg_pmi_ok
+    ;mov ah, 0x0E
+    ;mov bx, 0x0007
+    ;call .print_str_short
 
     jmp .finish_vars
 
@@ -259,16 +261,28 @@ vbe_init:
     or bx, 0x4000
     mov ax, 0x4F02
     int 0x10
+    cmp ax, 0x004F
+    je .finish_vars_lfb_ok
 
-    ;Повторный запрос информации о режиме для точных данных (Pitch, LFB Addr)
-    ;Если мы использовали PMI, режим уже установлен, но данные нужно освежить
+    ; LFB не сработал повторно — возвращаемся в банковский режим
+
+
+    mov bx, [best_mode]
+    and bx, 0xBFFF
+    mov ax, 0x4F02
+    int 0x10
+    cmp ax, 0x004F
+    jne .vbe_fail_info
+    ; graphics_flags уже 0 (пришли из no-LFB пути), оставляем как есть
+
+.finish_vars_lfb_ok:
+    ; Дальше — запрос mode_info и заполнение переменных
     mov ax, cs
     mov es, ax
     mov di, mode_info
     mov ax, 0x4F01
-    mov cx, [best_mode] ;Номер режима (без флагов)
+    mov cx, [best_mode]
     int 0x10
-
     cmp ax, 0x004F
     jne .vbe_fail_info
 
@@ -293,6 +307,8 @@ vbe_init:
 
     mov eax, [cs:mode_info + 0x28]
     mov [lfb_addr], eax
+
+    mov dword [cs:graphics_flags], 1
 
     pusha
     ;Отладка - Успешно
@@ -339,4 +355,35 @@ vbe_init:
     int 0x10
     jmp .print_str_short
 .p_done:
+
+    ; Отладка VBE через порт 0xE9
+    pusha
+    mov al, ' '
+    out 0xE9, al
+    mov al, 'W'
+    out 0xE9, al
+    mov eax, [screen_width]
+    call debug_hex_dword
+    mov al, 'H'
+    out 0xE9, al
+    mov eax, [screen_height]
+    call debug_hex_dword
+    mov al, 'P'
+    out 0xE9, al
+    mov eax, [pitch]
+    call debug_hex_dword
+    mov al, 'L'
+    out 0xE9, al
+    mov eax, [lfb_addr]
+    call debug_hex_dword
+    mov al, 'F'
+    out 0xE9, al
+    mov eax, [graphics_flags]
+    call debug_hex_dword
+    popa
+
+
     ret
+
+
+

@@ -19,6 +19,7 @@
 #include <stdbool.h>
 #include "../include/syscall.h"
 #include "../../include-kernel/locale_types.h"
+#include "../include/mount_structures.h"
 
 #ifdef COMPILE_BIN
 //extern char _ubss_start;
@@ -754,3 +755,19 @@ void u_get_console_pos(uint32_t *x, uint32_t *y){
     if (c)   *x   = c;
     if (rr)   *y   = rr;
 }
+
+
+int u_get_mount_count(void){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_GET_MOUNT_COUNT) : "memory");
+    return ret;
+}
+
+int u_get_mount_info(int idx, u_mount_info_t *out){
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret)
+        : "a"(SYS_GET_MOUNT_INFO), "b"(idx), "c"(out) : "memory");
+    return ret;
+}
+
+

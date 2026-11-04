@@ -24,6 +24,8 @@ start:
     cmp bx, 0xAA55
     jne .no_lba
     mov byte [cs:lba_supported], 1
+
+    ;mov byte [cs:lba_supported], 0
     jmp .skip_geometry
 
 .no_lba:

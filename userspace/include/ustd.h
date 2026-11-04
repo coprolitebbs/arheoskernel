@@ -23,6 +23,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "fileattrs.h"
+#include "mount_structures.h"
 #include "../../include-kernel/locale_types.h"
 
 #define MAX_PROCESS_FDS 16
@@ -93,6 +94,9 @@ int getcwd(char *buf, uint32_t max_len);
 int stat(const char *path, u_stat_t *st);
 int seek(int fd, uint32_t position);
 int tell(int fd);
+int u_get_mount_count(void);
+int u_get_mount_info(int idx, u_mount_info_t *out);
+
 int set_wallpaper(const void *buffer, uint32_t size);
 bool fileexists(const char *path);
 bool directoryexists(const char *path);

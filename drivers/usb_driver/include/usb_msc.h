@@ -21,6 +21,8 @@
 #include <stdint.h>
 #include "usb_core.h"
 
+#define USB_MAX_MSC_DEVS 4
+
 typedef struct {
     uint32_t dCBWSignature;
     uint32_t dCBWTag;
@@ -38,21 +40,33 @@ typedef struct {
     uint8_t  bCSWStatus;
 } __attribute__((packed)) usb_msc_csw_t;
 
+typedef struct {
+    uint8_t  dev_addr;
+    usb_msc_iface_t iface;
+    uint32_t sector_count;
+    uint32_t sector_size;
+    uint32_t block_id;      //id, выданный block_driver
+    usb_hc_t hc_wrap;
+    void    *hc;            //uhci_hc_t* контроллера, к которому привязано устройство
+    int      in_use;
+} usb_msc_dev_t;
+
+
 #define USB_MSC_CBW_SIG 0x43425355u
 #define USB_MSC_CSW_SIG 0x53425355u
 
 /* Возвращает 0 при успехе (INQUIRY + READ CAPACITY пройдены),
    отрицательное — если нет. sector_count и sector_size валидны
    только при успехе. */
-int usb_msc_init(uhci_hc_t *hc, uint8_t dev_addr,
+int usb_msc_init(usb_hc_t *hc, uint8_t dev_addr,
                  usb_msc_iface_t *iface,
                  uint32_t *out_sector_count, uint32_t *out_sector_size);
 
-int usb_msc_read10(uhci_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
+int usb_msc_read10(usb_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
                    uint32_t lba, uint32_t sectors, uint32_t sector_size,
                    void *buf);
 
-int usb_msc_write10(uhci_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
+int usb_msc_write10(usb_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
                     uint32_t lba, uint32_t sectors, uint32_t sector_size,
                     const void *buf);
 

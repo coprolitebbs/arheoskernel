@@ -47,12 +47,6 @@
 #define BLK_READONLY    0x0002
 #define BLK_PARTITION   0x0004
 
-//USB device record (ABI между usb_driver и €дром)
-
-#define USB_DEV_NAME_MAX    32
-#define USB_DEV_SERIAL_MAX  20
-#define USB_REGISTRY_MAX    8
-
 typedef struct {
     uint8_t type;
     void *struct_ptr;
@@ -181,6 +175,14 @@ typedef struct{
     uint32_t modify_time;
 } fs_stat_t;
 
+typedef struct {
+    uint32_t block_size;    /* размер блока/кластера в байтах */
+    uint32_t total_blocks;  /* всего блоков */
+    uint32_t free_blocks;   /* свободных блоков */
+    uint32_t total_inodes;  /* всего inode (0 если не применимо) */
+    uint32_t free_inodes;   /* свободных inode (0 если не применимо) */
+} fs_statfs_t;
+
 typedef struct{
     int (*mount)(uint32_t drive);
     int (*unmount)(void *volume);
@@ -220,23 +222,11 @@ typedef struct{
     //uint32_t debug1;
     uint32_t __ext2_dbg_hit_lba;
 
+    const char *fs_name;                              //"ext2", "fat12"
+    int (*statfs)(void *vol, fs_statfs_t *statfs); //NULL если не поддерживаетс€
+
 } fs_driver_api_t;
 
-//«апись реестра USB-устройств €дра, заполн€етс€ use_drivers.c после usb_start()
-//(дл€ одного устройства), либо (в будущем) самим usb_driver'ом через usb_registry_add при
-//enumeration каждого порта
-typedef struct {
-    uint32_t vid;
-    uint32_t pid;
-    uint8_t  dev_class;
-    uint8_t  dev_subclass;
-    uint8_t  dev_protocol;
-    uint8_t  port;
-    uint32_t block_id;           /* 0xFFFFFFFF если не block */
-    char     manufacturer[USB_DEV_NAME_MAX];
-    char     product[USB_DEV_NAME_MAX];
-    char     serial[USB_DEV_SERIAL_MAX];
-} __attribute__((packed)) usb_dev_record_t;
 
 typedef struct{
     //ќставлено дл€ работы в USB-legacy, первое найденное устройство
@@ -273,11 +263,23 @@ typedef struct{
     uint32_t debug9;
 
     void (*vmm_map_pages_ptr)(uint32_t phys, uint32_t size);
+    void (*vmm_map_pages_uncached_ptr)(uint32_t phys, uint32_t size);
+
+    /* DMA-совместима€ пам€ть: физически непрерывные страницы.
+       ¬озвращает виртуальный адрес (дл€ доступа из драйвера) и
+       записывает физический в *phys_out (дл€ TD/QH/буферов, куда
+       контроллер обращаетс€ по физическому адресу).
+       Ќа x86 identity-mapped регион: virt == phys, но драйвер
+       не должен на это полагатьс€ Ч только через этот API. */
+    void *(*dma_alloc_ptr)(uint32_t size, uint32_t *phys_out);
+    void  (*dma_free_ptr)(void *virt, uint32_t size);
 
     //Ёкспортные указатели €дра дл€ внутренних нужд драйвера
     void *(*malloc_ptr)(uint32_t size);
     void  (*free_ptr)(void *ptr);
     void  (*yield_ptr)(void);       //”казатель на yield() €дра дл€ асинхронного сна
+
+    uint32_t (*get_ticks)(void);
 
     void (*load_screen_add_string)(const char *fmt, ...);
 

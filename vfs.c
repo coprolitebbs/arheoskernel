@@ -690,3 +690,48 @@ void vfs_resolve_relative_path(const char *user_path, char *out_absolute_path){
 }
 
 
+
+
+int vfs_get_mount_count(void){
+    int count = 0;
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++){
+        if (vfs_mount_table[i].used) count++;
+    }
+    return count;
+}
+
+int vfs_get_mount_info(int index, char *mount_point_out, uint32_t mp_max,
+                       uint32_t *drive_id, const char **fs_name,
+                       fs_statfs_t *statfs){
+    if (index < 0) return VFS_STATUS_IO_ERROR;
+
+    int slot = -1, seen = 0;
+    for (int i = 0; i < VFS_MAX_MOUNTS; i++){
+        if (vfs_mount_table[i].used){
+            if (seen == index){ slot = i; break; }
+            seen++;
+        }
+    }
+    if (slot == -1) return VFS_STATUS_IO_ERROR;
+
+    vfs_mount_t *mnt = &vfs_mount_table[slot];
+
+    if (mount_point_out){
+        uint32_t n = 0;
+        while (mnt->mount_point[n] && n < mp_max - 1){
+            mount_point_out[n] = mnt->mount_point[n];
+            n++;
+        }
+        mount_point_out[n] = '\0';
+    }
+    if (drive_id) *drive_id = mnt->drive_id;
+    if (fs_name)  *fs_name  = mnt->driver->fs_name ? mnt->driver->fs_name : "unknown";
+
+    if (statfs){
+        memset(statfs, 0, sizeof(*statfs));
+        if (!mnt->driver->statfs) return FS_NOT_SUPPORTED;
+        return mnt->driver->statfs(mnt->volume, statfs);
+    }
+    return FS_OK;
+}
+

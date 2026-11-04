@@ -27,6 +27,8 @@
 #define PAGE_WRITE   0x02
 #define PAGE_USER    0x04
 #define PAGE_SIZE_4MB 0x80
+#define PAGE_PWT     0x08   //Page Write-Through (bit 3)
+#define PAGE_PCD     0x10   //Page Cache Disable (bit 4)
 
 
 typedef struct vm_page{
@@ -61,6 +63,8 @@ void vmm_destroy_address_space(page_directory_t *dir);
 
 //Отобразить виртуальный адрес на физический
 void vmm_map_page(page_directory_t *dir, uint32_t virt, uint32_t phys, uint32_t flags);
+
+void vmm_map_pages_uncached(uint32_t phys, uint32_t size);
 
 //Убрать отображение
 void vmm_unmap_page(page_directory_t *dir, uint32_t virt);

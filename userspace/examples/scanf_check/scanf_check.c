@@ -17,7 +17,8 @@
 
 #include "../../include/ustd.h"
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
     clear_screen();
 
     printf("=== ARheOS Userspace scanf Test ===\n");
@@ -26,8 +27,8 @@ int main(int argc, char *argv[]) {
     int age = 0;
     char name[64];
 
-    // u_read() внутри ustd.c заблокирует поток, дождется ввода строки лога,
-    // а scanf распарсит её по переменным
+    //u_read() внутри ustd.c заблокирует поток, дождется ввода строки лога,
+    //а scanf распарсит её по переменным
     int scanned = scanf("%d %s", &age, name);
 
     printf("\nРезолюция scanf (успешных совпадений: %d):\n", scanned);

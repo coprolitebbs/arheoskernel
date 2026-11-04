@@ -1,24 +1,18 @@
-/*
- * Copyright (C) 2026 ARHeOS by Dmitry H
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program. If not, see <https://www.gnu.org/licenses/>.
- */
-
 #ifndef UDEVICES_STRUCT_H
 #define UDEVICES_STRUCT_H
 
-//Структура для пользовательских программ и для системных вызовов ядра
+#include <stdint.h>
+
+#define USB_DEV_NAME_MAX    32
+#define USB_DEV_SERIAL_MAX  20
+#define USB_REGISTRY_MAX    8
+
+/* Каноническое описание USB-устройства.
+   Используется одновременно:
+     - драйвером (usb_stack_driver_api_t->devices[]),
+     - ядром (usb_registry_*),
+     - userspace (SYS_USB_GET_DEV через u_usb_dev_t).
+   Все стороны договариваются об одном layout. */
 typedef struct {
     uint32_t vid;
     uint32_t pid;
@@ -26,13 +20,16 @@ typedef struct {
     uint8_t  dev_subclass;
     uint8_t  dev_protocol;
     uint8_t  port;
-    uint32_t block_id;
-    char     manufacturer[32];
-    char     product[32];
-    char     serial[20];
-} __attribute__((packed)) u_usb_dev_t;
+    uint32_t block_id;                  /* 0xFFFFFFFF если не блок-девайс */
+    char     manufacturer[USB_DEV_NAME_MAX];
+    char     product[USB_DEV_NAME_MAX];
+    char     serial[USB_DEV_SERIAL_MAX];
+} __attribute__((packed)) usb_dev_record_t;
+
+/* Пользовательское «зеркало» — тот же layout, другое имя типа,
+   чтобы userspace-код не тянул драйверные заголовки. */
+typedef usb_dev_record_t u_usb_dev_t;
+
+#endif
 
 
-
-
-#endif //UDEVICES_STRUCT_H

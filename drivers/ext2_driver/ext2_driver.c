@@ -46,23 +46,26 @@ description_driver_api_t descr_api;
 
 //  -----  внешние функции  -----
 
-int ext2_mount(uint32_t drive){
+int ext2_mount(uint32_t drive)
+{
     if (drive >= EXT2_MAX_VOLUMES) return FS_INVALID_HANDLE;
-    /*for(int i = 0; i < EXT2_MAX_VOLUMES; ++i){
-        ext2_volume_t *vol = &ext2_volumes_ptr[i];
-        if(vol->drive == drive && vol->mounted == 1) return FS_OK;
-    }*/
-    for (int i = 0; i < EXT2_MAX_VOLUMES; i++){
+    for (int i = 0; i < EXT2_MAX_VOLUMES; i++)
+    {
         if (ext2_vols[i] && ext2_vols[i]->drive == drive && ext2_vols[i]->mounted) return FS_OK;
     }
     int fnd = -1;
-    for(int i = 0; i < EXT2_MAX_VOLUMES; ++i){
+    for(int i = 0; i < EXT2_MAX_VOLUMES; ++i)
+    {
         //ext2_volume_t *vol = &ext2_volumes_ptr[i];
         //if(vol->mounted == 0) {
         //        fnd = i;
         //        break;
         //}
-        if (ext2_vols[i] == 0){ fnd = i; break; }
+        if (ext2_vols[i] == 0)
+        {
+            fnd = i;
+            break;
+        }
     }
     if(fnd == -1) return FS_TOO_MANY;
 
@@ -79,16 +82,20 @@ int ext2_mount(uint32_t drive){
     uint32_t detected_start_lba = 0;
     //int r = FS_CORRUPTED;
 
-    for (uint32_t scan_lba = 0; scan_lba <= 64; scan_lba++){
+    for (uint32_t scan_lba = 0; scan_lba <= 64; scan_lba++)
+    {
         //Суперблок EXT2 всегда смещен ровно на 1024 байта (2 сектора) от начала ФС
         uint32_t target_lba = scan_lba + 2;
 
         //Читаем 2 сектора суперблока независимой функцией ATA диска
         int r;
         if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
-        if (api_ptr->block_device_driver_enabled && api_ptr->block){
+        if (api_ptr->block_device_driver_enabled && api_ptr->block)
+        {
             r = api_ptr->block->read(vol->drive, (uint64_t)target_lba, 2, sb_buf);
-        } else {
+        }
+        else
+        {
             r = ext2_disk_read_sectors(target_lba, 2, sb_buf);
         }
         if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
@@ -98,16 +105,17 @@ int ext2_mount(uint32_t drive){
 
         // Проверяем магическое число EXT2 (0xEF53)
         if (test_sb->s_magic == EXT2_MAGIC &&
-            test_sb->s_log_block_size <= 4 &&
-            test_sb->s_blocks_count > 0 &&
-            test_sb->s_blocks_count < 0x40000000 &&
-            test_sb->s_inodes_count > 0 &&
-            test_sb->s_blocks_per_group > 0 &&
-            test_sb->s_blocks_per_group <= 32768 &&
-            test_sb->s_inodes_per_group > 0 &&
-            test_sb->s_inodes_per_group <= 32768 &&
-            test_sb->s_first_data_block <= 1 &&
-            test_sb->s_block_group_nr == 0) {
+                test_sb->s_log_block_size <= 4 &&
+                test_sb->s_blocks_count > 0 &&
+                test_sb->s_blocks_count < 0x40000000 &&
+                test_sb->s_inodes_count > 0 &&
+                test_sb->s_blocks_per_group > 0 &&
+                test_sb->s_blocks_per_group <= 32768 &&
+                test_sb->s_inodes_per_group > 0 &&
+                test_sb->s_inodes_per_group <= 32768 &&
+                test_sb->s_first_data_block <= 1 &&
+                test_sb->s_block_group_nr == 0)
+        {
 
             found_fs = true;
             detected_start_lba = scan_lba;
@@ -116,19 +124,21 @@ int ext2_mount(uint32_t drive){
             break;
         }
 
-        if (scan_lba == 64){
+        if (scan_lba == 64)
+        {
             uint32_t magic_obs = sb_buf[56] | ((uint32_t)sb_buf[57] << 8);
             api_ptr->__ext2_dbg_hit_lba =
-            0xAA000000u
-            | ((uint32_t)(r & 0xFF) << 16)        // код возврата block->read
-            | (magic_obs & 0xFFFF);               // что увидели на месте magic
+                0xAA000000u
+                | ((uint32_t)(r & 0xFF) << 16)        // код возврата block->read
+                | (magic_obs & 0xFFFF);               // что увидели на месте magic
         }
 
     }
 
     api_ptr->free_ptr(sb_buf);
 
-    if (!found_fs) {
+    if (!found_fs)
+    {
 
         return FS_CORRUPTED; // Файловая система EXT2 не найдена на диске
     }
@@ -141,12 +151,15 @@ int ext2_mount(uint32_t drive){
     vol->sectors_per_block = vol->block_size / 512;
 
     // Извлекаем размер структуры инода
-    if (vol->sb.s_rev_level == 0) {
+    if (vol->sb.s_rev_level == 0)
+    {
         vol->inode_size = 128;
-    } else {
+    }
+    else
+    {
         vol->inode_size = vol->sb.s_inode_size;
     }
-    // Вычисляем общее количество групп блоков
+    //Вычисляем общее количество групп блоков
     vol->groups_count = (vol->sb.s_blocks_count + vol->sb.s_blocks_per_group - 1) / vol->sb.s_blocks_per_group;
     //Считываем таблицу дескрипторов групп блоков (BGDT).
     //При размере блока 1024 байта суперблок занимает Блок 1,
@@ -159,38 +172,43 @@ int ext2_mount(uint32_t drive){
 
     vol->bg_desc_table = (uint8_t*)api_ptr->malloc_ptr(4096);//bg_desc_tables_ptr + (drive * 512);
 
-    if (bgdt_size_bytes > /*sizeof(vol->bg_desc_table)*/512) {
+    if (bgdt_size_bytes > /*sizeof(vol->bg_desc_table)*/512)
+    {
         //api_ptr->free_ptr(sb_buf);
         return FS_NOT_SUPPORTED;
     }
 
-    // Читаем дескрипторы групп блоков с жесткого диска
+    //Читаем дескрипторы групп блоков с жесткого диска
     //int r = ext2_disk_read_sectors(bgdt_lba, bgdt_sectors, vol->bg_desc_table);
     int r = ext2_disk_read_sectors_via(vol, bgdt_lba, bgdt_sectors, vol->bg_desc_table);
 
-    if (r != FS_OK){
-            //api_ptr->free_ptr(sb_buf);
-            return FS_IO_ERROR;
+    if (r != FS_OK)
+    {
+        //api_ptr->free_ptr(sb_buf);
+        return FS_IO_ERROR;
     }
 
     ext2_bg_desc_t *check_bg = (ext2_bg_desc_t *)vol->bg_desc_table;
-    if (check_bg->bg_inode_bitmap == 0) {
-        // Контроллер диска вернул нули вместо реальных данных таблицы дескрипторов ФС
+    if (check_bg->bg_inode_bitmap == 0)
+    {
+        //Контроллер диска вернул нули вместо реальных данных таблицы дескрипторов ФС
         return FS_CORRUPTED;
     }
 
     ext2_vols[fnd] = vol;
     vol->mounted = true;
-    return FS_OK; // EXT2 успешно примонтирован и полностью изолирован
+    return FS_OK; //EXT2 успешно примонтирован и полностью изолирован
 }
 
 
-int ext2_unmount(void *volume){
+int ext2_unmount(void *volume)
+{
     if (!volume) return FS_IO_ERROR;
     ext2_volume_t *vol = (ext2_volume_t *)volume;
     if (!vol->mounted) return FS_IO_ERROR;
     //Проверяем открытые файлы/каталоги этого тома
-    for (int fd = 0; fd < EXT2_MAX_OPEN_FILES; fd++){
+    for (int fd = 0; fd < EXT2_MAX_OPEN_FILES; fd++)
+    {
         ext2_file_t *file = &ext2_files_ptr[fd];
         if (!file->used) continue;
         if (file->vol == vol) return FS_ACCESS_DENIED;
@@ -200,19 +218,18 @@ int ext2_unmount(void *volume){
 }
 
 
-void *ext2_get_volume(uint32_t id){
+void *ext2_get_volume(uint32_t id)
+{
     if(id >= EXT2_MAX_VOLUMES) return 0;
-    /*for(int i = 0; i < EXT2_MAX_VOLUMES; ++i){
-        ext2_volume_t *vol = &ext2_volumes_ptr[i];
-        if(vol->drive == id && vol->mounted == 1) return vol;
-    }*/
-    for (int i = 0; i < EXT2_MAX_VOLUMES; i++){
+    for (int i = 0; i < EXT2_MAX_VOLUMES; i++)
+    {
         if (ext2_vols[i] && ext2_vols[i]->drive == id && ext2_vols[i]->mounted) return ext2_vols[i];
     }
     return 0;
 }
 
-int ext2_lookup_in_dir(ext2_volume_t *vol, uint32_t dir_inode_no, const char *name, void *out_ptr, uint32_t *out_entry_id){
+int ext2_lookup_in_dir(ext2_volume_t *vol, uint32_t dir_inode_no, const char *name, void *out_ptr, uint32_t *out_entry_id)
+{
     if (!vol || !name || !out_ptr || !out_entry_id) return FS_IO_ERROR;
     if (!vol->mounted) return FS_IO_ERROR;
 
@@ -226,33 +243,49 @@ int ext2_lookup_in_dir(ext2_volume_t *vol, uint32_t dir_inode_no, const char *na
 
     if ((dir_inode.i_mode & 0x4000) == 0) return FS_INVALID_PATH;
 
-    // ---- буфер в куче, НЕ на стеке ----
     uint8_t *dir_buf = (uint8_t *)api_ptr->malloc_ptr(vol->block_size);
     if (!dir_buf) return FS_IO_ERROR;
     //memset(dir_buf, 0xAA, 4096);
 
-    for (int b = 0; b < 12; b++) {
+    for (int b = 0; b < 12; b++)
+    {
         uint32_t block_no = dir_inode.i_block[b];
         if (block_no == 0) break;
 
         r = ext2_read_block(vol, block_no, dir_buf);
-        if (r != FS_OK) { api_ptr->free_ptr(dir_buf); return r; }
+        if (r != FS_OK)
+        {
+            api_ptr->free_ptr(dir_buf);
+            return r;
+        }
 
         uint32_t offset = 0;
-        while (offset < vol->block_size) {
+        while (offset < vol->block_size)
+        {
             ext2_dir_entry_t *entry = (ext2_dir_entry_t *)(dir_buf + offset);
             if (entry->rec_len == 0) break;
 
             uint32_t real_name_len = entry->name_len & 0xFF;
-            if (entry->inode != 0 && real_name_len == name_len) {
+            if (entry->inode != 0 && real_name_len == name_len)
+            {
                 int match = 1;
-                for (uint32_t j = 0; j < name_len; j++) {
-                    if (entry->name[j] != name[j]) { match = 0; break; }
+                for (uint32_t j = 0; j < name_len; j++)
+                {
+                    if (entry->name[j] != name[j])
+                    {
+                        match = 0;
+                        break;
+                    }
                 }
-                if (match) {
+                if (match)
+                {
                     ext2_inode_t file_inode;
                     r = ext2_read_inode(vol, entry->inode, &file_inode);
-                    if (r != FS_OK) { api_ptr->free_ptr(dir_buf); return r; }
+                    if (r != FS_OK)
+                    {
+                        api_ptr->free_ptr(dir_buf);
+                        return r;
+                    }
                     memcpy(out_ptr, &file_inode, sizeof(ext2_inode_t));
                     *out_entry_id = entry->inode;
                     api_ptr->free_ptr(dir_buf);
@@ -268,30 +301,33 @@ int ext2_lookup_in_dir(ext2_volume_t *vol, uint32_t dir_inode_no, const char *na
 }
 
 
-int ext2_lookup(void *vol_ptr, const char *name, void *out_ptr, uint32_t *out_entry_id){
+int ext2_lookup(void *vol_ptr, const char *name, void *out_ptr, uint32_t *out_entry_id)
+{
     if (!vol_ptr || !name || !out_ptr || !out_entry_id) return FS_IO_ERROR;
     ext2_volume_t *vol = (ext2_volume_t *)vol_ptr;
-    // Перенаправляем поиск в универсальную функцию, стартуя с КОРНЯ (EXT2_ROOT_INO)
+    //Перенаправляем поиск в универсальную функцию, стартуя с корня (EXT2_ROOT_INO)
     return ext2_lookup_in_dir(vol, EXT2_ROOT_INO, name, out_ptr, out_entry_id);
 }
 
 
 
 
-int ext2_find_parent_inode(ext2_volume_t *vol, const char *path, uint32_t *out_parent_inode_no, char *out_child_name){
+int ext2_find_parent_inode(ext2_volume_t *vol, const char *path, uint32_t *out_parent_inode_no, char *out_child_name)
+{
     if (!vol || !path || !out_parent_inode_no || !out_child_name) return FS_IO_ERROR;
-    uint32_t current_dir_inode = EXT2_ROOT_INO; // Начинаем всегда с корня ФС
+    uint32_t current_dir_inode = EXT2_ROOT_INO; //Начинаем всегда с корня ФС
 
     //Безопасно копируем длинный путь в глобальный буфер драйвера (до 4095 байт)
     strncpy((char *)ext2_path_buffer_ptr, path, EXT2_PATH_MAX - 1);
-    ext2_path_buffer_ptr[EXT2_PATH_MAX - 1] = '\0'; // Жесткий терминальный нуль
+    ext2_path_buffer_ptr[EXT2_PATH_MAX - 1] = '\0'; //Жесткий терминальный нуль
 
-    // Убираем ведущий слэш для корректной токенизации
+    //Убираем ведущий слэш для корректной токенизации
     char *p = (char *)ext2_path_buffer_ptr;
     if (*p == '/') p++;
 
-    // Если передан чистый корень "/", то токенизировать нечего
-    if (*p == '\0') {
+    //Если передан чистый корень "/", то токенизировать нечего
+    if (*p == '\0')
+    {
         return FS_INVALID_PATH;
     }
 
@@ -301,19 +337,20 @@ int ext2_find_parent_inode(ext2_volume_t *vol, const char *path, uint32_t *out_p
 
     if (token == NULL) return FS_INVALID_PATH;
 
-    // Итерируемся по элементам пути, пока не дойдем до последнего имени файла
-    while (next_token != NULL) {
+    //Итерируемся по элементам пути, пока не дойдем до последнего имени файла
+    while (next_token != NULL)
+    {
         ext2_inode_t dir_inode;
         uint32_t found_inode_no = 0;
 
-        // Ищем подпапку 'token' внутри текущего 'current_dir_inode' каталога
+        //Ищем подпапку 'token' внутри текущего 'current_dir_inode' каталога
         int r = ext2_lookup_in_dir(vol, current_dir_inode, token, &dir_inode, &found_inode_no);
         if (r != FS_OK) return r; // Промежуточный каталог отсутствует
 
-        // Убеждаемся, что найденный дескриптор — действительно каталог
+        //Убеждаемся, что найденный дескриптор — действительно каталог
         if ((dir_inode.i_mode & 0x4000) == 0) return FS_INVALID_PATH;
 
-        current_dir_inode = found_inode_no; // Спускаемся на уровень ниже
+        current_dir_inode = found_inode_no; //Спускаемся на уровень ниже
         token = next_token;
         next_token = strtok_r(NULL, "/", &saveptr);
     }
@@ -330,7 +367,8 @@ int ext2_find_parent_inode(ext2_volume_t *vol, const char *path, uint32_t *out_p
 
 
 
-int ext2_touch(void *vol_ptr, const char *path){
+int ext2_touch(void *vol_ptr, const char *path)
+{
     if (!vol_ptr || !path) return FS_INVALID_PATH;
     ext2_volume_t *vol = (ext2_volume_t *)vol_ptr;
     if (!vol->mounted) return FS_INVALID_HANDLE;
@@ -342,8 +380,10 @@ int ext2_touch(void *vol_ptr, const char *path){
     if (*slash_check == '/') slash_check++;
 
     bool has_subdirectories = false;
-    while (*slash_check != '\0') {
-        if (*slash_check == '/') {
+    while (*slash_check != '\0')
+    {
+        if (*slash_check == '/')
+        {
             has_subdirectories = true;
             break;
         }
@@ -352,10 +392,14 @@ int ext2_touch(void *vol_ptr, const char *path){
 
     int r = ext2_find_parent_inode(vol, path, &parent_inode_no, child_name);
 
-    if (r != FS_OK) {
-        if (has_subdirectories) {
+    if (r != FS_OK)
+    {
+        if (has_subdirectories)
+        {
             return FS_INVALID_PATH;
-        } else {
+        }
+        else
+        {
             parent_inode_no = EXT2_ROOT_INO;
             strcpy(child_name, path);
             if (child_name[0] == '/') strcpy(child_name, path + 1);
@@ -368,7 +412,8 @@ int ext2_touch(void *vol_ptr, const char *path){
     ext2_inode_t dummy_inode;
     uint32_t dummy_inode_no = 0;
 
-    if (ext2_lookup_in_dir(vol, parent_inode_no, child_name, &dummy_inode, &dummy_inode_no) == FS_OK) {
+    if (ext2_lookup_in_dir(vol, parent_inode_no, child_name, &dummy_inode, &dummy_inode_no) == FS_OK)
+    {
         return FS_ALREADY_EXISTS;
     }
 
@@ -401,10 +446,15 @@ int ext2_touch(void *vol_ptr, const char *path){
 
     uint32_t parent_phys_block = parent_inode.i_block[0];
 
-    if (parent_phys_block == 0) {
+    if (parent_phys_block == 0)
+    {
         uint32_t allocated_block = 0;
         int alloc_res = ext2_alloc_block(vol, 0, &allocated_block);
-        if (alloc_res != FS_OK) { api_ptr->free_ptr(dir_buf); return alloc_res; }
+        if (alloc_res != FS_OK)
+        {
+            api_ptr->free_ptr(dir_buf);
+            return alloc_res;
+        }
 
         parent_phys_block = allocated_block;
         parent_inode.i_block[0] = allocated_block;
@@ -416,29 +466,44 @@ int ext2_touch(void *vol_ptr, const char *path){
         empty_entry->name_len = 0;
 
         r = ext2_write_block(vol, parent_phys_block, dir_buf);
-        if (r != FS_OK) { api_ptr->free_ptr(dir_buf); return r; }
+        if (r != FS_OK)
+        {
+            api_ptr->free_ptr(dir_buf);
+            return r;
+        }
 
         ext2_write_inode(vol, parent_inode_no, &parent_inode);
     }
 
     r = ext2_read_block(vol, parent_phys_block, dir_buf);
-    if (r != FS_OK) { api_ptr->free_ptr(dir_buf); return r; }
+    if (r != FS_OK)
+    {
+        api_ptr->free_ptr(dir_buf);
+        return r;
+    }
 
     uint32_t offset = 0;
     ext2_dir_entry_t *last_entry = NULL;
 
-    while (offset < block_size) {
+    while (offset < block_size)
+    {
         ext2_dir_entry_t *entry = (ext2_dir_entry_t *)(dir_buf + offset);
-        if (entry->rec_len == 0) { api_ptr->free_ptr(dir_buf); return FS_CORRUPTED; }
+        if (entry->rec_len == 0)
+        {
+            api_ptr->free_ptr(dir_buf);
+            return FS_CORRUPTED;
+        }
 
-        if (offset + entry->rec_len >= block_size) {
+        if (offset + entry->rec_len >= block_size)
+        {
             last_entry = entry;
             break;
         }
         offset += entry->rec_len;
     }
 
-    if (!last_entry) {
+    if (!last_entry)
+    {
         api_ptr->free_ptr(dir_buf);
         return FS_CORRUPTED;
     }
@@ -449,7 +514,8 @@ int ext2_touch(void *vol_ptr, const char *path){
     uint32_t free_space_in_block = last_entry->rec_len - last_min_rec_len;
     uint32_t new_min_rec_len = (8 + name_len + 3) & ~3;
 
-    if (free_space_in_block < new_min_rec_len) {
+    if (free_space_in_block < new_min_rec_len)
+    {
         api_ptr->free_ptr(dir_buf);
         return FS_NO_SPACE;
     }
@@ -473,7 +539,8 @@ int ext2_touch(void *vol_ptr, const char *path){
 }
 
 
-int ext2_open(void *vol_ptr, const char *name, uint32_t flags){
+int ext2_open(void *vol_ptr, const char *name, uint32_t flags)
+{
     if (!vol_ptr || !name) return FS_IO_ERROR;
     ext2_volume_t *vol = (ext2_volume_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
@@ -481,9 +548,12 @@ int ext2_open(void *vol_ptr, const char *name, uint32_t flags){
     //api_ptr->debug1 = vol->drive;
 
     //Особый случай: открытие корневого каталога "/"
-    if (name[0] == '/' && name[1] == '\0') {
-        for (int fd = 0; fd < EXT2_MAX_OPEN_FILES; fd++) {
-            if (ext2_files_ptr[fd].used == 0) {
+    if (name[0] == '/' && name[1] == '\0')
+    {
+        for (int fd = 0; fd < EXT2_MAX_OPEN_FILES; fd++)
+        {
+            if (ext2_files_ptr[fd].used == 0)
+            {
                 ext2_files_ptr[fd].used = 1;
                 ext2_files_ptr[fd].vol = vol;
                 ext2_files_ptr[fd].inode_no = EXT2_ROOT_INO;
@@ -491,7 +561,8 @@ int ext2_open(void *vol_ptr, const char *name, uint32_t flags){
                 ext2_files_ptr[fd].attributes = 0x4000; // Маска каталога
 
                 int r = ext2_read_inode(vol, EXT2_ROOT_INO, &ext2_files_ptr[fd].inode);
-                if (r != FS_OK) {
+                if (r != FS_OK)
+                {
                     ext2_files_ptr[fd].used = 0;
                     return r;
                 }
@@ -507,13 +578,15 @@ int ext2_open(void *vol_ptr, const char *name, uint32_t flags){
     uint32_t parent_inode_no = EXT2_ROOT_INO;
     char child_name[256];
 
-    // Проверяем, есть ли вообще слэш в пути (кроме ведущего)
+    //Проверяем, есть ли вообще слэш в пути (кроме ведущего)
     const char *slash_check = name;
     if (*slash_check == '/') slash_check++;
 
     bool has_subdirectories = false;
-    while (*slash_check != '\0') {
-        if (*slash_check == '/') {
+    while (*slash_check != '\0')
+    {
+        if (*slash_check == '/')
+        {
             has_subdirectories = true;
             break;
         }
@@ -522,11 +595,15 @@ int ext2_open(void *vol_ptr, const char *name, uint32_t flags){
 
     //Вызываем парсер пути, чтобы найти инод родительской папки
     int r = ext2_find_parent_inode(vol, name, &parent_inode_no, child_name);
-    if (r != FS_OK) {
-        if (has_subdirectories) {
+    if (r != FS_OK)
+    {
+        if (has_subdirectories)
+        {
             //Если промежуточный каталог из пути не найден — возвращаем ошибку
             return FS_NOT_FOUND;
-        } else {
+        }
+        else
+        {
             //Слэшей в пути не было (просто имя), значит файл должен быть в корне
             parent_inode_no = EXT2_ROOT_INO;
             strcpy(child_name, name);
@@ -540,7 +617,8 @@ int ext2_open(void *vol_ptr, const char *name, uint32_t flags){
     //Ищем файл строго ВНУТРИ найденного родительского каталога
     r = ext2_lookup_in_dir(vol, parent_inode_no, child_name, &found_inode, &found_inode_no);
 
-    if (r == FS_NOT_FOUND && (flags & FS_OPEN_CREATE)) {
+    if (r == FS_NOT_FOUND && (flags & FS_OPEN_CREATE))
+    {
         int touch_res = ext2_touch(vol, name);
         if (touch_res != FS_OK) return touch_res;
 
@@ -552,33 +630,43 @@ int ext2_open(void *vol_ptr, const char *name, uint32_t flags){
     //uint16_t ftype = found_inode.i_mode & 0xF000;
     //bool is_dir = (ftype == 0x4000);
     bool is_dir = (found_inode.i_mode & 0xF000) == 0x4000;
-    if (flags & FS_OPEN_WRITE){
+    if (flags & FS_OPEN_WRITE)
+    {
         //Каталог на запись не открываем
-        if (is_dir){
+        if (is_dir)
+        {
             return FS_ACCESS_DENIED;
         }
         //Бит owner-write в i_mode — тот же, что ext2_stat выставляет как FS_ATTR_READONLY
-        if ((found_inode.i_mode & 0x0080) == 0){
+        if ((found_inode.i_mode & 0x0080) == 0)
+        {
             return FS_ACCESS_DENIED;
         }
     }
 
-    if ((flags & FS_OPEN_TRUNCATE) && !(flags & FS_OPEN_WRITE)) {
+    if ((flags & FS_OPEN_TRUNCATE) && !(flags & FS_OPEN_WRITE))
+    {
         return FS_ACCESS_DENIED;
     }
 
-    if (flags & FS_OPEN_TRUNCATE){
-        if (is_dir){
+    if (flags & FS_OPEN_TRUNCATE)
+    {
+        if (is_dir)
+        {
             //TRUNCATE на каталоге — молча игнорируем
-        } else {
+        }
+        else
+        {
             int tr = ext2_truncate_inode(vol, found_inode_no, &found_inode);
             if (tr != FS_OK) return tr;
         }
     }
 
     //Ищем свободное место в глобальной таблице открытых файлов EXT2
-    for (int fd = 0; fd < EXT2_MAX_OPEN_FILES; fd++) {
-        if (ext2_files_ptr[fd].used == 0) {
+    for (int fd = 0; fd < EXT2_MAX_OPEN_FILES; fd++)
+    {
+        if (ext2_files_ptr[fd].used == 0)
+        {
             ext2_files_ptr[fd].used = 1;
             ext2_files_ptr[fd].vol = vol;
             ext2_files_ptr[fd].inode_no = found_inode_no;
@@ -600,7 +688,8 @@ int ext2_open(void *vol_ptr, const char *name, uint32_t flags){
 
 
 
-int ext2_close(int fd) {
+int ext2_close(int fd)
+{
     if (fd < 0 || fd >= EXT2_MAX_OPEN_FILES) return FS_IO_ERROR;
     //if (ext2_files_ptr[fd].used == 0) return FS_IO_ERROR;
 
@@ -609,15 +698,19 @@ int ext2_close(int fd) {
 }
 
 
-int ext2_seek(int fd, uint32_t position) {
+int ext2_seek(int fd, uint32_t position)
+{
     if (fd < 0 || fd >= EXT2_MAX_OPEN_FILES) return FS_IO_ERROR;
     ext2_file_t *file = &ext2_files_ptr[fd];
     if (file->used == 0) return FS_IO_ERROR;
 
-    // Запрещаем выходить за границы размера файла
-    if (position > file->file_size) {
+    //Запрещаем выходить за границы размера файла
+    if (position > file->file_size)
+    {
         file->position = file->file_size;
-    } else {
+    }
+    else
+    {
         file->position = position;
     }
 
@@ -625,7 +718,8 @@ int ext2_seek(int fd, uint32_t position) {
 }
 
 
-int ext2_tell(int fd){
+int ext2_tell(int fd)
+{
     if (fd < 0 || fd >= EXT2_MAX_OPEN_FILES) return FS_IO_ERROR;
     ext2_file_t *file = &ext2_files_ptr[fd];
     if (file->used == 0) return FS_IO_ERROR;
@@ -634,7 +728,8 @@ int ext2_tell(int fd){
 }
 
 
-int ext2_readdir(int dir, fs_dirent_t *entry){
+int ext2_readdir(int dir, fs_dirent_t *entry)
+{
     if (dir < 0 || dir >= EXT2_MAX_OPEN_FILES || !entry) return FS_IO_ERROR;
 
     ext2_file_t *file = &ext2_files_ptr[dir];
@@ -646,30 +741,35 @@ int ext2_readdir(int dir, fs_dirent_t *entry){
     uint8_t *dir_buf = (uint8_t *)api_ptr->malloc_ptr(block_size);
     if (!dir_buf) return FS_IO_ERROR;
 
-    while (file->position < file->file_size) {
+    while (file->position < file->file_size)
+    {
         uint32_t file_block_index = file->position / block_size;
         uint32_t offset_in_block = file->position % block_size;
 
-        if (file_block_index >= 12) {
+        if (file_block_index >= 12)
+        {
             api_ptr->free_ptr(dir_buf);
             return FS_NOT_FOUND;
         }
         uint32_t phys_block = file->inode.i_block[file_block_index];
-        if (phys_block == 0) {
+        if (phys_block == 0)
+        {
             file->position = (file_block_index + 1) * block_size;
             continue;
         }
-        // Вычитываем свежий блок каталога с жесткого диска в кучу ядра
+        //Вычитываем свежий блок каталога с жесткого диска в кучу ядра
         int r = ext2_read_block(file->vol, phys_block, dir_buf);
-        if (r != FS_OK) {
+        if (r != FS_OK)
+        {
             api_ptr->free_ptr(dir_buf);
             return r;
         }
-        // Накладываем структуру на текущее смещение внутри вычитанного буфера
+        //Накладываем структуру на текущее смещение внутри вычитанного буфера
         ext2_dir_entry_t *ext2_entry = (ext2_dir_entry_t *)(dir_buf + offset_in_block);
 
         // Защита от зацикливания (битый образ ФС)
-        if (ext2_entry->rec_len == 0) {
+        if (ext2_entry->rec_len == 0)
+        {
             api_ptr->free_ptr(dir_buf);
             return FS_CORRUPTED;
         }
@@ -677,32 +777,35 @@ int ext2_readdir(int dir, fs_dirent_t *entry){
         uint32_t real_name_len = ext2_entry->name_len & 0xFF;
         if (real_name_len > 255) real_name_len = 255;
 
-        // Сразу шагаем по позиции файла вперед на размер всей записи
+        //Сразу шагаем по позиции файла вперед на размер всей записи
         file->position += ext2_entry->rec_len;
 
-        // Если инод равен 0 — файл удален в ФС, шагаем дальше по циклу
-        if (ext2_entry->inode == 0) {
+        //Если инод равен 0 — файл удален в ФС, шагаем дальше по циклу
+        if (ext2_entry->inode == 0)
+        {
             continue;
         }
 
-        // Заполняем структуру ответа для VFS ядра
+        //Заполняем структуру ответа для VFS ядра
         entry->inode = ext2_entry->inode;
 
-        // Копируем имя из жестко вычисленного смещения плоского массива dir_buf наружу в ядро
+        //Копируем имя из жестко вычисленного смещения плоского массива dir_buf наружу в ядро
         memcpy(entry->name, &dir_buf[name_start_offset], real_name_len);
         entry->name[real_name_len] = '\0'; /* Закрываем строку нулем */
 
         entry->type = 0; // Обычный файл по умолчанию
 
-        // Проверяем байты прямо из плоского массива dir_buf
-        if (real_name_len == 1 && dir_buf[name_start_offset] == '.') {
+        //Проверяем байты прямо из плоского массива dir_buf
+        if (real_name_len == 1 && dir_buf[name_start_offset] == '.')
+        {
             entry->name[0] = '.';
             entry->name[1] = '\0';
             entry->type = FS_ATTR_DIRECTORY;
             entry->attributes = FS_ATTR_DIRECTORY;
             entry->size = 0;
         }
-        else if (real_name_len == 2 && dir_buf[name_start_offset] == '.' && dir_buf[name_start_offset + 1] == '.') {
+        else if (real_name_len == 2 && dir_buf[name_start_offset] == '.' && dir_buf[name_start_offset + 1] == '.')
+        {
             entry->name[0] = '.';
             entry->name[1] = '.';
             entry->name[2] = '\0';
@@ -710,17 +813,23 @@ int ext2_readdir(int dir, fs_dirent_t *entry){
             entry->attributes = FS_ATTR_DIRECTORY;
             entry->size = 0;
         }
-        else {
+        else
+        {
             uint32_t attrs = 0;
             uint32_t size_val = 0;
 
             uint8_t ext2_type = (ext2_entry->name_len >> 8) & 0xFF;
-            if (ext2_type == 2) {
+            if (ext2_type == 2)
+            {
                 attrs |= FS_ATTR_DIRECTORY;
-            } else {
+            }
+            else
+            {
                 ext2_inode_t temp_inode;
-                if (ext2_read_inode(file->vol, ext2_entry->inode, &temp_inode) == FS_OK) {
-                    if ((temp_inode.i_mode & 0xF000) == 0x4000){
+                if (ext2_read_inode(file->vol, ext2_entry->inode, &temp_inode) == FS_OK)
+                {
+                    if ((temp_inode.i_mode & 0xF000) == 0x4000)
+                    {
                         attrs |= FS_ATTR_DIRECTORY;
                     }
                     size_val = temp_inode.i_size;
@@ -736,18 +845,20 @@ int ext2_readdir(int dir, fs_dirent_t *entry){
     }
 
     api_ptr->free_ptr(dir_buf);
-    return FS_NOT_FOUND; // Каталог полностью прочитан, файлов больше нет
+    return FS_NOT_FOUND; //Каталог полностью прочитан, файлов больше нет
 }
 
 
-int ext2_stat(void *vol_ptr, const char *path, fs_stat_t *st){
+int ext2_stat(void *vol_ptr, const char *path, fs_stat_t *st)
+{
     if (!vol_ptr || !path || !st) return FS_IO_ERROR;
 
     ext2_volume_t *vol = (ext2_volume_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
 
     //Особый случай - запрос информации о корневом каталоге "/"
-    if (path[0] == '/' && path[1] == '\0') {
+    if (path[0] == '/' && path[1] == '\0')
+    {
         ext2_inode_t root_inode;
         int r = ext2_read_inode(vol, EXT2_ROOT_INO, &root_inode);
         if (r != FS_OK) return r;
@@ -768,8 +879,10 @@ int ext2_stat(void *vol_ptr, const char *path, fs_stat_t *st){
     if (*slash_check == '/') slash_check++;
 
     bool has_subdirectories = false;
-    while (*slash_check != '\0') {
-        if (*slash_check == '/') {
+    while (*slash_check != '\0')
+    {
+        if (*slash_check == '/')
+        {
             has_subdirectories = true;
             break;
         }
@@ -778,11 +891,15 @@ int ext2_stat(void *vol_ptr, const char *path, fs_stat_t *st){
 
     //Вызываем парсер пути, чтобы найти инод родительской папки
     int r = ext2_find_parent_inode(vol, path, &parent_inode_no, child_name);
-    if (r != FS_OK) {
-        if (has_subdirectories) {
+    if (r != FS_OK)
+    {
+        if (has_subdirectories)
+        {
             //Если промежуточный каталог из пути не найден — возвращаем ошибку
             return FS_NOT_FOUND;
-        } else {
+        }
+        else
+        {
             //Слэшей в пути не было (просто имя), значит файл должен быть в корне
             parent_inode_no = EXT2_ROOT_INO;
             strcpy(child_name, path);
@@ -803,32 +920,36 @@ int ext2_stat(void *vol_ptr, const char *path, fs_stat_t *st){
     //Декодируем Unix-атрибуты/маски EXT2 (i_mode) в маски вашей VFS
     st->attributes = 0;
 
-    // Проверяем биты типа файла в i_mode
-    if ((inode.i_mode & 0xF000) == 0x4000) {
+    //Проверяем биты типа файла в i_mode
+    if ((inode.i_mode & 0xF000) == 0x4000)
+    {
         st->attributes |= FS_ATTR_DIRECTORY; /* Папка (S_IFDIR) */
     }
 
     //Проверяем флаги прав на чтение (DOS-аналог Read-Only — это отсутствие прав на запись владельцу)
-    if (!(inode.i_mode & 0x0080)) {
+    if (!(inode.i_mode & 0x0080))
+    {
         st->attributes |= FS_ATTR_READONLY;
     }
 
     //Копируем 32-битные Unix Timestamp временные метки напрямую наружу
-    st->create_time = inode.i_ctime; // Время создания (или изменения инода)
-    st->modify_time = inode.i_mtime; // Время последней модификации данных
+    st->create_time = inode.i_ctime; //Время создания (или изменения инода)
+    st->modify_time = inode.i_mtime; //Время последней модификации данных
 
     return FS_OK;
 }
 
 
-int ext2_read(int fd, void *buffer, uint32_t size){
+int ext2_read(int fd, void *buffer, uint32_t size)
+{
     if (fd < 0 || fd >= EXT2_MAX_OPEN_FILES) return FS_IO_ERROR;
     ext2_file_t *file = &ext2_files_ptr[fd];
     if (file->used == 0 || !buffer || size == 0) return 0;
 
-    // Защита от чтения за пределами файла
+    //Защита от чтения за пределами файла
     if (file->position >= file->file_size) return 0;
-    if (file->position + size > file->file_size) {
+    if (file->position + size > file->file_size)
+    {
         size = file->file_size - file->position;
     }
 
@@ -840,7 +961,8 @@ int ext2_read(int fd, void *buffer, uint32_t size){
     uint8_t *block_buf = (uint8_t *)api_ptr->malloc_ptr(block_size);
     uint32_t *indirect_buf = (uint32_t *)api_ptr->malloc_ptr(block_size);
 
-    if (!block_buf || !indirect_buf) {
+    if (!block_buf || !indirect_buf)
+    {
         if (block_buf) api_ptr->free_ptr(block_buf);
         if (indirect_buf) api_ptr->free_ptr(indirect_buf);
         return 0;
@@ -848,7 +970,8 @@ int ext2_read(int fd, void *buffer, uint32_t size){
 
     uint32_t ptrs = block_size / 4; //Количество указателей в одном блоке (например, 256)
 
-    while (remaining > 0) {
+    while (remaining > 0)
+    {
         uint32_t file_block_index = file->position / block_size;
         uint32_t offset_in_block = file->position % block_size;
 
@@ -858,49 +981,62 @@ int ext2_read(int fd, void *buffer, uint32_t size){
 
         uint32_t phys_block = 0;
 
-        // Прямая адресация (0 .. 11)
-        if (file_block_index < 12) {
+        //Прямая адресация (0 .. 11)
+        if (file_block_index < 12)
+        {
             phys_block = file->inode.i_block[file_block_index];
         }
-        // Одинарная косвенная адресация
-        else if (file_block_index < 12 + ptrs) {
+        //Одинарная косвенная адресация
+        else if (file_block_index < 12 + ptrs)
+        {
             uint32_t table1 = file->inode.i_block[12];
-            if (table1 != 0) {
-                if (ext2_read_block(file->vol, table1, (uint8_t *)indirect_buf) == FS_OK) {
+            if (table1 != 0)
+            {
+                if (ext2_read_block(file->vol, table1, (uint8_t *)indirect_buf) == FS_OK)
+                {
                     phys_block = indirect_buf[file_block_index - 12];
                 }
             }
         }
-        // Двойная косвенная адресация
-        else if (file_block_index < 12 + ptrs + (ptrs * ptrs)) {
+        //Двойная косвенная адресация
+        else if (file_block_index < 12 + ptrs + (ptrs * ptrs))
+        {
             uint32_t table2 = file->inode.i_block[13];
-            if (table2 != 0) {
+            if (table2 != 0)
+            {
                 uint32_t rel_idx = file_block_index - 12 - ptrs;
                 uint32_t i1 = rel_idx / ptrs;
                 uint32_t i2 = rel_idx % ptrs;
 
-                if (ext2_read_block(file->vol, table2, (uint8_t *)indirect_buf) == FS_OK) {
+                if (ext2_read_block(file->vol, table2, (uint8_t *)indirect_buf) == FS_OK)
+                {
                     uint32_t table1 = indirect_buf[i1];
-                    if (table1 != 0 && ext2_read_block(file->vol, table1, (uint8_t *)indirect_buf) == FS_OK) {
+                    if (table1 != 0 && ext2_read_block(file->vol, table1, (uint8_t *)indirect_buf) == FS_OK)
+                    {
                         phys_block = indirect_buf[i2];
                     }
                 }
             }
         }
-        // Тройная косвенная адресация
-        else {
+        //Тройная косвенная адресация
+        else
+        {
             uint32_t table3 = file->inode.i_block[14];
-            if (table3 != 0) {
+            if (table3 != 0)
+            {
                 uint32_t rel_idx = file_block_index - 12 - ptrs - (ptrs * ptrs);
                 uint32_t i1 = rel_idx / (ptrs * ptrs);
                 uint32_t i2 = (rel_idx % (ptrs * ptrs)) / ptrs;
                 uint32_t i3 = rel_idx % ptrs;
 
-                if (ext2_read_block(file->vol, table3, (uint8_t *)indirect_buf) == FS_OK) {
+                if (ext2_read_block(file->vol, table3, (uint8_t *)indirect_buf) == FS_OK)
+                {
                     uint32_t table2 = indirect_buf[i1];
-                    if (table2 != 0 && ext2_read_block(file->vol, table2, (uint8_t *)indirect_buf) == FS_OK) {
+                    if (table2 != 0 && ext2_read_block(file->vol, table2, (uint8_t *)indirect_buf) == FS_OK)
+                    {
                         uint32_t table1 = indirect_buf[i2];
-                        if (table1 != 0 && ext2_read_block(file->vol, table1, (uint8_t *)indirect_buf) == FS_OK) {
+                        if (table1 != 0 && ext2_read_block(file->vol, table1, (uint8_t *)indirect_buf) == FS_OK)
+                        {
                             phys_block = indirect_buf[i3];
                         }
                     }
@@ -908,12 +1044,16 @@ int ext2_read(int fd, void *buffer, uint32_t size){
             }
         }
 
-        // Чтение блока данных
-        if (phys_block == 0) {
+        //Чтение блока данных
+        if (phys_block == 0)
+        {
             memset(dst + bytes_read, 0, to_copy); // Разреженный кусок файла
-        } else {
+        }
+        else
+        {
             int r = ext2_read_block(file->vol, phys_block, block_buf);
-            if (r != FS_OK) {
+            if (r != FS_OK)
+            {
                 api_ptr->free_ptr(block_buf);
                 api_ptr->free_ptr(indirect_buf);
                 return r;
@@ -932,7 +1072,8 @@ int ext2_read(int fd, void *buffer, uint32_t size){
     return (int)bytes_read;
 }
 
-int ext2_write(int fd, const void *buffer, uint32_t size){
+int ext2_write(int fd, const void *buffer, uint32_t size)
+{
     if (fd < 0 || fd >= EXT2_MAX_OPEN_FILES) return FS_TOO_MANY;
     ext2_file_t *file = &ext2_files_ptr[fd];
     if (file->used == 0 || !buffer || size == 0) return 0;
@@ -948,7 +1089,8 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
     uint8_t *block_buf = (uint8_t *)api_ptr->malloc_ptr(block_size);
     uint32_t *indirect_buf = (uint32_t *)api_ptr->malloc_ptr(block_size);
 
-    if (!block_buf || !indirect_buf) {
+    if (!block_buf || !indirect_buf)
+    {
         if (block_buf) api_ptr->free_ptr(block_buf);
         if (indirect_buf) api_ptr->free_ptr(indirect_buf);
         return FS_IO_ERROR;
@@ -957,7 +1099,8 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
     uint32_t ptrs = block_size / 4;
     uint32_t sectors_per_block = block_size / 512;
 
-    while (remaining > 0) {
+    while (remaining > 0)
+    {
         uint32_t file_block_index = file->position / block_size;
         uint32_t offset_in_block = file->position % block_size;
 
@@ -965,9 +1108,11 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
         bool is_new_block = false;
 
         //Запись прямых блоков (0 .. 11)
-        if (file_block_index < 12) {
+        if (file_block_index < 12)
+        {
             phys_block = file->inode.i_block[file_block_index];
-            if (phys_block == 0) {
+            if (phys_block == 0)
+            {
                 uint32_t new_block = 0;
                 if (ext2_alloc_block(file->vol, 0, &new_block) != FS_OK) break;
                 file->inode.i_block[file_block_index] = new_block;
@@ -976,10 +1121,12 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
                 is_new_block = true;
             }
         }
-        // Запись с одинарной косвенностью
-        else if (file_block_index < 12 + ptrs) {
+        //Запись с одинарной косвенностью
+        else if (file_block_index < 12 + ptrs)
+        {
             uint32_t table1 = file->inode.i_block[12];
-            if (table1 == 0) {
+            if (table1 == 0)
+            {
                 if (ext2_alloc_block(file->vol, 0, &table1) != FS_OK) break;
                 file->inode.i_block[12] = table1;
                 file->inode.i_blocks += sectors_per_block;
@@ -991,7 +1138,8 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
             uint32_t idx = file_block_index - 12;
             phys_block = indirect_buf[idx];
 
-            if (phys_block == 0) {
+            if (phys_block == 0)
+            {
                 if (ext2_alloc_block(file->vol, 0, &phys_block) != FS_OK) break;
                 indirect_buf[idx] = phys_block;
                 file->inode.i_blocks += sectors_per_block;
@@ -999,10 +1147,12 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
                 ext2_write_block(file->vol, table1, (uint8_t *)indirect_buf);
             }
         }
-        // Запись с двойной косвенностью
-        else if (file_block_index < 12 + ptrs + (ptrs * ptrs)) {
+        //Запись с двойной косвенностью
+        else if (file_block_index < 12 + ptrs + (ptrs * ptrs))
+        {
             uint32_t table2 = file->inode.i_block[13];
-            if (table2 == 0) {
+            if (table2 == 0)
+            {
                 if (ext2_alloc_block(file->vol, 0, &table2) != FS_OK) break;
                 file->inode.i_block[13] = table2;
                 file->inode.i_blocks += sectors_per_block;
@@ -1017,13 +1167,15 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
             if (ext2_read_block(file->vol, table2, (uint8_t *)indirect_buf) != FS_OK) break;
             uint32_t table1 = indirect_buf[i1];
 
-            if (table1 == 0) {
+            if (table1 == 0)
+            {
                 if (ext2_alloc_block(file->vol, 0, &table1) != FS_OK) break;
                 indirect_buf[i1] = table1;
                 ext2_write_block(file->vol, table2, (uint8_t *)indirect_buf);
 
                 uint32_t *temp_buf = (uint32_t *)api_ptr->malloc_ptr(block_size);
-                if (temp_buf) {
+                if (temp_buf)
+                {
                     memset(temp_buf, 0, block_size);
                     ext2_write_block(file->vol, table1, (uint8_t *)temp_buf);
                     api_ptr->free_ptr(temp_buf);
@@ -1033,7 +1185,8 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
             if (ext2_read_block(file->vol, table1, (uint8_t *)indirect_buf) != FS_OK) break;
             phys_block = indirect_buf[i2];
 
-            if (phys_block == 0) {
+            if (phys_block == 0)
+            {
                 if (ext2_alloc_block(file->vol, 0, &phys_block) != FS_OK) break;
                 indirect_buf[i2] = phys_block;
                 file->inode.i_blocks += sectors_per_block;
@@ -1047,16 +1200,19 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
         uint32_t to_write = remaining;
         if (remaining > available_in_block) to_write = available_in_block;
 
-        if (offset_in_block == 0 && to_write == block_size) {
+        if (offset_in_block == 0 && to_write == block_size)
+        {
             memcpy(block_buf, src + bytes_written, block_size);
             if (ext2_write_block(file->vol, phys_block, block_buf) != FS_OK) break;
         }
-        else if (is_new_block) {
+        else if (is_new_block)
+        {
             memset(block_buf, 0, block_size);
             memcpy(block_buf + offset_in_block, src + bytes_written, to_write);
             if (ext2_write_block(file->vol, phys_block, block_buf) != FS_OK) break;
         }
-        else {
+        else
+        {
             if (ext2_read_block(file->vol, phys_block, block_buf) != FS_OK) break;
             memcpy(block_buf + offset_in_block, src + bytes_written, to_write);
             if (ext2_write_block(file->vol, phys_block, block_buf) != FS_OK) break;
@@ -1066,7 +1222,8 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
         bytes_written += to_write;
         remaining -= to_write;
 
-        if (file->position > file->inode.i_size) {
+        if (file->position > file->inode.i_size)
+        {
             file->inode.i_size = file->position;
             file->file_size = file->position;
         }
@@ -1083,7 +1240,8 @@ int ext2_write(int fd, const void *buffer, uint32_t size){
 
 
 
-int ext2_mkdir(void *vol_ptr, const char *path){
+int ext2_mkdir(void *vol_ptr, const char *path)
+{
     if (!vol_ptr || !path) return FS_IO_ERROR;
     ext2_volume_t *vol = (ext2_volume_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
@@ -1095,8 +1253,10 @@ int ext2_mkdir(void *vol_ptr, const char *path){
     if (*slash_check == '/') slash_check++;
 
     bool has_subdirectories = false;
-    while (*slash_check != '\0') {
-        if (*slash_check == '/') {
+    while (*slash_check != '\0')
+    {
+        if (*slash_check == '/')
+        {
             has_subdirectories = true;
             break;
         }
@@ -1104,9 +1264,11 @@ int ext2_mkdir(void *vol_ptr, const char *path){
     }
 
     int r = ext2_find_parent_inode(vol, path, &parent_inode_no, child_name);
-    if (r != FS_OK) {
+    if (r != FS_OK)
+    {
         if (has_subdirectories) return FS_INVALID_PATH;
-        else {
+        else
+        {
             parent_inode_no = EXT2_ROOT_INO;
             strcpy(child_name, path);
             if (child_name[0] == '/') strcpy(child_name, path + 1);
@@ -1119,7 +1281,8 @@ int ext2_mkdir(void *vol_ptr, const char *path){
 
     ext2_inode_t dummy_inode;
     uint32_t dummy_inode_no;
-    if (ext2_lookup_in_dir(vol, parent_inode_no, child_name, &dummy_inode, &dummy_inode_no) == FS_OK) {
+    if (ext2_lookup_in_dir(vol, parent_inode_no, child_name, &dummy_inode, &dummy_inode_no) == FS_OK)
+    {
         return -2;
     }
 
@@ -1155,7 +1318,11 @@ int ext2_mkdir(void *vol_ptr, const char *path){
     dotdot->name[1] = '.';
 
     r = ext2_write_block(vol, new_block_no, block_buf);
-    if (r != FS_OK) { api_ptr->free_ptr(block_buf); return r; }
+    if (r != FS_OK)
+    {
+        api_ptr->free_ptr(block_buf);
+        return r;
+    }
 
     ext2_inode_t new_inode;
     memset(&new_inode, 0, sizeof(ext2_inode_t));
@@ -1166,20 +1333,30 @@ int ext2_mkdir(void *vol_ptr, const char *path){
     new_inode.i_block[0] = new_block_no;
 
     r = ext2_write_inode(vol, new_inode_no, &new_inode);
-    if (r != FS_OK) { api_ptr->free_ptr(block_buf); return r; }
+    if (r != FS_OK)
+    {
+        api_ptr->free_ptr(block_buf);
+        return r;
+    }
 
     uint32_t parent_block = parent_inode.i_block[0];
     r = ext2_read_block(vol, parent_block, block_buf);
-    if (r != FS_OK) { api_ptr->free_ptr(block_buf); return r; }
+    if (r != FS_OK)
+    {
+        api_ptr->free_ptr(block_buf);
+        return r;
+    }
 
     uint32_t current_offset = 0;
     ext2_dir_entry_t *entry = NULL;
 
-    while (current_offset < vol->block_size) {
+    while (current_offset < vol->block_size)
+    {
         entry = (ext2_dir_entry_t *)(block_buf + current_offset);
         uint32_t real_len = (8 + entry->name_len + 3) & ~3;
 
-        if (current_offset + entry->rec_len >= vol->block_size) {
+        if (current_offset + entry->rec_len >= vol->block_size)
+        {
             uint32_t old_rec_len = entry->rec_len;
             entry->rec_len = real_len;
             current_offset += real_len;
@@ -1206,7 +1383,8 @@ int ext2_mkdir(void *vol_ptr, const char *path){
 }
 
 
-int ext2_unlink(void *vol_ptr, const char *path){
+int ext2_unlink(void *vol_ptr, const char *path)
+{
     if (!vol_ptr || !path) return FS_IO_ERROR;
     ext2_volume_t *vol = (ext2_volume_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
@@ -1218,8 +1396,10 @@ int ext2_unlink(void *vol_ptr, const char *path){
     if (*slash_check == '/') slash_check++;
 
     bool has_subdirectories = false;
-    while (*slash_check != '\0') {
-        if (*slash_check == '/') {
+    while (*slash_check != '\0')
+    {
+        if (*slash_check == '/')
+        {
             has_subdirectories = true;
             break;
         }
@@ -1227,10 +1407,14 @@ int ext2_unlink(void *vol_ptr, const char *path){
     }
 
     int r = ext2_find_parent_inode(vol, path, &parent_inode_no, child_name);
-    if (r != FS_OK) {
-        if (has_subdirectories) {
+    if (r != FS_OK)
+    {
+        if (has_subdirectories)
+        {
             return FS_NOT_FOUND;
-        } else {
+        }
+        else
+        {
             parent_inode_no = EXT2_ROOT_INO;
             strcpy(child_name, path);
             if (child_name[0] == '/') strcpy(child_name, path + 1);
@@ -1251,7 +1435,8 @@ int ext2_unlink(void *vol_ptr, const char *path){
     uint8_t *bg_desc_bytes = vol->bg_desc_table + (0 * 32);
     uint32_t block_bitmap_no = *(uint32_t *)(bg_desc_bytes + 0);
 
-    for (int b = 0; b < 12; b++){
+    for (int b = 0; b < 12; b++)
+    {
         if (file_inode.i_block[b] == 0) continue;
         int r_free = ext2_free_single_block(vol, file_inode.i_block[b]);
         if (r_free < 0) break;
@@ -1261,14 +1446,17 @@ int ext2_unlink(void *vol_ptr, const char *path){
     if (file_inode.i_block[14]) ext2_free_block_tree(vol, file_inode.i_block[14], 3);
 
     uint32_t inode_bitmap_no = *(uint32_t *)(bg_desc_bytes + 4);
-    if (inode_bitmap_no != 0) {
+    if (inode_bitmap_no != 0)
+    {
         r = ext2_read_block(vol, inode_bitmap_no, bitmap_buf);
-        if (r == FS_OK) {
+        if (r == FS_OK)
+        {
             uint32_t inode_idx = file_inode_no - 1;
             uint32_t byte_idx = inode_idx / 8;
             uint32_t bit_idx = inode_idx % 8;
 
-            if (bitmap_buf[byte_idx] & (1 << bit_idx)) {
+            if (bitmap_buf[byte_idx] & (1 << bit_idx))
+            {
                 bitmap_buf[byte_idx] &= ~(1 << bit_idx);
                 ext2_write_block(vol, inode_bitmap_no, bitmap_buf);
                 uint16_t *free_inodes_ptr = (uint16_t *)(bg_desc_bytes + 14);
@@ -1284,27 +1472,40 @@ int ext2_unlink(void *vol_ptr, const char *path){
 
     ext2_inode_t parent_inode;
     r = ext2_read_inode(vol, parent_inode_no, &parent_inode);
-    if (r != FS_OK) { api_ptr->free_ptr(bitmap_buf); return r; }
+    if (r != FS_OK)
+    {
+        api_ptr->free_ptr(bitmap_buf);
+        return r;
+    }
 
     uint32_t parent_block = parent_inode.i_block[0];
     r = ext2_read_block(vol, parent_block, bitmap_buf);
-    if (r != FS_OK) { api_ptr->free_ptr(bitmap_buf); return r; }
+    if (r != FS_OK)
+    {
+        api_ptr->free_ptr(bitmap_buf);
+        return r;
+    }
 
     uint32_t current_offset = 0;
     ext2_dir_entry_t *entry = NULL;
     ext2_dir_entry_t *prev_entry = NULL;
     bool record_deleted = false;
 
-    while (current_offset < vol->block_size) {
+    while (current_offset < vol->block_size)
+    {
         entry = (ext2_dir_entry_t *)(bitmap_buf + current_offset);
         if (entry->rec_len == 0) break;
 
-        if (entry->inode == file_inode_no) {
-            if (prev_entry != NULL) {
+        if (entry->inode == file_inode_no)
+        {
+            if (prev_entry != NULL)
+            {
                 prev_entry->rec_len += entry->rec_len;
                 record_deleted = true;
                 break;
-            } else {
+            }
+            else
+            {
                 entry->inode = 0;
                 record_deleted = true;
                 break;
@@ -1315,7 +1516,8 @@ int ext2_unlink(void *vol_ptr, const char *path){
         current_offset += entry->rec_len;
     }
 
-    if (record_deleted) {
+    if (record_deleted)
+    {
         ext2_write_block(vol, parent_block, bitmap_buf);
     }
 
@@ -1330,9 +1532,11 @@ int ext2_unlink(void *vol_ptr, const char *path){
 
     uint32_t sb_lba = vol->partition_start_lba + 2;
     uint8_t *sb_save_buf = (uint8_t *)api_ptr->malloc_ptr(4096);
-    if (sb_save_buf) {
+    if (sb_save_buf)
+    {
         r = ext2_disk_read_sectors_via(vol, sb_lba, 2, sb_save_buf);
-        if (r == FS_OK) {
+        if (r == FS_OK)
+        {
             memcpy(sb_save_buf, &vol->sb, sizeof(ext2_superblock_t));
             ext2_disk_write_sectors_via(vol, sb_lba, 2, sb_save_buf);
         }
@@ -1343,7 +1547,8 @@ int ext2_unlink(void *vol_ptr, const char *path){
 }
 
 
-int ext2_rmdir(void *vol_ptr, const char *path) {
+int ext2_rmdir(void *vol_ptr, const char *path)
+{
     if (!vol_ptr || !path) return FS_IO_ERROR;
     ext2_volume_t *vol = (ext2_volume_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
@@ -1355,8 +1560,10 @@ int ext2_rmdir(void *vol_ptr, const char *path) {
     if (*slash_check == '/') slash_check++;
 
     bool has_subdirectories = false;
-    while (*slash_check != '\0') {
-        if (*slash_check == '/') {
+    while (*slash_check != '\0')
+    {
+        if (*slash_check == '/')
+        {
             has_subdirectories = true;
             break;
         }
@@ -1364,10 +1571,14 @@ int ext2_rmdir(void *vol_ptr, const char *path) {
     }
 
     int r = ext2_find_parent_inode(vol, path, &parent_inode_no, child_name);
-    if (r != FS_OK) {
-        if (has_subdirectories) {
+    if (r != FS_OK)
+    {
+        if (has_subdirectories)
+        {
             return FS_NOT_FOUND;
-        } else {
+        }
+        else
+        {
             parent_inode_no = EXT2_ROOT_INO;
             strcpy(child_name, path);
             if (child_name[0] == '/') strcpy(child_name, path + 1);
@@ -1387,22 +1598,30 @@ int ext2_rmdir(void *vol_ptr, const char *path) {
 
     uint32_t dir_phys_block = dir_inode.i_block[0];
 
-    if (dir_phys_block != 0){
+    if (dir_phys_block != 0)
+    {
         r = ext2_free_single_block(vol, dir_phys_block);
-        if (r < 0) { api_ptr->free_ptr(block_buf); return r; }
+        if (r < 0)
+        {
+            api_ptr->free_ptr(block_buf);
+            return r;
+        }
     }
 
     uint8_t *bg_desc_bytes = vol->bg_desc_table + (0 * 32);
     uint32_t block_bitmap_no = *(uint32_t *)(bg_desc_bytes + 0);
 
-    if (dir_phys_block != 0 && block_bitmap_no != 0) {
+    if (dir_phys_block != 0 && block_bitmap_no != 0)
+    {
         r = ext2_read_block(vol, block_bitmap_no, block_buf);
-        if (r == FS_OK) {
+        if (r == FS_OK)
+        {
             uint32_t block_idx = dir_phys_block - vol->sb.s_first_data_block;
             uint32_t byte_idx = block_idx / 8;
             uint32_t bit_idx = block_idx % 8;
 
-            if (block_buf[byte_idx] & (1 << bit_idx)) {
+            if (block_buf[byte_idx] & (1 << bit_idx))
+            {
                 block_buf[byte_idx] &= ~(1 << bit_idx);
                 ext2_write_block(vol, block_bitmap_no, block_buf);
 
@@ -1414,14 +1633,17 @@ int ext2_rmdir(void *vol_ptr, const char *path) {
     }
 
     uint32_t inode_bitmap_no = *(uint32_t *)(bg_desc_bytes + 4);
-    if (inode_bitmap_no != 0) {
+    if (inode_bitmap_no != 0)
+    {
         r = ext2_read_block(vol, inode_bitmap_no, block_buf);
-        if (r == FS_OK) {
+        if (r == FS_OK)
+        {
             uint32_t inode_idx = dir_inode_no - 1;
             uint32_t byte_idx = inode_idx / 8;
             uint32_t bit_idx = inode_idx % 8;
 
-            if (block_buf[byte_idx] & (1 << bit_idx)) {
+            if (block_buf[byte_idx] & (1 << bit_idx))
+            {
                 block_buf[byte_idx] &= ~(1 << bit_idx);
                 ext2_write_block(vol, inode_bitmap_no, block_buf);
 
@@ -1438,27 +1660,40 @@ int ext2_rmdir(void *vol_ptr, const char *path) {
 
     ext2_inode_t parent_inode;
     r = ext2_read_inode(vol, parent_inode_no, &parent_inode);
-    if (r != FS_OK) { api_ptr->free_ptr(block_buf); return r; }
+    if (r != FS_OK)
+    {
+        api_ptr->free_ptr(block_buf);
+        return r;
+    }
 
     uint32_t parent_block = parent_inode.i_block[0];
     r = ext2_read_block(vol, parent_block, block_buf);
-    if (r != FS_OK) { api_ptr->free_ptr(block_buf); return r; }
+    if (r != FS_OK)
+    {
+        api_ptr->free_ptr(block_buf);
+        return r;
+    }
 
     uint32_t current_offset = 0;
     ext2_dir_entry_t *entry = NULL;
     ext2_dir_entry_t *prev_entry = NULL;
     bool record_deleted = false;
 
-    while (current_offset < vol->block_size) {
+    while (current_offset < vol->block_size)
+    {
         entry = (ext2_dir_entry_t *)(block_buf + current_offset);
         if (entry->rec_len == 0) break;
 
-        if (entry->inode == dir_inode_no) {
-            if (prev_entry != NULL) {
+        if (entry->inode == dir_inode_no)
+        {
+            if (prev_entry != NULL)
+            {
                 prev_entry->rec_len += entry->rec_len;
                 record_deleted = true;
                 break;
-            } else {
+            }
+            else
+            {
                 entry->inode = 0;
                 record_deleted = true;
                 break;
@@ -1468,13 +1703,15 @@ int ext2_rmdir(void *vol_ptr, const char *path) {
         current_offset += entry->rec_len;
     }
 
-    if (record_deleted) {
+    if (record_deleted)
+    {
         ext2_write_block(vol, parent_block, block_buf);
     }
 
     api_ptr->free_ptr(block_buf);
 
-    if (parent_inode.i_links_count > 2) {
+    if (parent_inode.i_links_count > 2)
+    {
         parent_inode.i_links_count--;
         ext2_write_inode(vol, parent_inode_no, &parent_inode);
     }
@@ -1487,9 +1724,11 @@ int ext2_rmdir(void *vol_ptr, const char *path) {
 
     uint32_t sb_lba = vol->partition_start_lba + 2;
     uint8_t *sb_save_buf = (uint8_t *)api_ptr->malloc_ptr(4096);
-    if (sb_save_buf) {
+    if (sb_save_buf)
+    {
         r = ext2_disk_read_sectors_via(vol, sb_lba, 2, sb_save_buf);
-        if (r == FS_OK) {
+        if (r == FS_OK)
+        {
             memcpy(sb_save_buf, &vol->sb, sizeof(ext2_superblock_t));
             ext2_disk_write_sectors_via(vol, sb_lba, 2, sb_save_buf);
         }
@@ -1501,52 +1740,74 @@ int ext2_rmdir(void *vol_ptr, const char *path) {
 
 
 
-int ext2_rename(void *vol_ptr, const char *oldpath, const char *newpath){
+int ext2_rename(void *vol_ptr, const char *oldpath, const char *newpath)
+{
     if (!vol_ptr || !oldpath || !newpath) return FS_IO_ERROR;
     ext2_volume_t *vol = (ext2_volume_t *)vol_ptr;
     if (!vol->mounted) return FS_IO_ERROR;
 
-    /* 1. Резолвим родителя и имя для oldpath */
+    //Резолвим родителя и имя для oldpath
     uint32_t old_parent = EXT2_ROOT_INO;
     char old_child[256];
     int r = ext2_find_parent_inode(vol, oldpath, &old_parent, old_child);
-    if (r != FS_OK){
-        const char *s = oldpath; if (*s == '/') s++;
+    if (r != FS_OK)
+    {
+        const char *s = oldpath;
+        if (*s == '/') s++;
         bool sub = false;
-        while (*s){ if (*s == '/'){ sub = true; break; } s++; }
+        while (*s)
+        {
+            if (*s == '/')
+            {
+                sub = true;
+                break;
+            }
+            s++;
+        }
         if (sub) return r;
         old_parent = EXT2_ROOT_INO;
         strcpy(old_child, oldpath);
         if (old_child[0] == '/') strcpy(old_child, oldpath + 1);
     }
 
-    /* 2. Резолвим родителя и имя для newpath */
+    //Резолвим родителя и имя для newpath
     uint32_t new_parent = EXT2_ROOT_INO;
     char new_child[256];
     r = ext2_find_parent_inode(vol, newpath, &new_parent, new_child);
-    if (r != FS_OK){
-        const char *s = newpath; if (*s == '/') s++;
+    if (r != FS_OK)
+    {
+        const char *s = newpath;
+        if (*s == '/') s++;
         bool sub = false;
-        while (*s){ if (*s == '/'){ sub = true; break; } s++; }
+        while (*s)
+        {
+            if (*s == '/')
+            {
+                sub = true;
+                break;
+            }
+            s++;
+        }
         if (sub) return r;
         new_parent = EXT2_ROOT_INO;
         strcpy(new_child, newpath);
         if (new_child[0] == '/') strcpy(new_child, newpath + 1);
     }
 
-    /* 3. Fast-path: только в одной и той же директории */
+    //Fast-path: только в одной и той же директории
     if (old_parent != new_parent) return FS_NOT_SUPPORTED;
 
-    /* 4. Старый должен существовать */
+    //Старый должен существовать
     ext2_inode_t old_inode;
     uint32_t old_inode_no = 0;
     r = ext2_lookup_in_dir(vol, old_parent, old_child, &old_inode, &old_inode_no);
     if (r != FS_OK) return r;
 
-    /* 5. Приёмник не должен существовать (VFS при желании сначала unlink) */
+    //Приёмник не должен существовать (VFS при желании сначала unlink)
     ext2_inode_t tmp_inode;
     uint32_t tmp_inode_no = 0;
-    if (ext2_lookup_in_dir(vol, new_parent, new_child, &tmp_inode, &tmp_inode_no) == FS_OK){
+    if (ext2_lookup_in_dir(vol, new_parent, new_child, &tmp_inode, &tmp_inode_no) == FS_OK)
+    {
         if (tmp_inode_no == old_inode_no) return FS_OK;     /* то же имя — no-op */
         return FS_NOT_SUPPORTED;
     }
@@ -1555,7 +1816,7 @@ int ext2_rename(void *vol_ptr, const char *oldpath, const char *newpath){
     uint32_t name_len_new = strlen(new_child);
     if (name_len_new == 0 || name_len_new > 255) return FS_INVALID_PATH;
 
-    /* 6. Читаем родительский инод и ищем old entry по 12 прямым блокам */
+    //Читаем родительский инод и ищем old entry по 12 прямым блокам
     ext2_inode_t parent_inode;
     r = ext2_read_inode(vol, old_parent, &parent_inode);
     if (r != FS_OK) return r;
@@ -1565,32 +1826,44 @@ int ext2_rename(void *vol_ptr, const char *oldpath, const char *newpath){
     if (!dir_buf) return FS_IO_ERROR;
 
     bool done = false;
-    for (int b = 0; b < 12 && !done; b++){
+    for (int b = 0; b < 12 && !done; b++)
+    {
         uint32_t block_no = parent_inode.i_block[b];
         if (block_no == 0) break;
 
         r = ext2_read_block(vol, block_no, dir_buf);
-        if (r != FS_OK){ api_ptr->free_ptr(dir_buf); return r; }
+        if (r != FS_OK)
+        {
+            api_ptr->free_ptr(dir_buf);
+            return r;
+        }
 
         uint32_t offset = 0;
-        while (offset < block_size){
+        while (offset < block_size)
+        {
             ext2_dir_entry_t *entry = (ext2_dir_entry_t *)(dir_buf + offset);
             if (entry->rec_len == 0) break;
 
             uint32_t real_len = entry->name_len & 0xFF;
             if (entry->inode == old_inode_no && real_len == name_len_old &&
-                memcmp(entry->name, old_child, name_len_old) == 0){
+                    memcmp(entry->name, old_child, name_len_old) == 0)
+            {
 
-                /* 7. Имя должно уложиться в существующий rec_len */
+                //Имя должно уложиться в существующий rec_len
                 uint32_t min_new = (8 + name_len_new + 3) & ~3;
-                if (min_new <= entry->rec_len){
-                    /* Меняем имя, сохраняем byte file type */
+                if (min_new <= entry->rec_len)
+                {
+                    //Меняем имя, сохраняем byte file type
                     uint16_t ft = entry->name_len & 0xFF00;
                     entry->name_len = (uint16_t)(name_len_new | ft);
                     memcpy(entry->name, new_child, name_len_new);
 
                     r = ext2_write_block(vol, block_no, dir_buf);
-                    if (r != FS_OK){ api_ptr->free_ptr(dir_buf); return r; }
+                    if (r != FS_OK)
+                    {
+                        api_ptr->free_ptr(dir_buf);
+                        return r;
+                    }
                     //ctime не трогаем — нет часов; поле логически неизменно
                     done = true;
                     break;
@@ -1606,20 +1879,39 @@ int ext2_rename(void *vol_ptr, const char *oldpath, const char *newpath){
 
 
 
-void relink_drive_id(uint32_t index, uint32_t id){
+void relink_drive_id(uint32_t index, uint32_t id)
+{
     //ext2_volumes_ptr[index].drive = id;
     if (index < EXT2_MAX_VOLUMES && ext2_vols[index]) ext2_vols[index]->drive = id;
 }
 
 
 
+int ext2_statfs(void *volume, fs_statfs_t *statfs)
+{
+    ext2_volume_t *vol = (ext2_volume_t *)volume;
+    if (!vol || !statfs) return FS_IO_ERROR;
+    if (!vol->mounted)   return FS_IO_ERROR;
+    uint32_t log_bs = vol->sb.s_log_block_size;
+    if (log_bs > 4) return FS_CORRUPTED;   //1024..16384, защита от мусора
+    statfs->block_size   = 1024u << log_bs;
+    statfs->total_blocks = vol->sb.s_blocks_count;
+    statfs->free_blocks  = vol->sb.s_free_blocks_count;
+    statfs->total_inodes = vol->sb.s_inodes_count;
+    statfs->free_inodes  = vol->sb.s_free_inodes_count;
+    return FS_OK;
+}
 
-void fs_init(struct boot_info *boot){
+
+
+void fs_init(struct boot_info *boot)
+{
 
 }
 
 
-void driver_main(struct boot_info *boot){
+void driver_main(struct boot_info *boot)
+{
 
     fs_init(boot);
 
@@ -1630,11 +1922,13 @@ void driver_main(struct boot_info *boot){
 
 
     ext2_volumes_ptr = ext2_volumes;
-    for(int i = 0 ; i < EXT2_MAX_VOLUMES; i++){
+    for(int i = 0 ; i < EXT2_MAX_VOLUMES; i++)
+    {
         ext2_volumes_ptr[i].mounted = 0;
     }
     ext2_files_ptr = ext2_files;
-    for(int i = 0 ; i < EXT2_MAX_OPEN_FILES; i++){
+    for(int i = 0 ; i < EXT2_MAX_OPEN_FILES; i++)
+    {
         ext2_files_ptr[i].used = 0;
     }
 
@@ -1659,13 +1953,15 @@ void driver_main(struct boot_info *boot){
     api_ptr->unlink = ext2_unlink;
     api_ptr->rename = ext2_rename;
     api_ptr->relink_drive_id = relink_drive_id;
+    api_ptr->statfs = ext2_statfs;
 
     descr_api_ptr->struct_ptr = (void *)&api;
 
 }
 
 
-description_driver_api_t *driver_get_api(void){
+description_driver_api_t *driver_get_api(void)
+{
     return &descr_api;
 }
 

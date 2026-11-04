@@ -16,173 +16,258 @@
  */
 
 /*
- * usb_driver.c - точка входа ELF-драйвера USB (этап 1).
+ * usb_driver.c - точка входа ELF-драйвера USB.
  *
- * Находит UHCI, сбрасывает порт с устройством, делает enumeration
- * и складывает VID:PID:class в description_driver_api_t->debug1..3.
- * Ядро читает их в load_additional_drivers() и выводит в boot-лог.
+ * Многопортовый enumeration: контроллер UHCI опрашивает оба корневых
+ * порта, каждому найденному устройству выдаётся уникальный USB-адрес,
+ * все устройства попадают в devices[] (для lsusb), а Mass Storage
+ * дополнительно регистрируется в block_driver через register_device.
+ * HID-класс (тачпад/тачскрин на CF-18) и прочие классы просто
+ * фиксируются в реестре и не инициализируются как MSC.
  */
 
 #include "include/usb_driver.h"
 #include "include/usb_uhci.h"
+#include "include/usb_ehci.h"
 #include "include/usb_core.h"
 #include "include/usb_msc.h"
 #include "../../include-kernel/lib.h"
+#include "../../include-kernel/ports_io.h"
+
+#define USB_MAX_MSC_DEVS  4
 
 usb_stack_driver_api_t api;
 usb_stack_driver_api_t *api_ptr;
 description_driver_api_t descr_api;
 
-uhci_hc_t       uhci0;
-usb_msc_iface_t msc_iface;
-uint8_t         msc_dev_addr     = 0;
-uint32_t        msc_sector_count = 0;
-uint32_t        msc_sector_size  = 0;
+uhci_hc_t uhci0;
+static usb_msc_dev_t g_msc[USB_MAX_MSC_DEVS];
 
-
-/* Обёртки, которые block_driver.c будет дёргать через block_api->read/write.
-   priv == NULL, потому что USB-стек — singleton (одно устройство). */
-static int usb_msc_read_wrap(void *priv, uint64_t lba, uint32_t count, void *buf){
-    (void)priv;
-    if (msc_sector_size == 0 || msc_sector_count == 0) return FS_IO_ERROR;
-    if (lba + count > msc_sector_count)                return FS_IO_ERROR;
-    int r = usb_msc_read10(&uhci0, msc_dev_addr, &msc_iface,
-                           (uint32_t)lba, count, msc_sector_size, buf);
-    return (r == 0) ? FS_OK : FS_IO_ERROR;
-}
-
-static int usb_msc_write_wrap(void *priv, uint64_t lba, uint32_t count, const void *buf){
-    (void)priv;
-    if (msc_sector_size == 0 || msc_sector_count == 0) return FS_IO_ERROR;
-    if (lba + count > msc_sector_count)                return FS_IO_ERROR;
-    int r = usb_msc_write10(&uhci0, msc_dev_addr, &msc_iface,
-                            (uint32_t)lba, count, msc_sector_size, buf);
-    return (r == 0) ? FS_OK : FS_IO_ERROR;
-}
-
-
-
-int device_usb_start(void){
-    api_ptr->vid = 0; api_ptr->pid = 0; api_ptr->dev_class = 0;
-    api_ptr->sector_count = 0; api_ptr->sector_size = 0; api_ptr->block_id = 0;
-
-    if (uhci_probe(&uhci0) != 0){ api_ptr->vid = 0xBAD0; return -1; }
-    if (uhci_init (&uhci0) != 0){ api_ptr->vid = 0xBAD1; return -1; }
-
-    if (((uint32_t)frame_list_ptr & 0xFFF) != 0 ||
-        ((uint32_t)control_qh_ptr  & 0x0F)  != 0 ||
-        ((uint32_t)control_tds_ptr & 0x0F)  != 0){
-        api_ptr->vid = 0xBAD4;
-        return -1;
+static usb_msc_dev_t *usb_alloc_msc_slot(void)
+{
+    for (int i = 0; i < USB_MAX_MSC_DEVS; i++)
+    {
+        if (!g_msc[i].in_use)
+        {
+            memset(&g_msc[i], 0, sizeof(g_msc[i]));
+            g_msc[i].in_use = 1;
+            return &g_msc[i];
+        }
     }
+    return NULL;
+}
 
-    for (int port = 0; port < 2; port++){
-        if (!uhci_port_connected(&uhci0, port)) continue;
+static int usb_msc_read_wrap(void *priv, uint64_t lba, uint32_t count, void *buf)
+{
+    usb_msc_dev_t *d = (usb_msc_dev_t *)priv;
+    if (!d || !d->hc) return FS_IO_ERROR;
+    if (d->sector_size == 0 || d->sector_count == 0) return FS_IO_ERROR;
+    if (lba + count > d->sector_count)                return FS_IO_ERROR;
+    usb_hc_t *w = (usb_hc_t*)d->hc;
+    int r = usb_msc_read10(w, d->dev_addr, &d->iface,
+                           (uint32_t)lba, count, d->sector_size, buf);
+    return (r == 0) ? FS_OK : FS_IO_ERROR;
+}
 
-        usb_device_desc_t desc;
-        uint8_t dev_addr = 0;
-        memset(&desc, 0, sizeof(desc));
+static int usb_msc_write_wrap(void *priv, uint64_t lba, uint32_t count, const void *buf)
+{
+    usb_msc_dev_t *d = (usb_msc_dev_t *)priv;
+    if (!d || !d->hc) return FS_IO_ERROR;
+    if (d->sector_size == 0 || d->sector_count == 0) return FS_IO_ERROR;
+    if (lba + count > d->sector_count)                return FS_IO_ERROR;
+    usb_hc_t *w = (usb_hc_t*)d->hc;
+    int r = usb_msc_write10(w, d->dev_addr, &d->iface,
+                            (uint32_t)lba, count, d->sector_size, buf);
+    return (r == 0) ? FS_OK : FS_IO_ERROR;
+}
 
-        int r = usb_enumerate(&uhci0, port, &desc, &dev_addr);
-        if (r != 0){
-            api_ptr->vid = 0xBAD2;
-            api_ptr->pid = (uint32_t)r;
-            continue;
-        }
+int device_usb_start(void)
+{
+    api_ptr->device_count = 0;
+    api_ptr->last_error   = 0;
+    memset(api_ptr->devices, 0, sizeof(api_ptr->devices));
+    for (int i = 0; i < USB_MAX_MSC_DEVS; i++) g_msc[i].in_use = 0;
 
-        api_ptr->vid = desc.idVendor;
-        api_ptr->pid = desc.idProduct;
-        api_ptr->dev_class = desc.bDeviceClass;
+    if (uhci_alloc_structures() != 0){ api_ptr->last_error = 0xBAD6; return -1; }
+    if (ehci_alloc_structures() != 0){ api_ptr->last_error = 0xBAD7; return -1; }
 
-        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    usb_scan_pci_controllers();
 
-        uint8_t config_buf[256];
-        memset(config_buf, 0, sizeof(config_buf));
+    //--- UHCI: companion-контроллеры, FS/LS-устройства ---
+    int uhci_count = uhci_probe_all();
+    for (int hci = 0; hci < uhci_count; hci++){
+        uhci_hc_t *uhc = &uhci_hcs[hci];
+        if (uhci_init(uhc) != 0) continue;
 
-        uint16_t ep0_max = desc.bMaxPacketSize0;
-        if (ep0_max == 0) ep0_max = 8;
+        usb_hc_t hc_wrap = { USB_HC_UHCI, uhc };
+        for (int port = 0; port < 2; port++){
+            if (!usb_hc_port_connected(&hc_wrap, port)) continue;
 
-        int cfg_r = usb_get_config_desc(&uhci0, dev_addr, config_buf,
-                                        sizeof(config_buf), ep0_max);
-        if (cfg_r != 0){
-            if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
-            api_ptr->dev_class = 0xDEAD0001u | ((uint32_t)(-cfg_r) & 0xFF);
-            api_ptr->port = (uint32_t)port;
-            return desc.idVendor;
-        }
+            usb_device_desc_t desc; uint8_t dev_addr = 0;
+            memset(&desc, 0, sizeof(desc));
+            int r = usb_enumerate(&hc_wrap, port, 1 + api_ptr->device_count,
+                                  &desc, &dev_addr);
+            if (r != 0) continue;
 
-        usb_config_desc_t *cfg = (usb_config_desc_t*)config_buf;
-        uint16_t total = cfg->wTotalLength;
+            if (api_ptr->device_count < USB_REGISTRY_MAX){
+                usb_dev_record_t *rec = &api_ptr->devices[api_ptr->device_count++];
+                memset(rec, 0, sizeof(*rec));
+                rec->vid = desc.idVendor; rec->pid = desc.idProduct;
+                rec->dev_class = desc.bDeviceClass;
+                rec->dev_subclass = desc.bDeviceSubClass;
+                rec->dev_protocol = desc.bDeviceProtocol;
+                rec->port = (uint8_t)port;
+                rec->block_id = 0xFFFFFFFFu;
+            }
 
-        int pr = usb_parse_mass_storage(config_buf, total, &msc_iface);
-        if (pr != 0){
-            if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
-            api_ptr->dev_class = 0xDEAD0002u | ((uint32_t)(-pr) & 0xFF);
-            api_ptr->port = (uint32_t)port;
-            return desc.idVendor;
-        }
+            uint16_t ep0 = desc.bMaxPacketSize0 ? desc.bMaxPacketSize0 : 8;
+            uint8_t cfg_buf[256]; memset(cfg_buf, 0, sizeof(cfg_buf));
+            if (usb_get_config_desc(&hc_wrap, dev_addr, cfg_buf,
+                                    sizeof(cfg_buf), ep0) != 0) continue;
 
-        int sr = usb_set_configuration(&uhci0, dev_addr, cfg->bConfigurationValue);
-        if (sr != 0){
-            if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
-            api_ptr->dev_class = 0xDEAD0003u;
-            api_ptr->port = (uint32_t)port;
-            return desc.idVendor;
-        }
+            usb_config_desc_t *cfg = (usb_config_desc_t*)cfg_buf;
+            usb_msc_iface_t local_msc;
+            if (usb_parse_mass_storage(cfg_buf, cfg->wTotalLength, &local_msc) != 0)
+                continue;
 
-        int msc_r = usb_msc_init(&uhci0, dev_addr, &msc_iface,
-                                 &msc_sector_count, &msc_sector_size);
+            usb_set_configuration(&hc_wrap, dev_addr, cfg->bConfigurationValue);
 
-        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+            usb_msc_dev_t *slot = usb_alloc_msc_slot();
+            if (!slot) continue;
 
-        if (msc_r != 0){
-            api_ptr->dev_class = 0xDEAD0004u | ((uint32_t)(-msc_r) & 0xFF);
-            api_ptr->port = (uint32_t)port;
-            return desc.idVendor;
-        }
+            slot->dev_addr = dev_addr;
+            slot->iface    = local_msc;
+            slot->iface.ep0_max_pkt = ep0;
+            // *** Копируем usb_hc_t в структуру слота, чтобы read/write_wrap
+            //     потом имели валидный указатель. hc_wrap — на стеке, умрёт. ***
+            slot->hc_wrap.type = hc_wrap.type;
+            slot->hc_wrap.hc   = hc_wrap.hc;
+            slot->hc           = &slot->hc_wrap;
 
-        msc_dev_addr    = dev_addr;
-        api_ptr->sector_count = msc_sector_count;
-        api_ptr->sector_size = msc_sector_size;
-
-        /* Регистрируемся как блочное устройство (usb0, usb1, ...) */
-        if (api_ptr->block && api_ptr->block->register_device){
-            int bid = api_ptr->block->register_device("usb0", msc_sector_count,
-                                                       BLK_REMOVABLE,
-                                                       usb_msc_read_wrap,
-                                                       usb_msc_write_wrap,
-                                                       NULL);
-            if (bid >= 0){
-                api_ptr->block_id = (uint32_t)bid;
-            } else {
-                api_ptr->block_id = 0xDEADBEEF;
+            if (usb_msc_init(&slot->hc_wrap, dev_addr, &slot->iface,
+                             &slot->sector_count, &slot->sector_size) == 0
+                && api_ptr->block && api_ptr->block->register_device){
+                int bid = api_ptr->block->register_device(
+                    "usb0", slot->sector_count, BLK_REMOVABLE,
+                    usb_msc_read_wrap, usb_msc_write_wrap, (void*)slot);
+                if (bid >= 0){
+                    slot->block_id = (uint32_t)bid;
+                    api_ptr->devices[api_ptr->device_count-1].block_id = (uint32_t)bid;
+                }
             }
         }
-        api_ptr->port = (uint32_t)port;
-
-        return desc.idVendor;
     }
 
-    api_ptr->vid = 0xBAD3;
-    return -1;
+    //--- EHCI: HS-устройства ---
+    int ehci_count = ehci_probe_all();
+    api_ptr->load_screen_add_string("EHCI found %d controller(s)", ehci_count);
+    for (int eci = 0; eci < ehci_count; eci++){
+        ehci_hc_t *ehc = &ehci_hcs[eci];
+
+        int ir = ehci_init(ehc);
+        api_ptr->load_screen_add_string("EHCI %d init=%d mmio=%x op=%x n_ports=%d",
+                                        eci, ir, ehc->mmio_base,
+                                        ehc->op_base, (int)ehc->n_ports);
+        if (ir != 0) continue;
+
+        usb_hc_t hc_wrap = { USB_HC_EHCI, ehc };
+        for (int port = 1; port <= (int)ehc->n_ports; port++){
+            uint32_t ps = usb_hc_port_status(&hc_wrap, port);
+            api_ptr->load_screen_add_string("EHCI %d p%d PORTSC=%x pspd=%d",
+                                            eci, port, ps, (int)((ps >> 26) & 3));
+            if (!usb_hc_port_connected(&hc_wrap, port)) continue;
+
+            usb_device_desc_t desc; uint8_t dev_addr = 0;
+            memset(&desc, 0, sizeof(desc));
+            int r = usb_enumerate(&hc_wrap, port, 1 + api_ptr->device_count,
+                                  &desc, &dev_addr);
+            if (r != 0){
+                api_ptr->load_screen_add_string("EHCI %d p%d enum r=%x",
+                                                eci, port, (uint32_t)(-r));
+                continue;
+            }
+            api_ptr->load_screen_add_string("EHCI %d p%d: VID=%x PID=%x cls=%x",
+                                            eci, port, desc.idVendor,
+                                            desc.idProduct, desc.bDeviceClass);
+
+            if (api_ptr->device_count < USB_REGISTRY_MAX){
+                usb_dev_record_t *rec = &api_ptr->devices[api_ptr->device_count++];
+                memset(rec, 0, sizeof(*rec));
+                rec->vid = desc.idVendor; rec->pid = desc.idProduct;
+                rec->dev_class = desc.bDeviceClass;
+                rec->dev_subclass = desc.bDeviceSubClass;
+                rec->dev_protocol = desc.bDeviceProtocol;
+                rec->port = (uint8_t)port;
+                rec->block_id = 0xFFFFFFFFu;
+            }
+
+            uint16_t ep0 = desc.bMaxPacketSize0 ? desc.bMaxPacketSize0 : 8;
+            uint8_t cfg_buf[256]; memset(cfg_buf, 0, sizeof(cfg_buf));
+            if (usb_get_config_desc(&hc_wrap, dev_addr, cfg_buf,
+                                    sizeof(cfg_buf), ep0) != 0) continue;
+
+            usb_config_desc_t *cfg = (usb_config_desc_t*)cfg_buf;
+            usb_msc_iface_t local_msc;
+            if (usb_parse_mass_storage(cfg_buf, cfg->wTotalLength, &local_msc) != 0)
+                continue;
+
+            usb_set_configuration(&hc_wrap, dev_addr, cfg->bConfigurationValue);
+
+            usb_msc_dev_t *slot = usb_alloc_msc_slot();
+            if (!slot) continue;
+
+            slot->dev_addr = dev_addr;
+            slot->iface    = local_msc;
+            slot->iface.ep0_max_pkt = ep0;
+            slot->hc_wrap.type = hc_wrap.type;
+            slot->hc_wrap.hc   = hc_wrap.hc;
+            slot->hc           = &slot->hc_wrap;
+
+            if (usb_msc_init(&slot->hc_wrap, dev_addr, &slot->iface,
+                             &slot->sector_count, &slot->sector_size) == 0
+                && api_ptr->block && api_ptr->block->register_device){
+                int bid = api_ptr->block->register_device(
+                    "usb1", slot->sector_count, BLK_REMOVABLE,
+                    usb_msc_read_wrap, usb_msc_write_wrap, (void*)slot);
+                if (bid >= 0){
+                    slot->block_id = (uint32_t)bid;
+                    api_ptr->devices[api_ptr->device_count-1].block_id = (uint32_t)bid;
+                }
+            }
+        }
+    }
+
+    if (api_ptr->device_count == 0){ api_ptr->last_error = 0xBAD3; return -1; }
+    return 0;
 }
 
 
-void driver_main(struct boot_info *boot){
+
+void *usb_dma_alloc(uint32_t size, uint32_t *phys_out)
+{
+    if (!api_ptr || !api_ptr->dma_alloc_ptr) return NULL;
+    return api_ptr->dma_alloc_ptr(size, phys_out);
+}
+
+void usb_dma_free(void *virt, uint32_t size)
+{
+    if (!api_ptr || !api_ptr->dma_free_ptr) return;
+    api_ptr->dma_free_ptr(virt, size);
+}
+
+
+void driver_main(struct boot_info *boot)
+{
     (void)boot;
-
-    uhci_register_ptrs();
-
-    description_driver_api_t *descr_api_ptr = &descr_api;
 
     api_ptr = &api;
     api_ptr->usb_start = device_usb_start;
 
-    descr_api_ptr->struct_ptr = (void *)&api;
-
-    descr_api_ptr->type       = DESCR_USB_DRIVER;
+    descr_api.struct_ptr = (void *)&api;
+    descr_api.type       = DESCR_USB_DRIVER;
 }
 
-description_driver_api_t *driver_get_api(void){
+description_driver_api_t *driver_get_api(void)
+{
     return &descr_api;
 }

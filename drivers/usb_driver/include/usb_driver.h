@@ -21,6 +21,11 @@
 #include "../../../include-kernel/bootinfo.h"
 #include "../../include_drivers/drv_format.h"
 
+extern usb_stack_driver_api_t *api_ptr;
+
+void *usb_dma_alloc(uint32_t size, uint32_t *phys_out);
+void  usb_dma_free(void *virt, uint32_t size);
+
 void driver_main(struct boot_info *boot);
 description_driver_api_t *driver_get_api(void);
 

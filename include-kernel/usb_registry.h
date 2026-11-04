@@ -20,8 +20,9 @@
 #define USB_REGISTRY_H
 
 #include <stdint.h>
-//#include "../userspace/include/udevices_struct.h"
-#include "../drivers/include_drivers/drv_format.h"
+#include "../userspace/include/udevices_struct.h"
+//#include "../drivers/include_drivers/drv_format.h"
+//#include "../drivers/usb_driver/include/udevices_struct.h"
 
 #define USB_REGISTRY_MAX 8
 
