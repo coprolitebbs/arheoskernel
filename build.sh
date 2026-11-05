@@ -491,7 +491,7 @@ echo -e "${GREEN}Все образы собраны в output/${NC}"
 # ---- Запуск QEMU с дискетой или hdd ----
 #qemu-system-i386 -drive file=output/fat12_720.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 #qemu-system-i386 -drive file=output/fat12_1440.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
-qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+#qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 
 #USB FLOPPY drive
@@ -516,17 +516,17 @@ qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -dis
 #sudo qemu-system-i386 -device ich9-usb-ehci1,id=ehci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,bus=ehci.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 #sudo qemu-system-i386 -device qemu-xhci,id=xhci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-storage,bus=xhci.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
-#QEMU with many uhci devs
-qemu-system-i386 -device piix3-usb-uhci -device usb-kbd -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk -vga std -m 1536 -debugcon stdio  -global isa-debugcon.iobase=0xe9
+#QEMU with kbd & uhci devs
+#qemu-system-i386 -device piix3-usb-uhci -device usb-kbd -drive id=usbdisk,file=output/usbimage.img,if=none,format=raw -device usb-storage,drive=usbdisk -vga std -m 1536 -debugcon stdio  -global isa-debugcon.iobase=0xe9
 
 #QEMU 2 storage UHCI
-#qemu-system-i386 -device piix3-usb-uhci -drive id=d1,file=output/usbimage.img,if=none,format=raw -drive id=d2,file=output/fat12_1440_usb.img,if=none,format=raw -device usb-storage,drive=d1 -device usb-storage,drive=d2 -vga std -m 1536 -debugcon stdio -global isa-debugcon.iobase=0xe9
+qemu-system-i386 -device piix3-usb-uhci -drive id=d1,file=output/usbimage.img,if=none,format=raw -drive id=d2,file=output/fat12_1440_usb.img,if=none,format=raw -device usb-storage,drive=d1 -device usb-storage,drive=d2 -vga std -m 1536 -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 #QEMU virtual EHCI hub with flash device & usb-bot
 #sudo qemu-system-i386 -device ich9-usb-ehci1,id=ehci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-bot,bus=ehci.0,id=bot1 -device scsi-hd,bus=bot1.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
-#../bochs/Bochs-USB-Edition/bochs/bochs -f ./bochsrc.txt -q
-
+#qemu EHCI
+#qemu-system-i386 -M pc -device usb-ehci,id=ehci -drive id=d1,file=output/usbimage.img,if=none,format=raw -device usb-storage,bus=ehci.0,drive=d1 -vga std -m 1536 -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 #file bin/kernel.elf
 #target symbols add bin/kernel.elf

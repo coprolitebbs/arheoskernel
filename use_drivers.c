@@ -65,6 +65,12 @@ static void *kernel_usb_dma_alloc(uint32_t size, uint32_t *phys_out){
     uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     uint32_t phys  = (uint32_t)pmm_alloc_pages(pages);
     if (!phys) return NULL;
+
+    //Реальное железо (CF-18): HC читает/пишет память DMA в обход кэша CPU.
+    //Identity-map RAM кэшируемый, поэтому перепривязываем выделенные
+    //страницы как uncached (PCD|PWT). На QEMU (TCG) это безвредно.
+    vmm_map_pages_uncached(phys, pages * PAGE_SIZE);
+
     *phys_out = phys;
     return (void*)phys;
 }
@@ -172,12 +178,11 @@ void drivers_init(void){
         int res = usb_driver_api->usb_start();
         (void)res;
 
-         /* Драйвер сам заполняет devices[] и device_count.
-           Ядро просто перекладывает записи в реестр. */
+        //Драйвер сам заполняет devices[] и device_count.
+        //Ядро просто перекладывает записи в реестр
         for (uint32_t i = 0; i < usb_driver_api->device_count; i++){
             usb_registry_add(&usb_driver_api->devices[i]);
         }
-
 
         load_screen_add_string("USB dev: VID=%x PID=%x class=%x",usb_driver_api->vid, usb_driver_api->pid,usb_driver_api->dev_class);
         load_screen_add_string("USB: %d device(s) enumerated",usb_driver_api->device_count);
@@ -187,15 +192,7 @@ void drivers_init(void){
         load_screen_add_string("USB p1 step=%d res=%x vp=%x dc=%x",
             (int)usb_driver_api->debug3, usb_driver_api->debug4,
             usb_driver_api->debug7, usb_driver_api->debug8);
-        //load_screen_add_string("USB last error: %x",usb_driver_api->last_error);
-        //if (usb_driver_api->block_id != 0xFFFFFFFFu && usb_driver_api->device_count > 0)
-            //load_screen_add_string("USB registered as block id=%d", usb_driver_api->block_id);
-        //if (usb_driver_api->device_count > 1)
-            //load_screen_add_string("USB: %d devices total", usb_driver_api->device_count);
-        //if (usb_driver_api->last_error)
-            //load_screen_add_string("USB last error: %x", usb_driver_api->last_error);
-        //load_screen_add_string("EHCI P%d PORTSC:%x PSPD:%d",usb_driver_api->debug7,usb_driver_api->debug8,usb_driver_api->debug9);
-        //for(;;);
+
     } else {
         load_screen_add_string("USB driver load error");
         //for(;;);

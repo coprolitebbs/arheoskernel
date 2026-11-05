@@ -123,7 +123,7 @@
 #define QH_EP_SPD_LS       (1u << 12)
 #define QH_EP_SPD_FS       (0u << 12)
 #define QH_EP_NUM(n)       (((uint32_t)(n) & 0xFu) << 8)  // endpoint bits 11:8
-#define QH_EP_ADDR(a)      ((uint32_t)(a) & 0x7FFu)       // address bits 11:0
+#define QH_EP_ADDR(a)      ((uint32_t)(a) & 0x7Fu)        // address bits 6:0
 
 //QH Endpoint Capabilities (Word 2)
 #define QH_CAP_MULT(n)     (((uint32_t)(n) & 0x3u) << 30) // Mult (1..3, не 0)
@@ -136,30 +136,33 @@
 #define EHCI_CTL_DATA_MAX    3584       // данные control через 4KB bounce
 #define EHCI_QTD_PAGE        4096
 
-typedef struct { volatile uint32_t lo; uint32_t hi; } __attribute__((packed)) ehci_ptr64_t;
-
+//Развёртка qTD — 32-битная раскладка EHCI spec 3.5 (Linux struct ehci_qtd,
+//QEMU EHCIqtd). Hi-слова НЕ вперемешку с указателями, а одним блоком
+//в конце. В 32-битном режиме HC читает ровно 32 байта:
+//next(0x00), alt(0x04), token(0x08), buf[0..4](0x0C..0x1B).
 typedef struct {
-    volatile uint32_t next;    uint32_t next_hi;
-    volatile uint32_t alt;     uint32_t alt_hi;
-    volatile uint32_t token;   uint32_t token_hi;
-    ehci_ptr64_t buf[5];
-} __attribute__((packed, aligned(32))) ehci_qtd_t;          // 64 bytes
+    volatile uint32_t next;    // 0x00 Next qTD Pointer (bit0 = Terminate)
+    volatile uint32_t alt;     // 0x04 Alternate Next qTD Pointer
+    volatile uint32_t token;   // 0x08 qTD Token
+    uint32_t buf[5];           // 0x0C..0x1B Buffer Pointers 0..4
+    uint32_t buf_hi[5];        // 0x20..0x2F — только 64-bit HC, всегда 0
+} __attribute__((packed, aligned(32))) ehci_qtd_t;          // 52 bytes
 
+//Развёртка QH — 32-битная раскладка EHCI spec 3.6 (Linux struct ehci_qh_hw,
+//QEMU EHCIqh). В 32-битном режиме HC читает ровно 48 байт:
+//horiz(0x00), ep_char(0x04), ep_cap(0x08), cur_qtd(0x0C),
+//next_qtd(0x10), alt_qtd(0x14), token(0x18), buf[0..4](0x1C..0x2C).
 typedef struct {
-    volatile uint32_t horiz;        // 0x00
-    volatile uint32_t horiz_hi;     // 0x04
-    volatile uint32_t ep_char;      // 0x08  32-bit!
-    volatile uint32_t ep_cap;       // 0x0C  32-bit!
-    volatile uint32_t cur_qtd;      // 0x10
-    volatile uint32_t cur_qtd_hi;   // 0x14
-    volatile uint32_t next_qtd;     // 0x18
-    volatile uint32_t next_qtd_hi;  // 0x1C
-    volatile uint32_t alt_qtd;      // 0x20
-    volatile uint32_t alt_qtd_hi;   // 0x24
-    volatile uint32_t token;        // 0x28
-    volatile uint32_t token_hi;     // 0x2C
-    ehci_ptr64_t buf[5];            // 0x30..0x58
-} __attribute__((packed, aligned(32))) ehci_qh_t;   // 88 (96 with pad)
+    volatile uint32_t horiz;    // 0x00 Next QH Pointer (|Q_TYPE_QH)
+    volatile uint32_t ep_char;  // 0x04 Endpoint Characteristics
+    volatile uint32_t ep_cap;   // 0x08 Endpoint Capabilities
+    volatile uint32_t cur_qtd;  // 0x0C Current qTD Pointer
+    volatile uint32_t next_qtd; // 0x10 Overlay: Next qTD Pointer
+    volatile uint32_t alt_qtd;  // 0x14 Overlay: Alternate Next qTD
+    volatile uint32_t token;    // 0x18 Overlay: qTD Token
+    uint32_t buf[5];            // 0x1C..0x2C Overlay: Buffer Pointers
+    uint32_t buf_hi[5];         // 0x30..0x3F — только 64-bit HC, всегда 0
+} __attribute__((packed, aligned(32))) ehci_qh_t;   // 68 bytes
 
 extern usb_stack_driver_api_t *api_ptr;
 
@@ -293,11 +296,11 @@ static void ehci_async_advance(ehci_hc_t *ehc)
 //Idle-состояние QH: overlay с HALT (бит 6) — ровно как reclamation head
 //в Linux ehci_init(): hw->hw_token = QTD_STS_HALT.
 static void ehci_qh_set_idle(ehci_qh_t *qh){
-    qh->cur_qtd  = LINK_T;  qh->cur_qtd_hi  = 0;
-    qh->next_qtd = LINK_T;  qh->next_qtd_hi = 0;
-    qh->alt_qtd  = LINK_T;  qh->alt_qtd_hi  = 0;
-    qh->token    = QTD_STS_HALT;  qh->token_hi = 0;
-    for (int i = 0; i < 5; i++){ qh->buf[i].lo = 0; qh->buf[i].hi = 0; }
+    qh->cur_qtd  = LINK_T;
+    qh->next_qtd = LINK_T;
+    qh->alt_qtd  = LINK_T;
+    qh->token    = QTD_STS_HALT;
+    for (int i = 0; i < 5; i++){ qh->buf[i] = 0; qh->buf_hi[i] = 0; }
 }
 
 int ehci_alloc_structures(void)
@@ -361,31 +364,28 @@ int ehci_alloc_structures(void)
     // залипание ASS=1 на ICH6: HC в reclamation на async_head, ASE=1,
     // никаких пауз не требуется.
     async_head_ptr->horiz    = async_head_phys | Q_TYPE_QH;
-    async_head_ptr->horiz_hi = 0;
     async_head_ptr->ep_char = QH_EP_H | QH_EP_SPD_HS | QH_EP_MAXPKT(64);
-    async_head_ptr->ep_cap  = 0;
+    async_head_ptr->ep_cap  = QH_CAP_MULT(1);
     // async_head — reclamation point (H=1), но НЕ HALTED: пустой,
     // но "живой". Иначе QEMU/ICH6 считают его idle и не идут в horiz
     // (новый линкованный QH никогда не обрабатывается).
-    async_head_ptr->cur_qtd  = LINK_T;  async_head_ptr->cur_qtd_hi  = 0;
-    async_head_ptr->next_qtd = LINK_T;  async_head_ptr->next_qtd_hi = 0;
-    async_head_ptr->alt_qtd  = LINK_T;  async_head_ptr->alt_qtd_hi  = 0;
-    async_head_ptr->token    = 0;       async_head_ptr->token_hi    = 0;
-    for (int i = 0; i < 5; i++){ async_head_ptr->buf[i].lo = 0; async_head_ptr->buf[i].hi = 0; }
+    async_head_ptr->cur_qtd  = LINK_T;
+    async_head_ptr->next_qtd = LINK_T;
+    async_head_ptr->alt_qtd  = LINK_T;
+    async_head_ptr->token    = 0;
+    for (int i = 0; i < 5; i++){ async_head_ptr->buf[i] = 0; async_head_ptr->buf_hi[i] = 0; }
 
     for (int i = 0; i < EHCI_CTRL_QH_POOL; i++){
         ehci_qh_t *qh = ctrl_qh_pool[i];
         qh->horiz    = async_head_phys | Q_TYPE_QH;   // всегда возврат на head
-        qh->horiz_hi = 0;
         qh->ep_char  = QH_EP_SPD_HS | QH_EP_MAXPKT(64);
-        qh->ep_cap   = 0;   // Mult=0 для control/bulk; Mult≠0 только для HS-isoc
+        qh->ep_cap   = QH_CAP_MULT(1);   // Mult=0 зарезервирован (Linux ставит 1)
         ehci_qh_set_idle(qh);
     }
 
     bulk_qh_ptr->horiz    = async_head_phys | Q_TYPE_QH;
-    bulk_qh_ptr->horiz_hi = 0;
     bulk_qh_ptr->ep_char  = QH_EP_SPD_HS | QH_EP_MAXPKT(512);
-    bulk_qh_ptr->ep_cap   = 0;
+    bulk_qh_ptr->ep_cap   = QH_CAP_MULT(1);
     ehci_qh_set_idle(bulk_qh_ptr);
     //Bulk QH тоже в кольце: head -> ... -> bulk -> head
     //хвост control-пула замыкаем на bulk, bulk — на head
@@ -668,11 +668,9 @@ int ehci_port_reset(ehci_hc_t *ehc, int port)
 //Заполнить buf[0..4] qTD: одна страница на указатель, buf[0] — точный адрес
 static void ehci_qtd_fill_bufs(ehci_qtd_t *td, uint32_t phys)
 {
-    td->buf[0].lo = phys;  td->buf[0].hi = 0;
-    for (int i = 1; i < 5; i++){
-        td->buf[i].lo = (phys + (uint32_t)i * EHCI_QTD_PAGE) & 0xFFFFF000u;
-        td->buf[i].hi = 0;
-    }
+    td->buf[0] = phys;   // низкие 12 бит = смещение (QEMU: bufptr[0] & ~0xfffff000)
+    for (int i = 1; i < 5; i++)
+        td->buf[i] = (phys + (uint32_t)i * EHCI_QTD_PAGE) & 0xFFFFF000u;
 }
 
 //Собрать цепочку qTD по 4KB из bounce-пула.
@@ -697,15 +695,12 @@ static int ehci_build_qtd_chain(ehci_qtd_t *tds, uint32_t pool_phys,
         uint32_t chunk = (remain > EHCI_QTD_PAGE) ? EHCI_QTD_PAGE : remain;
         memset(&tds[qidx], 0, sizeof(ehci_qtd_t));
         tds[qidx].alt = LINK_T;                       // короткое чтение -> halt
-        tds[qidx].alt_hi  = 0;
         ehci_qtd_fill_bufs(&tds[qidx], bphys + off);
         uint32_t tok = (in ? QTD_PID_IN : QTD_PID_OUT) | QTD_CERR_SET |
                (chunk << 16) | QTD_STS_ACTIVE;
         if (qidx == 0) tok |= toggle;   // toggle только на первый qTD (дальше HC сам)
         tds[qidx].token = tok;
-        tds[qidx].token_hi = 0;
         tds[qidx].next = pool_phys + (uint32_t)(qidx + 1) * sizeof(ehci_qtd_t);
-        tds[qidx].next_hi = 0;
         remain -= chunk;
         off += chunk;
         qidx++;
@@ -757,10 +752,8 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
     int qidx = 0;
     //SETUP (всегда DATA0; при D=1 в QH toggle определяется битом 31 = 0)
     tds[qidx].alt = LINK_T;
-    tds[qidx].alt_hi  = 0;
     ehci_qtd_fill_bufs(&tds[qidx], setup_phys);
     tds[qidx].token = QTD_PID_SETUP | QTD_CERR_SET | (8u << 16) | QTD_STS_ACTIVE;
-    tds[qidx].token_hi = 0;
     tds[qidx].next = ctrl_qtd_phys + (uint32_t)(qidx + 1) * sizeof(ehci_qtd_t);
     qidx++;
 
@@ -768,25 +761,19 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
     int data_idx = -1;
     if (len > 0){
         tds[qidx].alt = LINK_T;
-        tds[qidx].alt_hi  = 0;
         ehci_qtd_fill_bufs(&tds[qidx], data_phys);
         tds[qidx].token = (in ? QTD_PID_IN : QTD_PID_OUT) | QTD_CERR_SET |
                           ((uint32_t)len << 16) | QTD_STS_ACTIVE | QTD_TOGGLE;
-        tds[qidx].token_hi = 0;
         tds[qidx].next = ctrl_qtd_phys + (uint32_t)(qidx + 1) * sizeof(ehci_qtd_t);
-        tds[qidx].next_hi = 0;
         data_idx = qidx;
         qidx++;
     }
 
     //STATUS (направление обратное data-стадии, всегда DATA1)
     tds[qidx].alt = LINK_T;
-    tds[qidx].alt_hi  = 0;
     tds[qidx].token = (in ? QTD_PID_OUT : QTD_PID_IN) | QTD_CERR_SET |
                       QTD_STS_ACTIVE | QTD_TOGGLE | QTD_IOC;
-    tds[qidx].token_hi = 0;
     tds[qidx].next = LINK_T;
-    tds[qidx].next_hi = 0;
     int status_idx = qidx;
     qidx++;
 
@@ -801,20 +788,18 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
                   QH_EP_D |                 // toggle из DCR qTD (как Linux для control)
                   QH_EP_MAXPKT(mps) | QH_EP_RL(4);
     if (spd != 2) qh->ep_char |= QH_EP_C;   // C=1 только для FS/LS control
-    qh->ep_cap   = 0;
+    qh->ep_cap   = QH_CAP_MULT(1);
+    //Overlay — ТОЧНОЕ зеркало tds[0]. Реальный HC после исполнения
+    //overlay-транзакции делает cur_qtd := overlay.next_qtd, поэтому
+    //next_qtd обязан указывать на СЛЕДУЮЩИЙ qTD (tds[0].next), а не на
+    //tds[0] — иначе на реальном железе SETUP закрутится в цикл.
     qh->cur_qtd  = ctrl_qtd_phys;
-    qh->cur_qtd_hi = 0;
-    qh->next_qtd = ctrl_qtd_phys;
-    qh->next_qtd_hi = 0;
-    qh->alt_qtd  = LINK_T;
-    qh->alt_qtd_hi = 0;
-    qh->token    = tds[0].token;                       // Active=0, Halt=0: HC пойдёт по next_qtd
-    qh->token_hi   = 0;
-    //Overlay-буферы зеркалим с первого qTD (HC перечитает их из qTD,
-    //но QEMU и некоторые HC смотрят в overlay сразу)
+    qh->next_qtd = tds[0].next;
+    qh->alt_qtd  = tds[0].alt;
+    qh->token    = tds[0].token;
     for (int i = 0; i < 5; i++){
-        qh->buf[i].lo = tds[0].buf[i].lo;
-        qh->buf[i].hi = tds[0].buf[i].hi;   // уже 0 в tds — но копируем как есть
+        qh->buf[i]    = tds[0].buf[i];
+        qh->buf_hi[i] = 0;
     }
 
     //__sync_synchronize();
@@ -822,7 +807,6 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
 
     //--- Линкуем QH в async-кольцо ---
     async_head_ptr->horiz    = qh_phys | Q_TYPE_QH;
-    async_head_ptr->horiz_hi = 0;
     __asm__ __volatile__("mfence" ::: "memory");
     ehci_async_advance(ehc);   // HC перечитает кольцо и увидит наш QH
 
@@ -848,7 +832,6 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
 
     //--- Unlink: возвращаем async_head в пустое кольцо ---
     async_head_ptr->horiz    = async_head_phys | Q_TYPE_QH;
-    async_head_ptr->horiz_hi = 0;
     __asm__ __volatile__("mfence" ::: "memory");
     ehci_async_advance(ehc);   // HC гарантированно отошёл от QH
 
@@ -956,18 +939,16 @@ int ehci_bulk_transfer(ehci_hc_t *ehc, uint8_t addr, uint8_t ep,
         else if (ehci_dev_speed[addr] == 1) spd_bits = QH_EP_SPD_LS;
         qh->ep_char = QH_EP_ADDR(addr) | QH_EP_NUM(ep_num) | spd_bits |
               QH_EP_MAXPKT(maxpkt) | QH_EP_RL(4);
-        qh->ep_cap   = 0;
+        qh->ep_cap   = QH_CAP_MULT(1);
+        //Overlay — точное зеркало tds[0]: next_qtd = tds[0].next
+        //(см. комментарий в ehci_control_transfer)
         qh->cur_qtd  = bulk_qtd_phys;
-        qh->cur_qtd_hi = 0;
-        qh->next_qtd = bulk_qtd_phys;
-        qh->next_qtd_hi = 0;
-        qh->alt_qtd  = LINK_T;
-        qh->alt_qtd_hi = 0;
+        qh->next_qtd = tds[0].next;
+        qh->alt_qtd  = tds[0].alt;
         qh->token    = tds[0].token;  // DATA0/DATA1 на первый пакет
-        qh->token_hi   = 0;
         for (int i = 0; i < 5; i++){
-            qh->buf[i].lo = tds[0].buf[i].lo;
-            qh->buf[i].hi = tds[0].buf[i].hi;
+            qh->buf[i]    = tds[0].buf[i];
+            qh->buf_hi[i] = 0;
         }
 
         //__sync_synchronize();
@@ -975,7 +956,6 @@ int ehci_bulk_transfer(ehci_hc_t *ehc, uint8_t addr, uint8_t ep,
 
         //--- Линкуем bulk QH ---
         async_head_ptr->horiz    = bulk_qh_phys | Q_TYPE_QH;
-        async_head_ptr->horiz_hi = 0;
         __asm__ __volatile__("mfence" ::: "memory");
         ehci_async_advance(ehc);
 
@@ -992,7 +972,6 @@ int ehci_bulk_transfer(ehci_hc_t *ehc, uint8_t addr, uint8_t ep,
 
         //--- Unlink ---
         async_head_ptr->horiz    = async_head_phys | Q_TYPE_QH;
-        async_head_ptr->horiz_hi = 0;
         __asm__ __volatile__("mfence" ::: "memory");
         ehci_async_advance(ehc);
 
