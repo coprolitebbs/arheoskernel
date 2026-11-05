@@ -65,11 +65,6 @@ static void *kernel_usb_dma_alloc(uint32_t size, uint32_t *phys_out){
     uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     uint32_t phys  = (uint32_t)pmm_alloc_pages(pages);
     if (!phys) return NULL;
-
-    /* pmms возвращает физический адрес. На текущей архитектуре ядра
-       identity-map покрывает всю RAM, поэтому VA == PA. Для будущей
-       поддержки IOMMU/некогерентной памяти здесь будет vmm_map_page +
-       cache flush, но интерфейс уже правильный. */
     *phys_out = phys;
     return (void*)phys;
 }

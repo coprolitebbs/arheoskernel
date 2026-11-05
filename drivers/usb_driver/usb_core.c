@@ -248,7 +248,7 @@ int usb_enumerate(usb_hc_t *hc, int port, uint8_t want_addr,
     int is_ls = 0;
     uint8_t speed = 0;   // 0=FS, 1=LS, 2=HS
     if (hc->type == USB_HC_UHCI){
-        is_ls = ((ps & 0x30) == 0x10) ? 1 : 0;
+        is_ls = (ps & PORTSC_LSDA) ? 1 : 0;      // бит 8
         speed = is_ls ? 1 : 0;   // UHCI: FS или LS
     } else {
         uint32_t pspd = (ps >> 26) & 0x3;

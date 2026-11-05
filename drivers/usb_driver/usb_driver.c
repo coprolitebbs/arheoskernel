@@ -93,6 +93,25 @@ int device_usb_start(void)
 
     usb_scan_pci_controllers();
 
+
+        // --- EHCI: probe + init СНАЧАЛА ---
+    // CF=1 и маршрутизация портов должны быть выставлены до скана UHCI:
+    // после ehci_init() HS-устройства гарантированно сидят на EHCI,
+    // а FS/LS — отданы companion'у (PO=1), и UHCI-скан их увидит.
+    int ehci_count = ehci_probe_all();
+    api_ptr->load_screen_add_string("EHCI found %d controller(s)", ehci_count);
+
+    int ehci_ready[4] = {0, 0, 0, 0};
+    for (int eci = 0; eci < ehci_count; eci++){
+        ehci_hc_t *ehc = &ehci_hcs[eci];
+        int ir = ehci_init(ehc);
+        api_ptr->load_screen_add_string("EHCI %d init=%d mmio=%x op=%x n_ports=%d",
+                                        eci, ir, ehc->mmio_base,
+                                        ehc->op_base, (int)ehc->n_ports);
+        if (ir == 0) ehci_ready[eci] = 1;
+    }
+
+
     //--- UHCI: companion-контроллеры, FS/LS-устройства ---
     int uhci_count = uhci_probe_all();
     for (int hci = 0; hci < uhci_count; hci++){
@@ -158,17 +177,10 @@ int device_usb_start(void)
         }
     }
 
-    //--- EHCI: HS-устройства ---
-    int ehci_count = ehci_probe_all();
-    api_ptr->load_screen_add_string("EHCI found %d controller(s)", ehci_count);
+    // --- EHCI: перечисление (контроллеры уже инициализированы выше) ---
     for (int eci = 0; eci < ehci_count; eci++){
+        if (!ehci_ready[eci]) continue;
         ehci_hc_t *ehc = &ehci_hcs[eci];
-
-        int ir = ehci_init(ehc);
-        api_ptr->load_screen_add_string("EHCI %d init=%d mmio=%x op=%x n_ports=%d",
-                                        eci, ir, ehc->mmio_base,
-                                        ehc->op_base, (int)ehc->n_ports);
-        if (ir != 0) continue;
 
         usb_hc_t hc_wrap = { USB_HC_EHCI, ehc };
         for (int port = 1; port <= (int)ehc->n_ports; port++){

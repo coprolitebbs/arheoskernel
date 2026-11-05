@@ -26,6 +26,9 @@ typedef struct {
     uint32_t op_base;     //mmio_base + CAPLENGTH (operational registers)
     uint32_t n_ports;
     int      initialized;
+    uint8_t  pci_bus;     //адрес функции — нужен для BIOS handoff
+    uint8_t  pci_dev;     //(USBLEGSUP живёт в PCI config space)
+    uint8_t  pci_func;
 } ehci_hc_t;
 
 extern ehci_hc_t ehci_hcs[4];
