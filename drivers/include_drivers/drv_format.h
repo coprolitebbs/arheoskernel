@@ -47,53 +47,51 @@
 #define BLK_READONLY    0x0002
 #define BLK_PARTITION   0x0004
 
-typedef struct {
+typedef struct
+{
     uint8_t type;
     void *struct_ptr;
 } description_driver_api_t;
 
 
 
-typedef struct block_driver_api{
+typedef struct block_driver_api
+{
     uint32_t version;     // = 1, для совместимости в будущем
     bool     enabled;
-    // I/O
+    //I/O
     int (*read)  (uint32_t dev_id, uint64_t lba, uint32_t count, void *buf);
     int (*write) (uint32_t dev_id, uint64_t lba, uint32_t count, const void *buf);
-    // Информация об устройстве (для enum, для отладки)
+    //Информация об устройстве (для enum, для отладки)
     int (*get_info)(uint32_t dev_id, block_info_t *out);
-    // Перечисление всех устройств
-    // index = 0, 1, 2, ... ; возвращает -1 (или FS_NOT_FOUND) в конце
+    //Перечисление всех устройств
+    //index = 0, 1, 2, ... ; возвращает -1 (или FS_NOT_FOUND) в конце
     int (*enum_devices)(int index, block_info_t *out);
-    // Поиск по имени ("sda1", "usb0p1") — для mount-by-name из userspace
+    //Поиск по имени ("sda1", "usb0p1") — для mount-by-name из userspace
     int (*find_by_name)(const char *name, uint32_t *out_id);
-    // Партиции
+    //Партиции
     int (*get_partition)(uint32_t disk_id, uint32_t part_num, uint32_t *out_id);
-    int (*scan_partitions)(uint32_t disk_id);          // MBR/GPT скан, регистрация дочерних
-    // Hints
+    int (*scan_partitions)(uint32_t disk_id);          //MBR/GPT скан, регистрация дочерних
+    //Hints
     int (*resolve_boot_drive)(uint32_t bios_drive, uint32_t *out_id);
-    // Возвращает id зарегистрированного устройства (0..N-1)
-    // или отрицательный FS_* при ошибке
+    //Возвращает id зарегистрированного устройства (0..N-1) или отрицательный FS_* при ошибке
     int (*register_device)(const char *name, uint32_t sector_count, uint32_t flags,
-                       int (*read_fn)(void*, uint64_t, uint32_t, void*),
-                       int (*write_fn)(void*, uint64_t, uint32_t, const void*),
-                       void *priv);
+                           int (*read_fn)(void*, uint64_t, uint32_t, void*),
+                           int (*write_fn)(void*, uint64_t, uint32_t, const void*),
+                           void *priv);
 
     //Экспортные указатели ядра для внутренних нужд драйвера
     void *(*malloc_ptr)(uint32_t size);
     void  (*free_ptr)(void *ptr);
     void  (*yield_ptr)(void);       //Указатель на yield() ядра для асинхронного сна
 
-    //uint32_t debug1;
-    //uint32_t debug2;
-    //uint32_t debug3;
-    //uint32_t debug4;
 } block_driver_api_t;
 
 
 
 
-typedef struct{
+typedef struct
+{
     void (*put_pixel)(int,int,uint32_t);
     void (*fill_rect)(int,int,int,int,uint32_t);
     void (*clear)(uint32_t);
@@ -123,13 +121,11 @@ typedef struct{
     const void *(*get_active_locale_ptr)(void);
     const void *(*font_lookup_ptr)(const void *font, uint32_t cp);
 
-    //uint32_t debug1;
-    //uint32_t debug2;
-
 } fb_driver_api_t;
 
 
-typedef struct {
+typedef struct
+{
     //Функция-коллбэк, вызывается ядром из обработчика IRQ1
     //Передает сырой скан-код из порта 0x60 в драйвер
     void (*irq_callback)(uint8_t scancode);
@@ -151,14 +147,16 @@ typedef struct {
 
 
 
-typedef struct{
+typedef struct
+{
     uint32_t id;
     uint32_t size;
     uint32_t attributes;
     uint32_t private_data;
 } fs_node_t;
 
-typedef struct{
+typedef struct
+{
     char name[256];
     uint32_t id;
     uint32_t size;
@@ -168,22 +166,25 @@ typedef struct{
 } fs_dirent_t;
 
 
-typedef struct{
+typedef struct
+{
     uint32_t size;
     uint32_t attributes;
     uint32_t create_time;
     uint32_t modify_time;
 } fs_stat_t;
 
-typedef struct {
-    uint32_t block_size;    /* размер блока/кластера в байтах */
-    uint32_t total_blocks;  /* всего блоков */
-    uint32_t free_blocks;   /* свободных блоков */
-    uint32_t total_inodes;  /* всего inode (0 если не применимо) */
-    uint32_t free_inodes;   /* свободных inode (0 если не применимо) */
+typedef struct
+{
+    uint32_t block_size;    //размер блока/кластера в байтах
+    uint32_t total_blocks;  //всего блоков
+    uint32_t free_blocks;   //свободных блоков
+    uint32_t total_inodes;  //всего inode (0 если не применимо)
+    uint32_t free_inodes;   //свободных inode (0 если не применимо)
 } fs_statfs_t;
 
-typedef struct{
+typedef struct
+{
     int (*mount)(uint32_t drive);
     int (*unmount)(void *volume);
     int (*lookup)(void *vol,const char *name,void *out,uint32_t *out_entry_id);
@@ -209,7 +210,6 @@ typedef struct{
 
     void *(*malloc_ptr)(uint32_t size);
     void  (*free_ptr)(void *ptr);
-    //void (*printf_ptr)(const char *fmt, ...);
 
     //Указатель на запрет вызова shedule() из обработчика прерываний - нужно для
     //долгих операций с диском, чтобы по прерыванию 32 не вылетело и не испортило стек
@@ -228,7 +228,8 @@ typedef struct{
 } fs_driver_api_t;
 
 
-typedef struct{
+typedef struct
+{
     //Оставлено для работы в USB-legacy, первое найденное устройство
     uint32_t vid;
     uint32_t pid;
@@ -264,13 +265,10 @@ typedef struct{
 
     void (*vmm_map_pages_ptr)(uint32_t phys, uint32_t size);
     void (*vmm_map_pages_uncached_ptr)(uint32_t phys, uint32_t size);
-
-    /* DMA-совместимая память: физически непрерывные страницы.
-       Возвращает виртуальный адрес (для доступа из драйвера) и
-       записывает физический в *phys_out (для TD/QH/буферов, куда
-       контроллер обращается по физическому адресу).
-       На x86 identity-mapped регион: virt == phys, но драйвер
-       не должен на это полагаться — только через этот API. */
+    //DMA-совместимая память: физически непрерывные страницы
+    //Возвращает виртуальный адрес (для доступа из драйвера) и записывает физический в *phys_out
+    //(для TD/QH/буферов, куда контроллер обращается по физическому адресу)
+    //На x86 identity-mapped регион: virt == phys, но драйвер не должен на это полагаться — только через этот API
     void *(*dma_alloc_ptr)(uint32_t size, uint32_t *phys_out);
     void  (*dma_free_ptr)(void *virt, uint32_t size);
 
@@ -287,7 +285,8 @@ typedef struct{
 } usb_stack_driver_api_t;
 
 
-typedef struct{
+typedef struct
+{
     uint8_t scancode; //Физический скан-код клавиши (1..127)
     uint8_t type;     //1 - Нажата (Press), 0 - Отпущена (Release)
 } kbd_event_t;

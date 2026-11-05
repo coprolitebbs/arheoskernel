@@ -21,19 +21,19 @@
 #include <stdint.h>
 #include "usb_uhci.h"
 
-/* bRequest */
+//bRequest
 #define USB_REQ_GET_DESCRIPTOR   0x06
 #define USB_REQ_SET_ADDRESS      0x05
 #define USB_REQ_SET_CONFIG       0x09
 
-/* wValue high byte = descriptor type */
+//wValue high byte = descriptor type
 #define USB_DESC_DEVICE          0x01
 #define USB_DESC_CONFIG          0x02
 #define USB_DESC_STRING          0x03
 #define USB_DESC_INTERFACE       0x04
 #define USB_DESC_ENDPOINT        0x05
 
-/* ---------------- Configuration / Interface / Endpoint ---------------- */
+
 
 #define USB_CLASS_MASS_STORAGE  0x08
 #define USB_SUBCLASS_SCSI       0x06
@@ -41,7 +41,8 @@
 
 #define USB_EP_ATTR_BULK        0x02
 
-typedef struct {
+typedef struct
+{
     uint8_t  bLength;
     uint8_t  bDescriptorType;
     uint16_t bcdUSB;
@@ -58,7 +59,8 @@ typedef struct {
     uint8_t  bNumConfigurations;
 } __attribute__((packed)) usb_device_desc_t;
 
-typedef struct {
+typedef struct
+{
     uint8_t  bLength;
     uint8_t  bDescriptorType;
     uint16_t wTotalLength;
@@ -69,7 +71,8 @@ typedef struct {
     uint8_t  bMaxPower;
 } __attribute__((packed)) usb_config_desc_t;
 
-typedef struct {
+typedef struct
+{
     uint8_t  bLength;
     uint8_t  bDescriptorType;
     uint8_t  bInterfaceNumber;
@@ -81,7 +84,8 @@ typedef struct {
     uint8_t  iInterface;
 } __attribute__((packed)) usb_interface_desc_t;
 
-typedef struct {
+typedef struct
+{
     uint8_t  bLength;
     uint8_t  bDescriptorType;
     uint8_t  bEndpointAddress;
@@ -90,30 +94,52 @@ typedef struct {
     uint8_t  bInterval;
 } __attribute__((packed)) usb_endpoint_desc_t;
 
-/* Разобранный Mass Storage интерфейс */
-typedef struct {
+//Разобранный Mass Storage интерфейс
+typedef struct
+{
     uint8_t  interface_num;
     uint8_t  bulk_in_addr;
     uint8_t  bulk_out_addr;
     uint16_t bulk_in_max_pkt;
     uint16_t bulk_out_max_pkt;
-    /* Toggle хранится здесь — по одному на направление, сбрасывается в 0
-       после SET_CONFIGURATION */
+    //Toggle хранится здесь — по одному на направление, сбрасывается в 0 после SET_CONFIGURATION
     uint8_t  bulk_in_toggle;
     uint8_t  bulk_out_toggle;
     uint16_t ep0_max_pkt;   //для control-transfer recovery (BOT reset)
 } usb_msc_iface_t;
 
 
-//Обобщённый хост-контроллер: UHCI или EHCI.
-//Позволяет usb_core/usb_msc работать с любым типом контроллера
-//через общий API, не зная деталей.
+//Обобщённый хост-контроллер: UHCI или EHCI
+//Позволяет usb_core/usb_msc работать с любым типом контроллера через общий API, не зная деталей
 typedef enum { USB_HC_UHCI = 0, USB_HC_EHCI = 1 } usb_hc_type_t;
 
-typedef struct {
+typedef struct
+{
     usb_hc_type_t type;
-    void *hc;   // uhci_hc_t* или ehci_hc_t*
+    void *hc;   //uhci_hc_t* или ehci_hc_t*
 } usb_hc_t;
+
+//Путь к порту устройства: либо корневой порт HC, либо порт вниз по хабу
+//(один уровень вложенности — QEMU втыкает авто-хаб, когда устройств больше,
+//чем корневых портов; реальный хаб — так же)
+//Транзакции control/bulk до устройства за хабом идут прозрачно — хаб их
+//повторяет; через хаб делаются только port-reset/status/speed
+typedef struct
+{
+    usb_hc_t hc;          //контроллер (по значению)
+    uint8_t  root_port;   //корневой порт: 0/1 для UHCI, 1..N для EHCI
+    uint8_t  hub_addr;    //0 = устройство прямо на корневом порту
+    uint8_t  hub_port;    //1-based порт хаба (при hub_addr != 0)
+} usb_port_path_t;
+
+//Хабы (class 09): probe (число портов) + операции над нижележащим портом
+int     usb_hub_probe(usb_hc_t *hc, uint8_t hub_addr, uint8_t *nports_out);
+int     usb_hub_port_connected(usb_hc_t *hc, uint8_t hub_addr, uint8_t port);
+int     usb_hub_port_reset(usb_hc_t *hc, uint8_t hub_addr, uint8_t port,
+                           uint8_t *speed_out);   // *speed: 0=FS 1=LS 2=HS
+
+//Есть ли устройство на порту (корневом или за хабом)
+int     usb_path_port_connected(usb_port_path_t *path);
 
 
 //Обёртки: диспетчеризуют на uhci_* или ehci_* по полю type
@@ -129,7 +155,7 @@ uint32_t usb_hc_port_status(usb_hc_t *hc, int port);
 
 
 //Прототипы
-int usb_enumerate(usb_hc_t *hc, int port, uint8_t want_addr,
+int usb_enumerate(usb_port_path_t *path, uint8_t want_addr,
                   usb_device_desc_t *out_desc, uint8_t *out_addr);
 
 int usb_get_config_desc(usb_hc_t *hc, uint8_t addr, void *buf,

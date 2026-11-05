@@ -38,7 +38,8 @@
 #define MODULE_TYPE_PROGRAM     4
 
 //filesystem_info
-typedef struct filesystem_info{
+typedef struct filesystem_info
+{
     uint32_t type;
     //общий размер блока
     uint32_t block_size;
@@ -69,7 +70,8 @@ typedef struct filesystem_info{
 } filesystem_info_t;
 
 // module_info
-typedef struct module_info{
+typedef struct module_info
+{
     uint32_t start;
 
     uint32_t size;
@@ -81,7 +83,8 @@ typedef struct module_info{
 } module_info_t;
 
 // boot_info
-typedef struct boot_info{
+typedef struct boot_info
+{
 
     uint32_t magic;
 

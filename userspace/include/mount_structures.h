@@ -15,17 +15,18 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
- //Содержит структуры описания дисков общие для ядра и userspace
+//Содержит структуры описания дисков общие для ядра и userspace
 #ifndef MOUNT_STRUCTURES_H
 #define MOUNT_STRUCTURES_H
 
 #include <stdint.h>
 #include <stddef.h>
 
-typedef struct {
+typedef struct
+{
     char     mount_point[256];
     uint32_t drive_id;
-    uint32_t statfs_supported;   /* 0/1 */
+    uint32_t statfs_supported;   //0/1
     uint32_t block_size;
     uint32_t total_blocks;
     uint32_t free_blocks;

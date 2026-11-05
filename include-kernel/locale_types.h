@@ -20,12 +20,14 @@
 
 #include "font.h"
 
-typedef struct {
+typedef struct
+{
     uint32_t normal[128];
     uint32_t shift [128];
 } locale_keymap_t;
 
-typedef struct {
+typedef struct
+{
     const char   *code;         //"en", "ru", "de"
     const char   *display_name; //"English", "Русский", ...
     const font_t *font;         //активный шрифт локали

@@ -22,7 +22,8 @@
 #include "../../include/ustd.h"
 #include "../../include/mount_structures.h"
 
-typedef struct {
+typedef struct
+{
     char     fs_name[40];
     char     mount_point[256];
     uint32_t total_1k, used_1k, free_1k;
@@ -32,9 +33,11 @@ typedef struct {
 //Хелперы
 
 //Длина строки в видимых UTF-8 символах (кириллица = 2 байта на глиф)
-static int u8_visible_len(const char *s){
+static int u8_visible_len(const char *s)
+{
     int n = 0;
-    while (*s){
+    while (*s)
+    {
         if (((unsigned char)*s & 0xC0) != 0x80) n++;
         s++;
     }
@@ -42,31 +45,43 @@ static int u8_visible_len(const char *s){
 }
 
 //Левое выравнивание (строка + пробелы справа)
-static void pad_left(const char *s, int width){
+static void pad_left(const char *s, int width)
+{
     int len = u8_visible_len(s);
     if (s) printf("%s", s);
     for (int i = len; i < width; i++) printf(" ");
 }
 
 //Правое выравнивание (пробелы + строка)
-static void pad_right_str(const char *s, int width){
+static void pad_right_str(const char *s, int width)
+{
     int len = u8_visible_len(s);
     for (int i = len; i < width; i++) printf(" ");
     if (s) printf("%s", s);
 }
 
 //uint32 -> десятичная строка (без null), возвращает длину
-static int u32_to_dec_str(uint32_t v, char *out){
-    if (v == 0){ out[0] = '0'; return 1; }
+static int u32_to_dec_str(uint32_t v, char *out)
+{
+    if (v == 0)
+    {
+        out[0] = '0';
+        return 1;
+    }
     char tmp[12];
     int t = 0;
-    while (v){ tmp[t++] = (char)('0' + (v % 10)); v /= 10; }
+    while (v)
+    {
+        tmp[t++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
     for (int j = 0; j < t; j++) out[j] = tmp[t - 1 - j];
     return t;
 }
 
 //uint32 -> десятичная C-строка с null
-static void u32_to_dec(uint32_t v, char *out /* >= 12 */){
+static void u32_to_dec(uint32_t v, char *out /* >= 12 */)
+{
     int n = u32_to_dec_str(v, out);
     out[n] = 0;
 }
@@ -75,58 +90,110 @@ static void u32_to_dec(uint32_t v, char *out /* >= 12 */){
 //1K-блоки -> "1.4M" / "976.6M" / "64M" / "1G" / "1.5G" / "1T"
 //Одна цифра после точки, округление вверх. Всё на uint32_t + сдвиги
 
-static void fmt_human(uint32_t kib, char *out /* >= 12 */){
-    if (kib == 0){ out[0] = '0'; out[1] = 0; return; }
+static void fmt_human(uint32_t kib, char *out /* >= 12 */)
+{
+    if (kib == 0)
+    {
+        out[0] = '0';
+        out[1] = 0;
+        return;
+    }
     int i;
-    if (kib < 1024u){                       /* < 1 MiB -> K */
+    if (kib < 1024u)                        /* < 1 MiB -> K */
+    {
         i = u32_to_dec_str(kib, out);
-        out[i++] = 'K'; out[i] = 0;
+        out[i++] = 'K';
+        out[i] = 0;
         return;
     }
 
     uint32_t whole, frac, d;
     char unit;
 
-    if (kib < (1024u * 1024u)){             // < 1 GiB -> M
-        whole = kib >> 10;  frac = kib & 0x3FFu;
-        d = (frac * 10u + 512u) >> 10;  unit = 'M';
-    } else if (kib < (1024u * 1024u * 1024u)){ // < 1 TiB -> G
-        whole = kib >> 20;  frac = kib & 0xFFFFFu;
-        d = (frac * 10u + 512u) >> 20;  unit = 'G';
-    } else {                                // >= 1 TiB -> T
-        whole = kib >> 30;  frac = kib & 0x3FFFFFFFu;
-        d = ((frac >> 20) * 10u + 512u) >> 10;  unit = 'T';
+    if (kib < (1024u * 1024u))              // < 1 GiB -> M
+    {
+        whole = kib >> 10;
+        frac = kib & 0x3FFu;
+        d = (frac * 10u + 512u) >> 10;
+        unit = 'M';
     }
-    if (d >= 10){ d = 0; whole += 1; }      // 1.999G -> 2G, не 1.10G
+    else if (kib < (1024u * 1024u * 1024u))    // < 1 TiB -> G
+    {
+        whole = kib >> 20;
+        frac = kib & 0xFFFFFu;
+        d = (frac * 10u + 512u) >> 20;
+        unit = 'G';
+    }
+    else                                    // >= 1 TiB -> T
+    {
+        whole = kib >> 30;
+        frac = kib & 0x3FFFFFFFu;
+        d = ((frac >> 20) * 10u + 512u) >> 10;
+        unit = 'T';
+    }
+    if (d >= 10)
+    {
+        d = 0;    // 1.999G -> 2G, не 1.10G
+        whole += 1;
+    }
 
     i = u32_to_dec_str(whole, out);
-    if (d){ out[i++] = '.'; out[i++] = (char)('0' + d); }
+    if (d)
+    {
+        out[i++] = '.';
+        out[i++] = (char)('0' + d);
+    }
     out[i++] = unit;
     out[i]   = 0;
 }
 
 //Блоки ФС -> 1K-блоки. block_size всегда степень 2 -> сдвиг
-static uint32_t blocks_to_1k(uint32_t blocks, uint32_t block_size){
-    switch (block_size){
-        case 512:   return blocks >> 1;
-        case 1024:  return blocks;
-        case 2048:  return blocks << 1;
-        case 4096:  return blocks << 2;
-        case 8192:  return blocks << 3;
-        case 16384: return blocks << 4;
-        default:    return 0;
+static uint32_t blocks_to_1k(uint32_t blocks, uint32_t block_size)
+{
+    switch (block_size)
+    {
+    case 512:
+        return blocks >> 1;
+    case 1024:
+        return blocks;
+    case 2048:
+        return blocks << 1;
+    case 4096:
+        return blocks << 2;
+    case 8192:
+        return blocks << 3;
+    case 16384:
+        return blocks << 4;
+    default:
+        return 0;
     }
 }
 
 //Процент в строку: "0", "5", "50", "100"
-static void fmt_pct(uint32_t pct, char *out /* >= 5 */){
-    if (pct >= 100){ out[0]='1'; out[1]='0'; out[2]='0'; out[3]=0; return; }
-    if (pct >= 10){  out[0]=(char)('0'+pct/10); out[1]=(char)('0'+pct%10); out[2]=0; return; }
-    out[0]=(char)('0'+pct); out[1]=0;
+static void fmt_pct(uint32_t pct, char *out /* >= 5 */)
+{
+    if (pct >= 100)
+    {
+        out[0]='1';
+        out[1]='0';
+        out[2]='0';
+        out[3]=0;
+        return;
+    }
+    if (pct >= 10)
+    {
+        out[0]=(char)('0'+pct/10);
+        out[1]=(char)('0'+pct%10);
+        out[2]=0;
+        return;
+    }
+    out[0]=(char)('0'+pct);
+    out[1]=0;
 }
 
 //"ext2(d0)" в out >= 40
-static void make_fs_name(const u_mount_info_t *m, char *out){
+static void make_fs_name(const u_mount_info_t *m, char *out)
+{
     int n = 0;
     const char *nm = m->fs_name[0] ? m->fs_name : "fs";
     while (*nm && n < 24) out[n++] = *nm++;
@@ -138,7 +205,8 @@ static void make_fs_name(const u_mount_info_t *m, char *out){
 }
 
 //Построить строку таблицы. Возвращает 1 при успехе
-static int build_row(int idx, df_row_t *row){
+static int build_row(int idx, df_row_t *row)
+{
     u_mount_info_t m;
     if (u_get_mount_info(idx, &m) != 0) return 0;
 
@@ -148,29 +216,38 @@ static int build_row(int idx, df_row_t *row){
     for (i = 0; i < 255 && m.mount_point[i]; i++) row->mount_point[i] = m.mount_point[i];
     row->mount_point[i] = 0;
 
-    row->total_1k = 0; row->used_1k = 0; row->free_1k = 0;
-    if (m.statfs_supported && m.block_size && m.total_blocks){
+    row->total_1k = 0;
+    row->used_1k = 0;
+    row->free_1k = 0;
+    if (m.statfs_supported && m.block_size && m.total_blocks)
+    {
         row->total_1k = blocks_to_1k(m.total_blocks, m.block_size);
         row->free_1k  = blocks_to_1k(m.free_blocks,  m.block_size);
         row->used_1k  = (row->total_1k >= row->free_1k)
                         ? (row->total_1k - row->free_1k) : 0;
     }
-    if (row->total_1k){
+    if (row->total_1k)
+    {
         if (row->used_1k < 42000000u)
             row->use_pct = (row->used_1k * 100u) / row->total_1k;
         else
             row->use_pct = 100;
-    } else {
+    }
+    else
+    {
         row->use_pct = 0;
     }
     return 1;
 }
 
-int main(int argc, char *argv[]){
-    (void)argc; (void)argv;
+int main(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
 
     int count = u_get_mount_count();
-    if (count <= 0){
+    if (count <= 0)
+    {
         printf("df: нет смонтированных файловых систем\n");
         return 1;
     }
@@ -184,7 +261,8 @@ int main(int argc, char *argv[]){
     printf("  Смонтирована\n");
     printf("-------------------------------------------------------------------\n");
 
-    for (int i = 0; i < count; i++){
+    for (int i = 0; i < count; i++)
+    {
         df_row_t r;
         if (!build_row(i, &r)) continue;
 
@@ -212,7 +290,8 @@ int main(int argc, char *argv[]){
     printf("  Смонтирована\n");
     printf("---------------------------------------------------------------------\n");
 
-    for (int i = 0; i < count; i++){
+    for (int i = 0; i < count; i++)
+    {
         df_row_t r;
         if (!build_row(i, &r)) continue;
 

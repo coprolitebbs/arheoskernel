@@ -39,19 +39,21 @@
 
 #define VFS_DRIVER_SIG                 -100
 
-typedef struct{
+typedef struct
+{
     char            *mount_point;//[4096];
-    fs_driver_api_t *driver;          // Указатель на структуру API конкретного драйвера
-    void            *volume;          // Указатель на структуру физического тома (fat12_fs_t или ext2_volume_t)
-    uint32_t         drive_id;        // Номер физического диска (0, 1...)
+    fs_driver_api_t *driver;          //Указатель на структуру API конкретного драйвера
+    void            *volume;          //Указатель на структуру физического тома (fat12_fs_t или ext2_volume_t)
+    uint32_t         drive_id;        //Номер физического диска (0, 1...)
     bool             used;
 } vfs_mount_t;
 
 
-typedef struct{
-    vfs_mount_t *mount;    // Указатель на точку монтирования (какая ФС и какой том)
-    int          driver_fd;// Реальный внутренний дескриптор файла внутри драйвера ФС
-    uint32_t     flags;    // Флаги доступа (чтение/запись)
+typedef struct
+{
+    vfs_mount_t *mount;    //Указатель на точку монтирования (какая ФС и какой том)
+    int          driver_fd;//Реальный внутренний дескриптор файла внутри драйвера ФС
+    uint32_t     flags;    //Флаги доступа (чтение/запись)
     bool         used;
     uint32_t nop;
 } vfs_file_t;

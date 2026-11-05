@@ -16,22 +16,21 @@
  */
 
 /*
- * EHCI-драйвер для ArheOS. Исправленная версия для реального железа
- * (Panasonic CF-18, ICH6), сверена с Linux drivers/usb/host/ehci-*.c.
+ * EHCI-драйвер для ArheOS. Версия для реального железа
+ * (Panasonic CF-18, ICH6), делалась с оглядкой Linux drivers/usb/host/ehci-*.c,
+ * уж простите
  *
- * Ключевые исправления относительно прежней версии:
  *  1. Раскладка QH/qTD приведена к EHCI spec (Linux: struct ehci_qh_hw /
- *     struct ehci_qtd в ehci.h). Раньше после каждого поля стояло *_hi
- *     слово — вся структура была смещена, HC читал мусор.
- *  2. Токен qTD: PID теперь 2-битный код в bits 9:8 (0=OUT,1=IN,2=SETUP),
- *     а не UHCI-байт PID в bits 7:0. Halted = бит 6 (был 8).
+ *     struct ehci_qtd в ehci.h)
+ *  2. Токен qTD: PID 2-битный код в bits 9:8 (0=OUT,1=IN,2=SETUP)
+ *     7:0. Halted = бит 6.
  *     (Linux: QTD_PID(tok) == (tok>>8)&3, QTD_STS_HALT = 1<<6.)
  *  3. Все ссылки QH->QH в async-кольце имеют Type-биты = 01b (бит 1).
  *     (Linux: QH_NEXT() | Q_TYPE_QH, Q_TYPE_QH = 1<<1.) QEMU игнорирует
  *     тип, реальное железо — нет.
  *  4. Idle-состояние overlay = HALT (бит 6), как у reclamation head в
  *     Linux (ehci_init: hw->hw_token = QTD_STS_HALT).
- *  5. BIOS→OS handoff по EECP (USBLEGSUP/USBLEGCTLSTS в PCI config
+ *  5. BIOS -> OS handoff по EECP (USBLEGSUP/USBLEGCTLSTS в PCI config
  *     space), как в Linux pci-quirks.c ehci_bios_handoff().
  *  6. Все DMA-структуры и transfer-буферы гоняются через uncached
  *     bounce-память (usb_dma_alloc теперь мапит uncached в ядре);
@@ -48,123 +47,6 @@
 #include "include/usb_uhci.h"
 #include "../../include-kernel/lib.h"
 #include "../../include-kernel/ports_io.h"
-
-//EHCI регистры (смещения от operational base = mmio + CAPLENGTH)
-#define EHCI_USBCMD        0x00
-#define EHCI_USBSTS        0x04
-#define EHCI_USBINTR       0x08
-#define EHCI_FRINDEX       0x0C
-#define EHCI_CTRLDSSEG     0x10
-#define EHCI_PERIODICLIST  0x14
-#define EHCI_ASYNCLISTADDR 0x18
-#define EHCI_CONFIGFLAG    0x40
-#define EHCI_PORTSC(p)     (0x44 + ((p)-1)*4)   // p=1..N
-
-//Capability registers (offset от mmio_base)
-#define EHCI_CAPLENGTH     0x00
-#define EHCI_HCSPARAMS     0x04
-#define EHCI_HCCPARAMS     0x08
-
-//USBCMD
-#define CMD_RUN            (1u << 0)
-#define CMD_HCRESET        (1u << 1)
-#define CMD_PSE            (1u << 4)    // Periodic Schedule Enable
-#define CMD_ASE            (1u << 5)    // Async Schedule Enable
-#define CMD_ITC_SHIFT      16           // Interrupt Threshold Control
-
-//USBSTS
-#define STS_HCHALTED       (1u << 12)
-#define STS_PSS            (1u << 14)   // Periodic Schedule Status
-#define STS_ASS            (1u << 15)   // Async Schedule Status
-
-//CONFIGFLAG
-#define CFG_ROUTE_ALL      1            // CF=1: все порты к EHCI
-
-//PORTSC
-#define PSC_CCS            (1u << 0)
-#define PSC_CSC            (1u << 1)
-#define PSC_PED            (1u << 2)
-#define PSC_PEDC           (1u << 3)
-#define PSC_PR             (1u << 8)
-#define PSC_PP             (1u << 12)   // Port Power
-#define PSC_PO             (1u << 13)   // Port Owner (1=companion, 0=EHCI)
-#define PSC_PSPD_SHIFT     26           // PSPD bits 27:26: 0=FS,1=LS,2=HS
-#define PSC_W1C            (PSC_CSC | PSC_PEDC)   // change-биты W1C
-
-//qTD Token — раскладка по Linux ehci.h / EHCI spec Table 3-5
-#define QTD_TOGGLE         (1u << 31)   // DCR: при D=1 в QH — DATA1 если 1
-#define QTD_BYTES(t)       (((t) >> 16) & 0x7FFFu)  // остаток байт к передаче
-#define QTD_IOC            (1u << 15)
-#define QTD_CERR(t)        (((t) >> 10) & 0x3u)
-#define QTD_CERR_SET       (3u << 10)   // 3 попытки на qTD (Linux EHCI_TUNE_CERR)
-#define QTD_PID(t)         (((t) >> 8) & 0x3u)
-#define QTD_PID_OUT        (0u << 8)
-#define QTD_PID_IN         (1u << 8)
-#define QTD_PID_SETUP      (2u << 8)
-#define QTD_STS_ACTIVE     (1u << 7)
-#define QTD_STS_HALT       (1u << 6)
-#define QTD_STS_DBE        (1u << 5)
-#define QTD_STS_BABBLE     (1u << 4)
-#define QTD_STS_XACT       (1u << 3)
-#define QTD_STS_MMF        (1u << 2)
-#define QTD_STS_STS        (1u << 1)
-
-//Ссылки на QH: Type-биты bits 2:1 = 01b (Linux Q_TYPE_QH = 1<<1)
-#define Q_TYPE_QH          (1u << 1)
-#define LINK_T             1u           // Terminate
-
-//QH Endpoint Characteristics (Word 1) — по Linux ehci.h
-#define QH_EP_RL(n)        (((uint32_t)(n) & 0xFu) << 28) // NAK reload
-#define QH_EP_C            (1u << 27)   // FS/LS control endpoint
-#define QH_EP_MAXPKT(m)    (((uint32_t)(m) & 0x7FFu) << 16)
-#define QH_EP_H            (1u << 15)   // head of reclamation list
-#define QH_EP_D            (1u << 14)   // Data toggle control: 1 = из DCR qTD
-#define QH_EP_SPD_HS       (2u << 12)   // EPS bits 14:12
-#define QH_EP_SPD_LS       (1u << 12)
-#define QH_EP_SPD_FS       (0u << 12)
-#define QH_EP_NUM(n)       (((uint32_t)(n) & 0xFu) << 8)  // endpoint bits 11:8
-#define QH_EP_ADDR(a)      ((uint32_t)(a) & 0x7Fu)        // address bits 6:0
-
-//QH Endpoint Capabilities (Word 2)
-#define QH_CAP_MULT(n)     (((uint32_t)(n) & 0x3u) << 30) // Mult (1..3, не 0)
-
-#define EHCI_CTRL_QH_POOL   8
-#define EHCI_CTRL_QTD_COUNT 4           // SETUP + DATA + STATUS с запасом
-#define EHCI_BULK_QTD_COUNT 64          // по 4KB = до 256KB за вызов
-#define EHCI_BULK_POOL_PAGES 10         // 40KB bounce-пул (MAX_BULK_TDS*512 = 32KB данных)
-#define EHCI_BULK_POOL_SIZE  (EHCI_BULK_POOL_PAGES * 4096)
-#define EHCI_CTL_DATA_MAX    3584       // данные control через 4KB bounce
-#define EHCI_QTD_PAGE        4096
-
-//Развёртка qTD — 32-битная раскладка EHCI spec 3.5 (Linux struct ehci_qtd,
-//QEMU EHCIqtd). Hi-слова НЕ вперемешку с указателями, а одним блоком
-//в конце. В 32-битном режиме HC читает ровно 32 байта:
-//next(0x00), alt(0x04), token(0x08), buf[0..4](0x0C..0x1B).
-typedef struct {
-    volatile uint32_t next;    // 0x00 Next qTD Pointer (bit0 = Terminate)
-    volatile uint32_t alt;     // 0x04 Alternate Next qTD Pointer
-    volatile uint32_t token;   // 0x08 qTD Token
-    uint32_t buf[5];           // 0x0C..0x1B Buffer Pointers 0..4
-    uint32_t buf_hi[5];        // 0x20..0x2F — только 64-bit HC, всегда 0
-} __attribute__((packed, aligned(32))) ehci_qtd_t;          // 52 bytes
-
-//Развёртка QH — 32-битная раскладка EHCI spec 3.6 (Linux struct ehci_qh_hw,
-//QEMU EHCIqh). В 32-битном режиме HC читает ровно 48 байт:
-//horiz(0x00), ep_char(0x04), ep_cap(0x08), cur_qtd(0x0C),
-//next_qtd(0x10), alt_qtd(0x14), token(0x18), buf[0..4](0x1C..0x2C).
-typedef struct {
-    volatile uint32_t horiz;    // 0x00 Next QH Pointer (|Q_TYPE_QH)
-    volatile uint32_t ep_char;  // 0x04 Endpoint Characteristics
-    volatile uint32_t ep_cap;   // 0x08 Endpoint Capabilities
-    volatile uint32_t cur_qtd;  // 0x0C Current qTD Pointer
-    volatile uint32_t next_qtd; // 0x10 Overlay: Next qTD Pointer
-    volatile uint32_t alt_qtd;  // 0x14 Overlay: Alternate Next qTD
-    volatile uint32_t token;    // 0x18 Overlay: qTD Token
-    uint32_t buf[5];            // 0x1C..0x2C Overlay: Buffer Pointers
-    uint32_t buf_hi[5];         // 0x30..0x3F — только 64-bit HC, всегда 0
-} __attribute__((packed, aligned(32))) ehci_qh_t;   // 68 bytes
-
-extern usb_stack_driver_api_t *api_ptr;
 
 ehci_hc_t ehci_hcs[4];
 int ehci_hc_count = 0;
@@ -238,7 +120,7 @@ int ehci_probe_all(void)
                 if (!mmio) continue;
 
                 uint32_t cmd = pci_read32((uint8_t)bus, dev, func, 0x04);
-                cmd |= 0x06;   // Memory Space + Bus Master (DMA обязателен)
+                cmd |= 0x06;   //Memory Space + Bus Master (DMA обязателен)
                 pci_write32((uint8_t)bus, dev, func, 0x04, cmd);
 
                 //Размер BAR по classic size-probing
@@ -249,7 +131,7 @@ int ehci_probe_all(void)
                 bar_size = (~bar_size + 1u) & bar_size;
                 if (bar_size < 0x100) bar_size = 0x1000;
 
-                //Presence detect с LPC-моста (ICH6): какие порты "живые"
+                //Presence detect с LPC-моста (ICH6): какие порты живые
                 uint32_t ptd = pci_read32(0, 31, 0, 0xE2);
                 if (api_ptr && api_ptr->load_screen_add_string)
                     api_ptr->load_screen_add_string(
@@ -269,19 +151,19 @@ int ehci_probe_all(void)
     return ehci_hc_count;
 }
 
-// IAA Doorbell: заставляет HC перечитать async-кольцо с нуля и
-// подтвердить это флагом STS.IAA. Нужен после каждой смены
-// async_head->horiz: ICH6 кэширует QH по адресу и без IAA может
-// не заметить линковку/анлинковку.
+//IAA Doorbell: заставляет HC перечитать async-кольцо с нуля и
+//подтвердить это флагом STS.IAA. Нужен после каждой смены
+//async_head->horiz: ICH6 кэширует QH по адресу и без IAA может
+//не заметить линковку/анлинковку.
 static void ehci_async_advance(ehci_hc_t *ehc)
 {
     uint32_t cmd = mmio_read(ehc, EHCI_USBCMD);
-    mmio_write(ehc, EHCI_USBCMD, cmd | (1u << 6));  // IAAC (bit 6)
+    mmio_write(ehc, EHCI_USBCMD, cmd | (1u << 6));  //IAAC (bit 6)
     uint32_t t0 = api_ptr->get_ticks();
     while ((api_ptr->get_ticks() - t0) < 100){
         uint32_t sts = mmio_read(ehc, EHCI_USBSTS);
-        if (sts & (1u << 5)){                // IAA (bit 5) — HC прошёл точку
-            mmio_write(ehc, EHCI_USBSTS, (1u << 5));  // W1C
+        if (sts & (1u << 5)){                //IAA (bit 5) — HC прошёл точку
+            mmio_write(ehc, EHCI_USBSTS, (1u << 5));  //W1C
             return;
         }
         __asm__ __volatile__("pause");
@@ -358,17 +240,17 @@ int ehci_alloc_structures(void)
     bulk_bounce_phys = phys;
     if (bulk_bounce_phys & 0xFFF) return -9;   // нужен page-aligned (qTD по 4KB)
 
-    // Кольцо пустое: async_head замыкается на себя. Control/bulk QH
-    // в кольцо НЕ входят — они линкуются только на время transfer'а
-    // (см. ehci_control_transfer/ehci_bulk_transfer). Это устраняет
-    // залипание ASS=1 на ICH6: HC в reclamation на async_head, ASE=1,
-    // никаких пауз не требуется.
+    //Кольцо пустое: async_head замыкается на себя. Control/bulk QH
+    //в кольцо НЕ входят — они линкуются только на время transfer'а
+    //(см. ehci_control_transfer/ehci_bulk_transfer). Это устраняет
+    //залипание ASS=1 на ICH6: HC в reclamation на async_head, ASE=1,
+    //никаких пауз не требуется.
     async_head_ptr->horiz    = async_head_phys | Q_TYPE_QH;
     async_head_ptr->ep_char = QH_EP_H | QH_EP_SPD_HS | QH_EP_MAXPKT(64);
     async_head_ptr->ep_cap  = QH_CAP_MULT(1);
-    // async_head — reclamation point (H=1), но НЕ HALTED: пустой,
-    // но "живой". Иначе QEMU/ICH6 считают его idle и не идут в horiz
-    // (новый линкованный QH никогда не обрабатывается).
+    //async_head — reclamation point (H=1), но НЕ HALTED: пустой,
+    //но "живой". Иначе QEMU/ICH6 считают его idle и не идут в horiz
+    //(новый линкованный QH никогда не обрабатывается)
     async_head_ptr->cur_qtd  = LINK_T;
     async_head_ptr->next_qtd = LINK_T;
     async_head_ptr->alt_qtd  = LINK_T;
@@ -377,9 +259,9 @@ int ehci_alloc_structures(void)
 
     for (int i = 0; i < EHCI_CTRL_QH_POOL; i++){
         ehci_qh_t *qh = ctrl_qh_pool[i];
-        qh->horiz    = async_head_phys | Q_TYPE_QH;   // всегда возврат на head
+        qh->horiz    = async_head_phys | Q_TYPE_QH;   //всегда возврат на head
         qh->ep_char  = QH_EP_SPD_HS | QH_EP_MAXPKT(64);
-        qh->ep_cap   = QH_CAP_MULT(1);   // Mult=0 зарезервирован (Linux ставит 1)
+        qh->ep_cap   = QH_CAP_MULT(1);   //Mult=0 зарезервирован (Linux ставит 1)
         ehci_qh_set_idle(qh);
     }
 
@@ -395,11 +277,10 @@ int ehci_alloc_structures(void)
 }
 
 //---------------- Async schedule on/off ----------------
-
 //Остановить асинхронное расписание и ДОЖДАТЬСЯ ASS=0. Все модификации
 //QH/qTD делаются только между pause/resume — иначе реальный HC может
 //прочитать наполовину изменённый QH (Linux трогает hw-поля только у
-//QH_STATE_IDLE; мы добиваемся того же остановкой расписания).
+//QH_STATE_IDLE; мы добиваемся того же остановкой расписания)
 static int ehci_async_pause(ehci_hc_t *ehc)
 {
     uint32_t cmd = mmio_read(ehc, EHCI_USBCMD);
@@ -413,7 +294,7 @@ static int ehci_async_pause(ehci_hc_t *ehc)
     if (api_ptr && api_ptr->load_screen_add_string)
         api_ptr->load_screen_add_string("EHCI ASS pause timeout STS=%x",
                                         mmio_read(ehc, EHCI_USBSTS));
-    return 0;   // НЕ -1: ASE уже снят, HC новых транзакций не запустит
+    return 0;   //НЕ -1: ASE уже снят, HC новых транзакций не запустит
 }
 
 static int ehci_async_resume(ehci_hc_t *ehc)
@@ -426,14 +307,14 @@ static int ehci_async_resume(ehci_hc_t *ehc)
     __asm__ __volatile__("mfence" ::: "memory");
     mmio_write(ehc, EHCI_USBCMD, cmd | CMD_ASE);
     uint32_t t0 = api_ptr->get_ticks();
-    while ((api_ptr->get_ticks() - t0) < 100){       // 1 сек
+    while ((api_ptr->get_ticks() - t0) < 100){       //1 сек
         if (mmio_read(ehc, EHCI_USBSTS) & STS_ASS) return 0;
         __asm__ __volatile__("pause");
     }
     if (api_ptr && api_ptr->load_screen_add_string)
         api_ptr->load_screen_add_string("EHCI ASS resume timeout STS=%x",
                                         mmio_read(ehc, EHCI_USBSTS));
-    return 0;   // не -1, HC всё равно начнёт обход, как только сможет
+    return 0;   //не -1, HC всё равно начнёт обход, как только сможет
 }
 
 //---------------- BIOS handoff (Linux pci-quirks.c) ----------------
@@ -441,7 +322,7 @@ static int ehci_async_resume(ehci_hc_t *ehc)
 //USBLEGSUP лежит в PCI CONFIG SPACE по байтовому смещению EECP из
 //HCCPARAMS (не в MMIO!). bit16 = HC BIOS Owned (RO), bit24 = HC OS Owned.
 //После передачи владения всегда пишем 0 в USBLEGCTLSTS (отключаем
-//все EHCI SMI). Если BIOS не отпустил за 1с — форсируем, как Linux.
+//все EHCI SMI). Если BIOS не отпустил за 1с — форсируем
 static void ehci_bios_handoff(ehci_hc_t *ehc, uint8_t bus, uint8_t dev, uint8_t func)
 {
     uint32_t hcc  = *(volatile uint32_t*)(ehc->mmio_base + EHCI_HCCPARAMS);
@@ -459,24 +340,24 @@ static void ehci_bios_handoff(ehci_hc_t *ehc, uint8_t bus, uint8_t dev, uint8_t 
                 do {
                     cap = pci_read32(bus, dev, func, eecp);
                     t = api_ptr->get_ticks();
-                } while ((cap & (1u << 16)) && (t - t0) < 100); // ~1 сек
+                } while ((cap & (1u << 16)) && (t - t0) < 100); //~1 сек
 
                 if (cap & (1u << 16)){
-                    // BIOS не среагировал (нет SMM-обработчика) — форсируем
+                    //BIOS не среагировал (нет SMM-обработчика) — форсируем
                     pci_write32(bus, dev, func, eecp, cap & ~(1u << 16));
                     api_ptr->load_screen_add_string("EHCI handoff forced (BIOS bug)");
                 } else {
                     api_ptr->load_screen_add_string("EHCI handoff ok");
                 }
-                // Linux: если контроллером владел BIOS — CF=0, порты
-                // временно уходят на companion до нашего CF=1
+                //если контроллером владел BIOS — CF=0, порты
+                //временно уходят на companion до нашего CF=1
                 mmio_write(ehc, EHCI_CONFIGFLAG, 0);
             }
-            // Отключить ВСЕ EHCI SMI (иначе SMI-шторм без обработчика)
+            //Отключить ВСЕ EHCI SMI (иначе SMI-шторм без обработчика)
             pci_write32(bus, dev, func, eecp + 4, 0);
             return;
         }
-        eecp = (cap >> 8) & 0xFF;  // следующая extended capability
+        eecp = (cap >> 8) & 0xFF;  //следующая extended capability
     }
 }
 
@@ -514,7 +395,7 @@ int ehci_init(ehci_hc_t *ehc)
                                     mmio_read(ehc, EHCI_USBSTS),
                                     mmio_read(ehc, EHCI_CONFIGFLAG));
 
-    //1. BIOS→OS handoff ДО halt/reset (как в Linux: quirks → потом reset)
+    //1. BIOS -> OS handoff до halt/reset (как в Linux: quirks -> потом reset)
     ehci_bios_handoff(ehc, ehc->pci_bus, ehc->pci_dev, ehc->pci_func);
 
     //2. Остановить HC перед сбросом (Linux ehci_halt)
@@ -546,9 +427,9 @@ int ehci_init(ehci_hc_t *ehc)
     }
 
     //4. Базовая настройка
-    mmio_write(ehc, EHCI_USBSTS, mmio_read(ehc, EHCI_USBSTS)); // W1C сброс
-    mmio_write(ehc, EHCI_USBINTR, 0);      // режим опроса
-    mmio_write(ehc, EHCI_CTRLDSSEG, 0);    // всё < 4GB
+    mmio_write(ehc, EHCI_USBSTS, mmio_read(ehc, EHCI_USBSTS)); //W1C сброс
+    mmio_write(ehc, EHCI_USBINTR, 0);      //режим опроса
+    mmio_write(ehc, EHCI_CTRLDSSEG, 0);    //всё < 4GB
 
     //5. Списки расписаний
     mmio_write(ehc, EHCI_PERIODICLIST, ehci_frame_list_phys);
@@ -557,8 +438,8 @@ int ehci_init(ehci_hc_t *ehc)
     //6. Запуск: RS + ASE, ITC = 1ms (Linux: temp = 1 << 16)
     cmd = mmio_read(ehc, EHCI_USBCMD);
     cmd &= ~(CMD_HCRESET | CMD_PSE);
-    cmd &= ~(0x7u << CMD_ITC_SHIFT);        // очистить ITC
-    cmd |= CMD_RUN | CMD_ASE | (1u << CMD_ITC_SHIFT);   // ITC=1 (2 us)
+    cmd &= ~(0x7u << CMD_ITC_SHIFT);        //очистить ITC
+    cmd |= CMD_RUN | CMD_ASE | (1u << CMD_ITC_SHIFT);   //ITC=1 (2 us)
     mmio_write(ehc, EHCI_USBCMD, cmd);
 
     int running = 0;
@@ -574,13 +455,13 @@ int ehci_init(ehci_hc_t *ehc)
 
     //7. CF=1: порты уходят с companion-контроллеров на EHCI (Linux ehci_run)
     mmio_write(ehc, EHCI_CONFIGFLAG, CFG_ROUTE_ALL);
-    for (volatile int i = 0; i < 20000; i++) inw(0x80); // дать железу устояться
+    for (volatile int i = 0; i < 20000; i++) inw(0x80); //дать железу устояться
 
     //8. Порты: включить питание, сбросить change-биты, показать состояние
     for (uint32_t p = 1; p <= ehc->n_ports; p++){
         uint32_t ps = mmio_read(ehc, EHCI_PORTSC(p));
         uint32_t nw = (ps | PSC_W1C) & ~PSC_PR;
-        if (!(nw & PSC_PP)) nw |= PSC_PP;          // Port Power
+        if (!(nw & PSC_PP)) nw |= PSC_PP;          //Port Power
         if (!(ps & PSC_PO)) mmio_write(ehc, EHCI_PORTSC(p), nw);
         ps = mmio_read(ehc, EHCI_PORTSC(p));
         api_ptr->load_screen_add_string("EHCI p%d PORTSC=%x pspd=%d po=%d",
@@ -611,9 +492,9 @@ int ehci_port_connected(ehci_hc_t *ehc, int port)
 }
 
 //Сброс порта по USB2 spec / Linux ehci-hub.c:
-//  PR=1 на >=10ms (USB_TDRSTR), PR=0, затем ждём PED до 250ms.
-//  HS-устройство после сброса само выставит PED; FS/LS устройство
-//  EHCI отдаст companion-контроллеру (PO=1) — тогда возвращаем -3.
+//PR=1 на >=10ms (USB_TDRSTR), PR=0, затем ждём PED до 250ms.
+//HS-устройство после сброса само выставит PED; FS/LS устройство
+//EHCI отдаст companion-контроллеру (PO=1) — тогда возвращаем -3
 int ehci_port_reset(ehci_hc_t *ehc, int port)
 {
     uint32_t reg = EHCI_PORTSC(port);
@@ -626,7 +507,7 @@ int ehci_port_reset(ehci_hc_t *ehc, int port)
 
     if (!(ps0 & PSC_CCS)) return -1;
 
-    //Порт принадлежит companion? EHCI его не трогает.
+    //Порт принадлежит companion? EHCI его не трогает
     if (ps0 & PSC_PO){
         if (api_ptr && api_ptr->load_screen_add_string)
             api_ptr->load_screen_add_string("ehci_pr p%d owned by companion", port);
@@ -650,7 +531,7 @@ int ehci_port_reset(ehci_hc_t *ehc, int port)
     while ((api_ptr->get_ticks() - t0) < 25){
         ps = mmio_read(ehc, reg);
         if (ps & PSC_PED){
-            mmio_write(ehc, reg, ps | PSC_W1C);  // подчистить change-биты
+            mmio_write(ehc, reg, ps | PSC_W1C);  //подчистить change-биты
             if (api_ptr && api_ptr->load_screen_add_string)
                 api_ptr->load_screen_add_string("ehci_pr p%d ok=%x pspd=%d",
                                                 port, ps,
@@ -668,13 +549,13 @@ int ehci_port_reset(ehci_hc_t *ehc, int port)
 //Заполнить buf[0..4] qTD: одна страница на указатель, buf[0] — точный адрес
 static void ehci_qtd_fill_bufs(ehci_qtd_t *td, uint32_t phys)
 {
-    td->buf[0] = phys;   // низкие 12 бит = смещение (QEMU: bufptr[0] & ~0xfffff000)
+    td->buf[0] = phys;   //низкие 12 бит = смещение (QEMU: bufptr[0] & ~0xfffff000)
     for (int i = 1; i < 5; i++)
         td->buf[i] = (phys + (uint32_t)i * EHCI_QTD_PAGE) & 0xFFFFF000u;
 }
 
 //Собрать цепочку qTD по 4KB из bounce-пула.
-//bphys — физадрес начала данных (page-aligned), len — длина.
+//bphys — физадрес начала данных (page-aligned), len — длина
 //Возвращает индекс последнего qTD.
 static int ehci_build_qtd_chain(ehci_qtd_t *tds, uint32_t pool_phys,
                                 uint32_t bphys, uint32_t len,
@@ -694,11 +575,11 @@ static int ehci_build_qtd_chain(ehci_qtd_t *tds, uint32_t pool_phys,
     while (remain > 0 && qidx < EHCI_BULK_QTD_COUNT - 1){
         uint32_t chunk = (remain > EHCI_QTD_PAGE) ? EHCI_QTD_PAGE : remain;
         memset(&tds[qidx], 0, sizeof(ehci_qtd_t));
-        tds[qidx].alt = LINK_T;                       // короткое чтение -> halt
+        tds[qidx].alt = LINK_T;                       //короткое чтение -> halt
         ehci_qtd_fill_bufs(&tds[qidx], bphys + off);
         uint32_t tok = (in ? QTD_PID_IN : QTD_PID_OUT) | QTD_CERR_SET |
                (chunk << 16) | QTD_STS_ACTIVE;
-        if (qidx == 0) tok |= toggle;   // toggle только на первый qTD (дальше HC сам)
+        if (qidx == 0) tok |= toggle;   //toggle только на первый qTD (дальше HC сам)
         tds[qidx].token = tok;
         tds[qidx].next = pool_phys + (uint32_t)(qidx + 1) * sizeof(ehci_qtd_t);
         remain -= chunk;
@@ -735,17 +616,14 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
         mps = (maxpkt >= 8 && maxpkt <= 64) ? maxpkt : 8;
     }
 
-    //--- Bounce: setup + данные в uncached-память ---
+    //Bounce: setup + данные в uncached-память
     uint32_t setup_phys = ctl_bounce_phys + 0;
     uint32_t data_phys  = ctl_bounce_phys + 16;
     memcpy((void*)setup_phys, setup, 8);
     if (len > 0 && !in && buf)
         memcpy((void*)data_phys, buf, len);
 
-    //--- Остановить async-расписание ---
-    //if (ehci_async_pause(ehc) != 0) { ehci_async_resume(ehc); return -7;}
-
-    //--- Готовим qTD-цепочку: SETUP -> DATA -> STATUS ---
+    //Готовим qTD-цепочку: SETUP -> DATA -> STATUS
     ehci_qtd_t *tds = ctrl_qtd_ptr;
     memset(tds, 0, EHCI_CTRL_QTD_COUNT * sizeof(ehci_qtd_t));
 
@@ -777,22 +655,22 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
     int status_idx = qidx;
     qidx++;
 
-    //--- Берём QH из пула и настраиваем overlay ---
+    //Берём QH из пула и настраиваем overlay
     int qh_idx = ctrl_qh_pool_next;
     ehci_qh_t *qh      = ctrl_qh_pool[qh_idx];
     uint32_t   qh_phys = ctrl_qh_pool_phys[qh_idx];
     ctrl_qh_pool_next = (ctrl_qh_pool_next + 1) % EHCI_CTRL_QH_POOL;
-    // qh->horiz уже указывает на async_head (задан в alloc_structures),
-    // не трогаем — QH после завершения вернётся в пустое кольцо.
+    //qh->horiz уже указывает на async_head (задан в alloc_structures),
+    //не трогаем — QH после завершения вернётся в пустое кольцо.
     qh->ep_char = QH_EP_ADDR(addr) | QH_EP_NUM(0) | speed_bits |
-                  QH_EP_D |                 // toggle из DCR qTD (как Linux для control)
+                  QH_EP_D |                 //toggle из DCR qTD (как Linux для control)
                   QH_EP_MAXPKT(mps) | QH_EP_RL(4);
-    if (spd != 2) qh->ep_char |= QH_EP_C;   // C=1 только для FS/LS control
+    if (spd != 2) qh->ep_char |= QH_EP_C;   //C=1 только для FS/LS control
     qh->ep_cap   = QH_CAP_MULT(1);
-    //Overlay — ТОЧНОЕ зеркало tds[0]. Реальный HC после исполнения
+    //Overlay — точное зеркало tds[0]. Реальный HC после исполнения
     //overlay-транзакции делает cur_qtd := overlay.next_qtd, поэтому
     //next_qtd обязан указывать на СЛЕДУЮЩИЙ qTD (tds[0].next), а не на
-    //tds[0] — иначе на реальном железе SETUP закрутится в цикл.
+    //tds[0] — иначе на реальном железе SETUP закрутится в цикл
     qh->cur_qtd  = ctrl_qtd_phys;
     qh->next_qtd = tds[0].next;
     qh->alt_qtd  = tds[0].alt;
@@ -805,10 +683,10 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
     //__sync_synchronize();
     __asm__ __volatile__("mfence" ::: "memory");
 
-    //--- Линкуем QH в async-кольцо ---
+    //Линкуем QH в async-кольцо
     async_head_ptr->horiz    = qh_phys | Q_TYPE_QH;
     __asm__ __volatile__("mfence" ::: "memory");
-    ehci_async_advance(ehc);   // HC перечитает кольцо и увидит наш QH
+    ehci_async_advance(ehc);   //HC перечитает кольцо и увидит наш QH
 
     if (api_ptr && api_ptr->load_screen_add_string){
         api_ptr->load_screen_add_string("ehci link: ah=%x qh=%x qh0=%x sts=%x",
@@ -830,19 +708,19 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
         __asm__ __volatile__("pause");
     }
 
-    //--- Unlink: возвращаем async_head в пустое кольцо ---
+    //Unlink: возвращаем async_head в пустое кольцо
     async_head_ptr->horiz    = async_head_phys | Q_TYPE_QH;
     __asm__ __volatile__("mfence" ::: "memory");
-    ehci_async_advance(ehc);   // HC гарантированно отошёл от QH
+    ehci_async_advance(ehc);   //HC гарантированно отошёл от QH
 
     if (result == 0){
         //Сначала проверяем промежуточные qTD
         for (int i = 0; i < status_idx; i++){
             uint32_t tok = tds[i].token;
-            if (tok & (QTD_STS_ACTIVE)) { result = -3; break; }  // не дошёл
+            if (tok & (QTD_STS_ACTIVE)) { result = -3; break; }  //не дошёл
             if (tok & QTD_STS_HALT){
-                if (QTD_CERR(tok))       result = -2;  // STALL
-                else if (tok & QTD_STS_XACT) result = -3;  // таймаут/CRC
+                if (QTD_CERR(tok))       result = -2;  //STALL
+                else if (tok & QTD_STS_XACT) result = -3;  //таймаут/CRC
                 else if (tok & QTD_STS_DBE)  result = -4;
                 else if (tok & QTD_STS_BABBLE) result = -5;
                 else                     result = -3;
@@ -861,8 +739,8 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
         result = 0;
     }
 
-    // --- Убираем за собой: QH в idle, qTD деактивировать ---
-    // Сначала зафиксируем реальное состояние, до очистки
+    //Убираем за собой: QH в idle, qTD деактивировать
+    //Сначала зафиксируем реальное состояние, до очистки
     if (result < 0 && api_ptr && api_ptr->load_screen_add_string){
         api_ptr->load_screen_add_string("ehci_ctrl(pre) r=%d qh=%x q0=%x qd=%x qs=%x",
                                         result,
@@ -872,7 +750,7 @@ int ehci_control_transfer(ehci_hc_t *ehc, uint8_t addr,
                                         tds[status_idx].token);
     }
 
-    //--- Убираем за собой: QH в idle, qTD деактивировать ---
+    //Убираем за собой: QH в idle, qTD деактивировать
     ehci_qh_set_idle(qh);
     for (int i = 0; i < EHCI_CTRL_QTD_COUNT; i++)
         tds[i].token &= ~QTD_STS_ACTIVE;
@@ -901,13 +779,6 @@ int ehci_bulk_transfer(ehci_hc_t *ehc, uint8_t addr, uint8_t ep,
     if (!ehc || !buf || len == 0 || !toggle || !ehc->initialized) return -1;
     if (maxpkt == 0 || maxpkt > 512) maxpkt = 512;
 
-    //if (ehci_dev_speed[addr] != 2){
-    //    if (api_ptr && api_ptr->load_screen_add_string)
-    //        api_ptr->load_screen_add_string("ehci_bulk: not HS dev=%d spd=%d",
-    //                                        addr, ehci_dev_speed[addr]);
-    //    return -5;
-    //}
-
     uint8_t ep_num = ep & 0x0F;
     uint32_t total_done = 0;
     uint32_t total_packets = 0;
@@ -921,8 +792,6 @@ int ehci_bulk_transfer(ehci_hc_t *ehc, uint8_t addr, uint8_t ep,
         //Bounce: OUT — копируем данные в uncached, IN — пишем HC прямо туда
         uint32_t bphys = bulk_bounce_phys;
         if (!in) memcpy((void*)bphys, (uint8_t*)buf + off, chunk);
-
-        //if (ehci_async_pause(ehc) != 0){ result = -7; break; }
 
         //Цепочка qTD по 4KB (bounce-пул page-aligned => 1 страница на qTD)
         ehci_qtd_t *tds = bulk_qtd_ptr;
@@ -945,7 +814,7 @@ int ehci_bulk_transfer(ehci_hc_t *ehc, uint8_t addr, uint8_t ep,
         qh->cur_qtd  = bulk_qtd_phys;
         qh->next_qtd = tds[0].next;
         qh->alt_qtd  = tds[0].alt;
-        qh->token    = tds[0].token;  // DATA0/DATA1 на первый пакет
+        qh->token    = tds[0].token;  //DATA0/DATA1 на первый пакет
         for (int i = 0; i < 5; i++){
             qh->buf[i]    = tds[0].buf[i];
             qh->buf_hi[i] = 0;
@@ -954,7 +823,7 @@ int ehci_bulk_transfer(ehci_hc_t *ehc, uint8_t addr, uint8_t ep,
         //__sync_synchronize();
         __asm__ __volatile__("mfence" ::: "memory");
 
-        //--- Линкуем bulk QH ---
+        //Линкуем bulk QH
         async_head_ptr->horiz    = bulk_qh_phys | Q_TYPE_QH;
         __asm__ __volatile__("mfence" ::: "memory");
         ehci_async_advance(ehc);
@@ -970,7 +839,7 @@ int ehci_bulk_transfer(ehci_hc_t *ehc, uint8_t addr, uint8_t ep,
             __asm__ __volatile__("pause");
         }
 
-        //--- Unlink ---
+        //Unlink
         async_head_ptr->horiz    = async_head_phys | Q_TYPE_QH;
         __asm__ __volatile__("mfence" ::: "memory");
         ehci_async_advance(ehc);

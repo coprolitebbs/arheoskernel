@@ -32,7 +32,7 @@
 #define STDOUT 1
 #define STDERR 2
 
-#define O_NONBLOCK 0x0004 // Битовая маска флага неблокирующего режима
+#define O_NONBLOCK 0x0004 //Битовая маска флага неблокирующего режима
 
 #define INPUT_MODE_RAW    0
 #define INPUT_MODE_COOKED 1
@@ -49,7 +49,8 @@ typedef struct
     uint32_t type;
 } u_dirent_t;
 
-typedef struct {
+typedef struct
+{
     uint32_t size;
     uint32_t attributes;
     uint32_t create_time;
@@ -68,7 +69,7 @@ void yield(void);
 void u_exit(void);
 void* u_alloc_page(void);
 
-//Наш самодельный printf
+//Самодельный printf
 void u_printf(int x, int y, uint32_t color, const char *format, ...);
 
 //Обертки для работы с файлами из Userspace

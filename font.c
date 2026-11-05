@@ -23,12 +23,14 @@
 static const font_t *g_fonts[FONT_REGISTRY_MAX];
 static int           g_font_count;
 
-void font_registry_init(void){
+void font_registry_init(void)
+{
     for (int i = 0; i < FONT_REGISTRY_MAX; i++) g_fonts[i] = 0;
     g_font_count = 0;
 }
 
-int font_register(const font_t *font){
+int font_register(const font_t *font)
+{
     if (!font || g_font_count >= FONT_REGISTRY_MAX) return -1;
     //Защита от двойной регистрации
     for (int i = 0; i < g_font_count; i++)
@@ -37,20 +39,28 @@ int font_register(const font_t *font){
     return g_font_count++;
 }
 
-const font_t *font_by_name(const char *name){
+const font_t *font_by_name(const char *name)
+{
     if (!name) return 0;
-    for (int i = 0; i < g_font_count; i++){
+    for (int i = 0; i < g_font_count; i++)
+    {
         const char *a = g_fonts[i]->name;
         const char *b = name;
-        while (*a && *a == *b){ a++; b++; }
+        while (*a && *a == *b)
+        {
+            a++;
+            b++;
+        }
         if (*a == *b) return g_fonts[i];
     }
     return 0;
 }
 
-const font_glyph_t *font_lookup(const font_t *f, uint32_t cp){
+const font_glyph_t *font_lookup(const font_t *f, uint32_t cp)
+{
     if (!f) return 0;
-    for (uint32_t i = 0; i < f->glyph_count; i++){
+    for (uint32_t i = 0; i < f->glyph_count; i++)
+    {
         if (f->glyphs[i].codepoint == cp) return &f->glyphs[i];
     }
     return f->fallback;

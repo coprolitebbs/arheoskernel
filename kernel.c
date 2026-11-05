@@ -41,7 +41,8 @@
 #include "include-kernel/font_vga.h"
 #include "include-kernel/kload_screen.h"
 
-void _start(void){
+void _start(void)
+{
     /*
     // === Экстренный debug-вывод прямо в LFB, до любой инициализации ===
     volatile uint32_t *bi = (volatile uint32_t *)0x5000;
@@ -75,7 +76,7 @@ void _start(void){
     memset(&_bss_start, 0, &_bss_end - &_bss_start);
 
     //Получаем параметры VBE
-	boot_info_t *info = (boot_info_t*)0x0;
+    boot_info_t *info = (boot_info_t*)0x0;
 
     asm volatile("movl %%ebx,%0" : "=r"(info));
 
@@ -84,7 +85,7 @@ void _start(void){
 
     //char *bss = bss_start;
     //while (bss < kernel_end) {
-        //*bss++ = 0;
+    //*bss++ = 0;
     //}
 
     //debug_kernel_dump_bootinfo((void*)local_ebx);
@@ -97,7 +98,8 @@ void _start(void){
     bootinfo_init(info);
 
 
-	if(boot_info){
+    if(boot_info)
+    {
         lfb_addr = boot_info->framebuffer;
         pitch    = boot_info->pitch;
         bytes_pp = boot_info->bpp / 8;
@@ -105,25 +107,25 @@ void _start(void){
     }
 
     font_vga_init();
-/*
-    com_puts("[FONT] glyph_count=");  com_puthex(g_vga_font.glyph_count);
-    com_puts(" g[128].cp=");          com_puthex(g_vga_glyphs[128].codepoint);
-    com_puts(" g[128].rows=");        com_puthex((uint32_t)g_vga_glyphs[128].rows);
-    com_puts(" fallback=");           com_puthex((uint32_t)g_vga_font.fallback);
-    com_puts("\n");
-*/
+    /*
+        com_puts("[FONT] glyph_count=");  com_puthex(g_vga_font.glyph_count);
+        com_puts(" g[128].cp=");          com_puthex(g_vga_glyphs[128].codepoint);
+        com_puts(" g[128].rows=");        com_puthex((uint32_t)g_vga_glyphs[128].rows);
+        com_puts(" fallback=");           com_puthex((uint32_t)g_vga_font.fallback);
+        com_puts("\n");
+    */
     //draw_hex_dword((uint32_t)boot_info, 20, 100);
     //draw_hex_dump_spaced(0x5200,64,0,150);
 
-	asm volatile("cli");
+    asm volatile("cli");
     //for(;;);
 
 
-	//fill_screen(0xFF, 0x1, 0x1);
-	//for(;;);
+    //fill_screen(0xFF, 0x1, 0x1);
+    //for(;;);
 
-	draw_string(0, 232, boot_info->modules[2].name);
-	draw_hex_dword(boot_info->bpp, 20, 50);
+    draw_string(0, 232, boot_info->modules[2].name);
+    draw_hex_dword(boot_info->bpp, 20, 50);
     draw_hex_dword(boot_info->pitch, 20, 60);
     draw_hex_dword(boot_info->framebuffer, 20, 70);
     draw_hex_dword(boot_info->graphics_flags, 20, 80);
@@ -151,34 +153,34 @@ void _start(void){
     //com_puthex(boot_info->bpp);
     //com_puts("\n");
 
-	//draw_hex_dump_spaced((void *)0x5200,64,0,150);
+    //draw_hex_dump_spaced((void *)0x5200,64,0,150);
     //draw_hex_dump_spaced((void *)boot_info->modules,64,0,450);
 
     syscalls_table_init();
 
-	gdt_init();
+    gdt_init();
 
     tss_init();
 
-	update_tss_esp0(STACK_ADDRESS); // адрес стека ядра
+    update_tss_esp0(STACK_ADDRESS); // адрес стека ядра
 
-	// ---- Инициализация IDT и PIC ----
+    // ---- Инициализация IDT и PIC ----
     idt_init();      // заполнение и загрузка IDT
     pic_init();      // перенастройка PIC
-	pit_init();
+    pit_init();
 
-	// ---- Берем карту памяти из загрузчика ----
+    // ---- Берем карту памяти из загрузчика ----
     uint16_t num_entries = *(uint16_t*)0x6000;
     struct e820_entry *entries = (struct e820_entry*)0x6002;
 
-	// ---- Инициализация физического аллокатора памяти ----
-	pmm_init(num_entries, entries);
+    // ---- Инициализация физического аллокатора памяти ----
+    pmm_init(num_entries, entries);
 
-	// ---- Инициализация Virtual Memory Manager ----
+    // ---- Инициализация Virtual Memory Manager ----
     vmm_init(/*lfb_addr*/);
 
     // ---- Попытка поиска адреса линейного фреймбуффера в памяти -----
-	uint32_t total_mem = pmm_get_total_memory();
+    uint32_t total_mem = pmm_get_total_memory();
     has_lfb = (boot_info->graphics_flags & 1);  // Загрузчик stage2 должен определить наличие еще при установке VBE и передать сюда бит
     //Попробуем определить адрес начала фреймбуффера
     graphics_init_uma_address(total_mem, has_lfb, lfb_addr);
@@ -196,13 +198,13 @@ void _start(void){
     vmm_map_pages(fb_phys,fb_size);
 
     //draw_string(10,300,"Update FB");
-	//Подновим адрес фреймбуффера в структуре bootinfo, если он, вдруг, изменился
+    //Подновим адрес фреймбуффера в структуре bootinfo, если он, вдруг, изменился
     boot_info->framebuffer = fb_phys;
     lfb_addr = fb_phys;
 
 
     //draw_string(0, 232, boot_info->modules[2].name);
-	/*draw_hex_dword(boot_info->bpp, 20, 50);
+    /*draw_hex_dword(boot_info->bpp, 20, 50);
     draw_hex_dword(boot_info->pitch, 20, 60);
     draw_hex_dword(boot_info->framebuffer, 20, 70);
     draw_hex_dword(boot_info->graphics_flags, 20, 80);
@@ -231,23 +233,23 @@ void _start(void){
     }*/
     //test_draw_lfb();
 
-	//draw_hex_dword(pmm_get_total_memory(), 20, 100);
+    //draw_hex_dword(pmm_get_total_memory(), 20, 100);
 
-	//uint32_t gms = graphics_get_uma_address();
-	//draw_hex_dword(fb_phys, 20, 110);
-	//draw_hex_dword(fb_size, 20, 120);
+    //uint32_t gms = graphics_get_uma_address();
+    //draw_hex_dword(fb_phys, 20, 110);
+    //draw_hex_dword(fb_size, 20, 120);
 
     //com_puts("[KERNEL] Normal Stop all\n");
-	//for(;;);
+    //for(;;);
 
     //draw_string(10,310,"Update TSS");
-	update_tss_esp0(STACK_ADDRESS);
+    update_tss_esp0(STACK_ADDRESS);
 
-	kernel_load_animation_start();
+    kernel_load_animation_start();
 
-	load_screen_add_string("VBE mode: %dx%d %d bpp LFB:0x%x", boot_info->width, boot_info->height, boot_info->bpp,boot_info->framebuffer);
+    load_screen_add_string("VBE mode: %dx%d %d bpp LFB:0x%x", boot_info->width, boot_info->height, boot_info->bpp,boot_info->framebuffer);
     //draw_string(10,320,"Init tasking");
-	init_tasking();
+    init_tasking();
 
     //drivers_init();
 
@@ -260,61 +262,61 @@ void _start(void){
     //extern void kernel_init_thread(void);
 
 //init_kernel_schedule_lock = 1;
-/*
+    /*
 
 
 
-    drivers_init();
-    kconsole_init();
+        drivers_init();
+        kconsole_init();
 
-    //__asm__ __volatile__("sti" ::: "memory");
+        //__asm__ __volatile__("sti" ::: "memory");
 
-    //com_puts("[KERNEL THREAD] System Init Thread started successfully!\n");
-    //Инициализация драйверов дисковода и VFS
-    //Планировщик в этот момент работает, прерывание 32 тикает фоном
-    //Драйвер ФС сам переключает свой локальный schedule_lock на время чтения портов
-    int r = vfs_init_system();
+        //com_puts("[KERNEL THREAD] System Init Thread started successfully!\n");
+        //Инициализация драйверов дисковода и VFS
+        //Планировщик в этот момент работает, прерывание 32 тикает фоном
+        //Драйвер ФС сам переключает свой локальный schedule_lock на время чтения портов
+        int r = vfs_init_system();
 
-    //Выводим статус монтирования на COM-порт или дебаг-область
-    //com_puts("[KERNEL THREAD] VFS Init Status: ");
-    //com_puthex(r);
-    //com_puts("\n");
+        //Выводим статус монтирования на COM-порт или дебаг-область
+        //com_puts("[KERNEL THREAD] VFS Init Status: ");
+        //com_puthex(r);
+        //com_puts("\n");
 
-    if(r == VFS_STATUS_OK){
-        //kprintf("Open boot config...");
+        if(r == VFS_STATUS_OK){
+            //kprintf("Open boot config...");
 
-        cfg_file_t *cfg = cfg_open("/config/boot/boot.cfg", FS_OPEN_READ,true);
-
-
-        //kprintf("OK\n");
-
-        init_standard_locales();
-
-        kconsole_reconfigure(cfg);
+            cfg_file_t *cfg = cfg_open("/config/boot/boot.cfg", FS_OPEN_READ,true);
 
 
+            //kprintf("OK\n");
 
-        int adddrv_status = load_additional_drivers(cfg);
-        if(adddrv_status != DRV_STATUS_OK){
-            //com_puts("[KERNEL THREAD] Additional drv load error: ");
-            //com_puthex(adddrv_status);
-            //com_puts("\n");
+            init_standard_locales();
+
+            kconsole_reconfigure(cfg);
+
+
+
+            int adddrv_status = load_additional_drivers(cfg);
+            if(adddrv_status != DRV_STATUS_OK){
+                //com_puts("[KERNEL THREAD] Additional drv load error: ");
+                //com_puthex(adddrv_status);
+                //com_puts("\n");
+            }
+            cfg_close(cfg);
+        } else {
+
         }
-        cfg_close(cfg);
-    } else {
-
-    }
-*/
+    */
 
     //draw_hex_dword(console_bgcolor, 20, 50);
-	//for(;;);
+    //for(;;);
 
     //for(;;);
 
 
     //draw_string(0, 242, boot_info->modules[1].name);
- //draw_hex_dword(fb->debug1, 20, 280);
- //draw_hex_dword(console_bgcolor, 20, 300);
+//draw_hex_dword(fb->debug1, 20, 280);
+//draw_hex_dword(console_bgcolor, 20, 300);
     //for(;;);
 
     //Инит потока ядра как отдельной задачи в пространстве ядра
@@ -328,7 +330,7 @@ void _start(void){
     //draw_hex_dword(r, 310, 650);
     //kernel_schedule_lock = 0;
     //kernel_schedule_lock = 1;
- //kprintf("OK\n");
+//kprintf("OK\n");
 
 
 
@@ -374,54 +376,56 @@ void _start(void){
     }
     */
 
-	// --------
+    // --------
     //init_kernel_schedule_lock = 0;
-	//com_puts("[KERNEL] Normal start progs\n");
+    //com_puts("[KERNEL] Normal start progs\n");
     //draw_string(10,340,"Prepare to start progs");
 
-	//task_t *task1;
-	//task_t *task2;
+    //task_t *task1;
+    //task_t *task2;
 
-	//task1=create_task(0x40000000);
-	//task2=create_task(0x40000000);
+    //task1=create_task(0x40000000);
+    //task2=create_task(0x40000000);
 
     //draw_string(10,350,"Tasks created");
 
-	//load_user_program(task1,0x40000000,user_prog,sizeof(user_prog));
-	//load_user_program(task2,0x40000000,user_prog2,sizeof(user_prog2));
-	//task_spawn_builtin(0x40000000, user_prog, sizeof(user_prog));
+    //load_user_program(task1,0x40000000,user_prog,sizeof(user_prog));
+    //load_user_program(task2,0x40000000,user_prog2,sizeof(user_prog2));
+    //task_spawn_builtin(0x40000000, user_prog, sizeof(user_prog));
     //task_spawn_builtin(0x40000000, user_prog2, sizeof(user_prog2));
     //init_kernel_schedule_lock = 1;
     //task_spawn_from_file("/hello.bin", 0x40000000);
     //com_puts("[KERNEL] hello.bin started\n");
-	//update_tss_esp0(STACK_ADDRESS);
+    //update_tss_esp0(STACK_ADDRESS);
 
     //draw_string(10,360,"Tasks loaded");
 
     task_t *first=get_first_task();
 
     //for(;;);
-	if(first){
+    if(first)
+    {
 
-		current_task=first;
+        current_task=first;
 
-		current_task->state=TASK_RUNNING;
-		vmm_switch_directory(current_task->page_dir_phys);
-		update_tss_esp0(current_task->kernel_stack);
+        current_task->state=TASK_RUNNING;
+        vmm_switch_directory(current_task->page_dir_phys);
+        update_tss_esp0(current_task->kernel_stack);
 
         //init_kernel_schedule_lock = 0;
         //asm volatile("sti");
-		switch_task(current_task->esp);
-	}
+        switch_task(current_task->esp);
+    }
 
-	for(;;);
+    for(;;);
 
 }
 
 
 
 
-void switch_to_usermode(uint32_t entry) {
+void switch_to_usermode(uint32_t entry)
+{
     asm volatile(
         "cli\n"
         "mov $0x23, %%ax\n"
@@ -445,7 +449,8 @@ void switch_to_usermode(uint32_t entry) {
 
 
 
-void kernel_halt_all(void){
+void kernel_halt_all(void)
+{
     kernel_schedule_lock = 1;
     kprintf("\n=== ARHeos Operating System ===\n");
     kprintf("Initiating structural system shutdown sequences...\n");
@@ -466,9 +471,11 @@ void kernel_halt_all(void){
     outl(0xCF8, pci_addr);
     uint32_t pmba_val = inl(0xCFC);
 
-    if (pmba_val != 0 && pmba_val != 0xFFFFFFFF){
+    if (pmba_val != 0 && pmba_val != 0xFFFFFFFF)
+    {
         uint16_t pm_base = (uint16_t)(pmba_val & 0xFFFE);
-        if (pm_base != 0){
+        if (pm_base != 0)
+        {
             kprintf("[ACPI] Detected 86box PMBA base I/O port: 0x%x\n", pm_base);
             uint16_t pm1_cnt_port = pm_base + 4;
             kprintf("[ACPI] Target PM1_CNT register port: 0x%x\n", pm1_cnt_port);
@@ -487,8 +494,10 @@ void kernel_halt_all(void){
     //Ковровая бомбардировка портов (Для плат VIA/SIS/ALI)
     uint16_t pm_commands[] = {0x2000, 0x3400, 0x3C00, 0x1C00, 0x041C};
     uint16_t pm_ports[] = {0x7004, 0x7304, 0x4004, 0x4304, 0xE004, 0x5004, 0x0FA4, 0xB004};
-    for (int c = 0; c < 5; c++){
-        for (int p = 0; p < 8; p++){
+    for (int c = 0; c < 5; c++)
+    {
+        for (int p = 0; p < 8; p++)
+        {
             outw(pm_ports[p], pm_commands[c]);
         }
     }
@@ -499,10 +508,10 @@ void kernel_halt_all(void){
     //Если запуск на совсем древнем железе (AT-корпус без автовыключения):
     //Глушим процессор вечной ловушкой hlt.
     __asm__ __volatile__(
-                "cli\n\t"
-                "1:\n\t"
-                "hlt\n\t"
-                "jmp 1b"
+        "cli\n\t"
+        "1:\n\t"
+        "hlt\n\t"
+        "jmp 1b"
     );
 }
 

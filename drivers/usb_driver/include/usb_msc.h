@@ -23,7 +23,11 @@
 
 #define USB_MAX_MSC_DEVS 4
 
-typedef struct {
+#define USB_MSC_CBW_SIG 0x43425355u
+#define USB_MSC_CSW_SIG 0x53425355u
+
+typedef struct
+{
     uint32_t dCBWSignature;
     uint32_t dCBWTag;
     uint32_t dCBWDataTransferLength;
@@ -33,14 +37,16 @@ typedef struct {
     uint8_t  CBWCB[16];
 } __attribute__((packed)) usb_msc_cbw_t;
 
-typedef struct {
+typedef struct
+{
     uint32_t dCSWSignature;
     uint32_t dCSWTag;
     uint32_t dCSWDataResidue;
     uint8_t  bCSWStatus;
 } __attribute__((packed)) usb_msc_csw_t;
 
-typedef struct {
+typedef struct
+{
     uint8_t  dev_addr;
     usb_msc_iface_t iface;
     uint32_t sector_count;
@@ -52,12 +58,8 @@ typedef struct {
 } usb_msc_dev_t;
 
 
-#define USB_MSC_CBW_SIG 0x43425355u
-#define USB_MSC_CSW_SIG 0x53425355u
-
-/* Возвращает 0 при успехе (INQUIRY + READ CAPACITY пройдены),
-   отрицательное — если нет. sector_count и sector_size валидны
-   только при успехе. */
+//Возвращает 0 при успехе (INQUIRY + READ CAPACITY пройдены),
+//отрицательное — если нет. sector_count и sector_size валидны только при успехе
 int usb_msc_init(usb_hc_t *hc, uint8_t dev_addr,
                  usb_msc_iface_t *iface,
                  uint32_t *out_sector_count, uint32_t *out_sector_size);

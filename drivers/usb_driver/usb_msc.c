@@ -19,13 +19,11 @@
 #include "include/usb_msc.h"
 #include "../../include-kernel/lib.h"
 
-//static usb_msc_dev_t g_msc_devs[USB_MAX_MSC_DEVS];
-
 uint32_t msc_tag = 0x12345678;
 
 
-//Clear Feature ENDPOINT_HALT на указанном endpoint
-//После STALL на bulk endpoint, device остаётся "залипшим" до этого вызова
+//Подчистка Feature ENDPOINT_HALT на указанном endpoint
+//После STALL на bulk endpoint, device остаётся залипшим до этого вызова
 static int usb_msc_clear_halt(usb_hc_t *hc, uint8_t dev_addr,
                               uint8_t ep_addr, uint16_t ep0_max){
     uint8_t setup[8] = {

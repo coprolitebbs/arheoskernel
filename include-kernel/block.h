@@ -22,7 +22,8 @@
 #define BLK_READONLY    0x0002
 #define BLK_PARTITION   0x0004
 
-typedef struct block_device {
+typedef struct block_device
+{
     char        name[16];            //"sda", "sda1", "sdb", "usb0"
     uint32_t    sector_size;         //обычно 512
     uint64_t    sector_count;
@@ -36,14 +37,15 @@ typedef struct block_device {
 } block_device_t;
 
 
-typedef struct {
-    uint32_t id;                 // 0 = boot-диск, 1.. = остальные
-    char     name[16];           // "sda", "sda1", "usb0", "usb0p1"
-    uint32_t sector_size;        // 512 / 4096
+typedef struct
+{
+    uint32_t id;                 //0 = boot-диск, 1.. = остальные
+    char     name[16];           //"sda", "sda1", "usb0", "usb0p1"
+    uint32_t sector_size;        //512 / 4096
     uint64_t sector_count;
-    uint32_t flags;              // BLK_REMOVABLE | BLK_READONLY | BLK_PARTITION
-    uint32_t parent_id;          // для партиции = id диска; для диска = 0xFFFFFFFF
-    uint64_t partition_offset;   // для партиции = LBA начала; для диска = 0
+    uint32_t flags;              //BLK_REMOVABLE | BLK_READONLY | BLK_PARTITION
+    uint32_t parent_id;          //для партиции = id диска; для диска = 0xFFFFFFFF
+    uint64_t partition_offset;   //для партиции = LBA начала; для диска = 0
 } block_info_t;
 
 //Синхронные обёртки — поверх dev->read с учётом partition_offset

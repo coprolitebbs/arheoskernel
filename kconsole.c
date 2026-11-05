@@ -43,7 +43,8 @@ static ansi_state_t ansi_state = ANSI_STATE_NORMAL;
 static char ansi_buffer[ANSI_BUF_SIZE];
 static uint32_t ansi_buf_idx = 0;
 
-static const uint32_t ansi_color_table[8] = {
+static const uint32_t ansi_color_table[8] =
+{
     0x00000000, //0: Черный
     0x00AA0000, //1: Красный
     0x0000AA00, //2: Зеленый
@@ -58,9 +59,10 @@ tty_t tty_terminals[TTY_TERMINALS_COUNT];
 tty_t *current_tty = nullptr;
 static tty_clipboard_t tty_clipboards[TTY_TERMINALS_COUNT];
 
-// Буфер обмена
+//Буфер обмена
 
-static tty_clipboard_t *clipboard_for_current(void){
+static tty_clipboard_t *clipboard_for_current(void)
+{
     if (!current_tty) return NULL;
     int idx = current_tty->id;
     if (idx < 0 || idx >= TTY_TERMINALS_COUNT) return NULL;
@@ -68,11 +70,13 @@ static tty_clipboard_t *clipboard_for_current(void){
 }
 
 
-void kernel_clipboard_set(const uint8_t *src, uint32_t size){
+void kernel_clipboard_set(const uint8_t *src, uint32_t size)
+{
     tty_clipboard_t *cb = clipboard_for_current();
     if (!cb) return;
     if (size > CLIPBOARD_MAX_BYTES) size = CLIPBOARD_MAX_BYTES;
-    if (size > cb->cap){
+    if (size > cb->cap)
+    {
         uint32_t nc = cb->cap ? cb->cap : 256;
         while (nc < size) nc *= 2;
         if (nc > CLIPBOARD_MAX_BYTES) nc = CLIPBOARD_MAX_BYTES;
@@ -86,7 +90,8 @@ void kernel_clipboard_set(const uint8_t *src, uint32_t size){
     cb->size = size;
 }
 
-uint32_t kernel_clipboard_get(uint8_t *dst, uint32_t max_size){
+uint32_t kernel_clipboard_get(uint8_t *dst, uint32_t max_size)
+{
     tty_clipboard_t *cb = clipboard_for_current();
     if (!cb) return 0;
     if (!dst || max_size == 0) return cb->size;
@@ -95,7 +100,8 @@ uint32_t kernel_clipboard_get(uint8_t *dst, uint32_t max_size){
     return copy;
 }
 
-void kernel_clipboard_clear(void){
+void kernel_clipboard_clear(void)
+{
     tty_clipboard_t *cb = clipboard_for_current();
     if (!cb) return;
     cb->size = 0;
@@ -106,7 +112,8 @@ void kernel_clipboard_clear(void){
 
 //Сбрасывает незавершённую UTF-8 последовательность
 //Вызывать при переключении TTY/задач и на старте строки
-void kconsole_reset_utf8_state(void){
+void kconsole_reset_utf8_state(void)
+{
     utf8_acc  = 0;
     utf8_min  = 0;
     utf8_need = 0;
@@ -118,15 +125,39 @@ void kconsole_reset_utf8_state(void){
 //Возвращает 0, если последовательность ещё не завершена (нужны ещё байты).
 //Возвращает codepoint, если байт завершил последовательность
 //Возвращает 0xFFFD на битой последовательности (и сбрасывает состояние)
-static uint32_t utf8_feed_byte(uint8_t b){
-    if (utf8_need == 0){
+static uint32_t utf8_feed_byte(uint8_t b)
+{
+    if (utf8_need == 0)
+    {
         if (b < 0x80) return b;
-        else if ((b & 0xE0) == 0xC0){ utf8_acc = b & 0x1F; utf8_need = 1; utf8_min = 0x80;    return 0; }
-        else if ((b & 0xF0) == 0xE0){ utf8_acc = b & 0x0F; utf8_need = 2; utf8_min = 0x800;   return 0; }
-        else if ((b & 0xF8) == 0xF0){ utf8_acc = b & 0x07; utf8_need = 3; utf8_min = 0x10000; return 0; }
+        else if ((b & 0xE0) == 0xC0)
+        {
+            utf8_acc = b & 0x1F;
+            utf8_need = 1;
+            utf8_min = 0x80;
+            return 0;
+        }
+        else if ((b & 0xF0) == 0xE0)
+        {
+            utf8_acc = b & 0x0F;
+            utf8_need = 2;
+            utf8_min = 0x800;
+            return 0;
+        }
+        else if ((b & 0xF8) == 0xF0)
+        {
+            utf8_acc = b & 0x07;
+            utf8_need = 3;
+            utf8_min = 0x10000;
+            return 0;
+        }
         else return 0xFFFD;  //битый lead-байт
     }
-    if ((b & 0xC0) != 0x80){ utf8_need = 0; return 0xFFFD; }  //не continuation
+    if ((b & 0xC0) != 0x80)
+    {
+        utf8_need = 0;    //не continuation
+        return 0xFFFD;
+    }
     utf8_acc = (utf8_acc << 6) | (b & 0x3F);
     utf8_need--;
     if (utf8_need > 0) return 0;
@@ -140,104 +171,132 @@ static uint32_t utf8_feed_byte(uint8_t b){
 
 
 
-static void parse_and_execute_ansi(char cmd){
+static void parse_and_execute_ansi(char cmd)
+{
     ansi_buffer[ansi_buf_idx] = '\0';
     //Переменные для парсинга числовых аргументов (поддерживаем до 3 параметров)
     int args[3] = {0, 0, 0};
     int arg_count = 0;
     char *p = ansi_buffer;
-    while (*p && arg_count < 3){
-        if (*p >= '0' && *p <= '9'){
+    while (*p && arg_count < 3)
+    {
+        if (*p >= '0' && *p <= '9')
+        {
             args[arg_count] = 0;
-            while (*p >= '0' && *p <= '9'){
+            while (*p >= '0' && *p <= '9')
+            {
                 args[arg_count] = args[arg_count] * 10 + (*p - '0');
                 p++;
             }
             arg_count++;
-        } else {
+        }
+        else
+        {
             p++;
         }
     }
-    switch (cmd){
-        case 'm':{
-            if (arg_count == 0 || args[0] == 0){
-                console_fgcolor = DEFAULT_FG_COLOR;
-                console_bgcolor = DEFAULT_BG_COLOR;
-                console_bg_active = false;                       // ← сброс
-                if (fb && fb->set_fg) fb->set_fg(DEFAULT_FG_COLOR);
-                if (fb && fb->set_bg) fb->set_bg(DEFAULT_BG_COLOR);
-            } else {
-                for (int i = 0; i < arg_count; i++){
-                    int code = args[i];
-                    if (code >= 30 && code <= 37){
-                        console_fgcolor = ansi_color_table[code - 30];
-                        if (fb && fb->set_fg) fb->set_fg(console_fgcolor);
-                    }
-                    else if (code >= 40 && code <= 47){
-                        console_bgcolor = ansi_color_table[code - 40];
-                        console_bg_active = true;                // ← взвод
+    switch (cmd)
+    {
+    case 'm':
+    {
+        if (arg_count == 0 || args[0] == 0)
+        {
+            console_fgcolor = DEFAULT_FG_COLOR;
+            console_bgcolor = DEFAULT_BG_COLOR;
+            console_bg_active = false;                       // ← сброс
+            if (fb && fb->set_fg) fb->set_fg(DEFAULT_FG_COLOR);
+            if (fb && fb->set_bg) fb->set_bg(DEFAULT_BG_COLOR);
+        }
+        else
+        {
+            for (int i = 0; i < arg_count; i++)
+            {
+                int code = args[i];
+                if (code >= 30 && code <= 37)
+                {
+                    console_fgcolor = ansi_color_table[code - 30];
+                    if (fb && fb->set_fg) fb->set_fg(console_fgcolor);
+                }
+                else if (code >= 40 && code <= 47)
+                {
+                    console_bgcolor = ansi_color_table[code - 40];
+                    console_bg_active = true;                // ← взвод
                     if (fb && fb->set_bg) fb->set_bg(console_bgcolor);
-                    }
                 }
             }
-            break;
         }
-        case 'H': //Спецификатор CUP (Позиционирование курсора)
-        case 'f':{
-            if (arg_count >= 2){
-                //Терминальные координаты ANSI начинаются с 1,1
-                int row = args[0] > 0 ? args[0] - 1 : 0;
-                int col = args[1] > 0 ? args[1] - 1 : 0;
-                //Защита от выхода за границы текстовой матрицы консоли
-                if (row >= current_tty->console_rows) row = current_tty->console_rows - 1;//CONSOLE_ROWS - 1;
-                if (col >= current_tty->console_cols) col = current_tty->console_cols - 1;//CONSOLE_COLS - 1;
-                current_tty->cursor_x = col * current_tty->cell_w;//8;
-                current_tty->cursor_y = row * current_tty->cell_h;//LINE_HEIGHT;
-            } else {
-                // \x1B[H — Перевод в начало (Home)
-                current_tty->cursor_x = 0;
-                current_tty->cursor_y = 0;
-            }
-            break;
+        break;
+    }
+    case 'H': //Спецификатор CUP (Позиционирование курсора)
+    case 'f':
+    {
+        if (arg_count >= 2)
+        {
+            //Терминальные координаты ANSI начинаются с 1,1
+            int row = args[0] > 0 ? args[0] - 1 : 0;
+            int col = args[1] > 0 ? args[1] - 1 : 0;
+            //Защита от выхода за границы текстовой матрицы консоли
+            if (row >= current_tty->console_rows) row = current_tty->console_rows - 1;//CONSOLE_ROWS - 1;
+            if (col >= current_tty->console_cols) col = current_tty->console_cols - 1;//CONSOLE_COLS - 1;
+            current_tty->cursor_x = col * current_tty->cell_w;//8;
+            current_tty->cursor_y = row * current_tty->cell_h;//LINE_HEIGHT;
         }
-        case 'J':{ //Спецификатор ED (Очистка экрана)
-            if (arg_count > 0 && args[0] == 2) {
-                // \x1B[2J — Полная очистка экрана и сброс курсора
-                kconsole_clear_screen();
-            }
-            break;
+        else
+        {
+            // \x1B[H — Перевод в начало (Home)
+            current_tty->cursor_x = 0;
+            current_tty->cursor_y = 0;
         }
-        case 'K':{
-            uint32_t mode = (arg_count > 0) ? args[0] : 0;
-            uint32_t row = current_tty->cursor_y / current_tty->cell_h;
-            uint32_t start_col = (mode == 2) ? 0 : (mode == 1) ? 0 : (current_tty->cursor_x / current_tty->cell_w);
-            uint32_t end_col   = (mode == 1) ? (current_tty->cursor_x / current_tty->cell_w) : current_tty->console_cols;
-            uint32_t cell_bg   = console_bg_active ? console_bgcolor : 0xFFFFFFFF;
+        break;
+    }
+    case 'J':  //Спецификатор ED (Очистка экрана)
+    {
+        if (arg_count > 0 && args[0] == 2)
+        {
+            // \x1B[2J — Полная очистка экрана и сброс курсора
+            kconsole_clear_screen();
+        }
+        break;
+    }
+    case 'K':
+    {
+        uint32_t mode = (arg_count > 0) ? args[0] : 0;
+        uint32_t row = current_tty->cursor_y / current_tty->cell_h;
+        uint32_t start_col = (mode == 2) ? 0 : (mode == 1) ? 0 : (current_tty->cursor_x / current_tty->cell_w);
+        uint32_t end_col   = (mode == 1) ? (current_tty->cursor_x / current_tty->cell_w) : current_tty->console_cols;
+        uint32_t cell_bg   = console_bg_active ? console_bgcolor : 0xFFFFFFFF;
 
-            for (uint32_t c = start_col; c < end_col; c++){
-                if (row < current_tty->console_rows){
-                    current_tty->matrix[row][c].codepoint = ' ';
-                    current_tty->matrix[row][c].bg        = cell_bg;      // ←
-                }
-                if (console_bg_active && fb && fb->fill_rect){
-                    fb->fill_rect(c * current_tty->cell_w, row * current_tty->cell_h,
-                          current_tty->cell_w, current_tty->cell_h, console_bgcolor);
-                } else if (fb && fb->clear_tile){
-                    fb->clear_tile(c * current_tty->cell_w, row * current_tty->cell_h, console_bgcolor);
-                }
+        for (uint32_t c = start_col; c < end_col; c++)
+        {
+            if (row < current_tty->console_rows)
+            {
+                current_tty->matrix[row][c].codepoint = ' ';
+                current_tty->matrix[row][c].bg        = cell_bg;      // ←
             }
-            break;
+            if (console_bg_active && fb && fb->fill_rect)
+            {
+                fb->fill_rect(c * current_tty->cell_w, row * current_tty->cell_h,
+                              current_tty->cell_w, current_tty->cell_h, console_bgcolor);
+            }
+            else if (fb && fb->clear_tile)
+            {
+                fb->clear_tile(c * current_tty->cell_w, row * current_tty->cell_h, console_bgcolor);
+            }
         }
-        case 'D':{// Cursor Left
-            uint32_t n = (arg_count > 0) ? args[0] : 1;
-            uint32_t cell_x = current_tty->cursor_x / current_tty->cell_w;
-            if (cell_x >= n) cell_x -= n; else cell_x = 0;
-            current_tty->cursor_x = cell_x * current_tty->cell_w;
+        break;
+    }
+    case 'D': // Cursor Left
+    {
+        uint32_t n = (arg_count > 0) ? args[0] : 1;
+        uint32_t cell_x = current_tty->cursor_x / current_tty->cell_w;
+        if (cell_x >= n) cell_x -= n;
+        else cell_x = 0;
+        current_tty->cursor_x = cell_x * current_tty->cell_w;
 
-            break;
-        }
-        default:
-            break;
+        break;
+    }
+    default:
+        break;
     }
 }
 
@@ -245,12 +304,14 @@ static void parse_and_execute_ansi(char cmd){
 //Преобразует строковое имя комбинации из конфига в её числовой код HOTKEY_*.
 //Принимает обе формы записи: "ALT_SHIFT" и "HOTKEY_ALT_SHIFT".
 //При опечатке возвращает безопасный дефолт, не падает и не оставляет мусор
-static uint8_t cfg_parse_hotkey(const char *name){
+static uint8_t cfg_parse_hotkey(const char *name)
+{
     if (!name || name[0] == '\0') return HOTKEY_ALT_SHIFT;
     const char *p = name;
     //Отбрасываем необязательный префикс HOTKEY_
     if (p[0] == 'H' && p[1] == 'O' && p[2] == 'T' && p[3] == 'K' &&
-        p[4] == 'E' && p[5] == 'Y' && p[6] == '_'){
+            p[4] == 'E' && p[5] == 'Y' && p[6] == '_')
+    {
         p += 7;
     }
     if (strcmp(p, "NONE") == 0)       return HOTKEY_NONE;
@@ -264,9 +325,12 @@ static uint8_t cfg_parse_hotkey(const char *name){
 
 
 
-void kconsole_get_render_coords(uint32_t buffer_idx, uint32_t *out_x, uint32_t *out_y){
-    if (!current_tty){
-        *out_x = 0; *out_y = 0;
+void kconsole_get_render_coords(uint32_t buffer_idx, uint32_t *out_x, uint32_t *out_y)
+{
+    if (!current_tty)
+    {
+        *out_x = 0;
+        *out_y = 0;
         return;
     }
 
@@ -274,7 +338,8 @@ void kconsole_get_render_coords(uint32_t buffer_idx, uint32_t *out_x, uint32_t *
     uint32_t cell_x = total_chars_offset % current_tty->console_cols;
 
     uint32_t cell_y = current_tty->input_start_y + (total_chars_offset / current_tty->console_cols);
-    if (cell_y >= current_tty->console_rows){
+    if (cell_y >= current_tty->console_rows)
+    {
         cell_y = current_tty->console_rows - 1;
     }
 
@@ -283,11 +348,13 @@ void kconsole_get_render_coords(uint32_t buffer_idx, uint32_t *out_x, uint32_t *
 }
 
 
-void kconsole_update_cursor(void){
+void kconsole_update_cursor(void)
+{
     extern volatile uint32_t tick_count;
     if (!current_tty || current_tty->foreground_pid == 0 || current_tty->line_ready) return;
 
-    if (tick_count - current_tty->last_blink_tick >= current_tty->cursor_tick_count){
+    if (tick_count - current_tty->last_blink_tick >= current_tty->cursor_tick_count)
+    {
         current_tty->last_blink_tick = tick_count;
         current_tty->cursor_visible = !current_tty->cursor_visible;
 
@@ -296,20 +363,25 @@ void kconsole_update_cursor(void){
 
         uint32_t old_cr3;
         __asm__ __volatile__("mov %%cr3, %0" : "=r"(old_cr3));
-        if (current_task && current_task->pid != 0) {
+        if (current_task && current_task->pid != 0)
+        {
             __asm__ __volatile__("mov %0, %%cr3" : : "r"(current_task->page_dir_phys));
         }
 
-        if (current_tty->cursor_visible){
+        if (current_tty->cursor_visible)
+        {
             //fb->draw_char(cx, cy, current_tty->cursor_code, console_fgcolor);
             fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_fgcolor);
-        } else {
+        }
+        else
+        {
             uint32_t cell_x = cx / current_tty->cell_w;
             uint32_t cell_y = cy / current_tty->cell_h;
             uint32_t original_char = ' ';
             uint32_t original_bg = 0xFFFFFFFF;
 
-            if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols){
+            if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
+            {
                 original_char = current_tty->matrix[cell_y][cell_x].codepoint;
                 original_bg = current_tty->matrix[cell_y][cell_x].bg;
             }
@@ -321,14 +393,18 @@ void kconsole_update_cursor(void){
                 //fb->draw_char(cx, cy, current_tty->cursor_code, console_bgcolor);
                 fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_bgcolor);
             }*/
-            if (original_bg != 0xFFFFFFFF && fb && fb->fill_rect){            // ←
+            if (original_bg != 0xFFFFFFFF && fb && fb->fill_rect)             // ←
+            {
                 fb->fill_rect(cx, cy, current_tty->cell_w, current_tty->cell_h, original_bg);
-            } else if (fb && fb->clear_tile){
+            }
+            else if (fb && fb->clear_tile)
+            {
                 fb->clear_tile(cx, cy, console_bgcolor);
             }
 
             //Если на этом месте был символ текста — перерисовываем его поверх обоев
-            if (original_char != ' ' && original_char != '\0'){
+            if (original_char != ' ' && original_char != '\0')
+            {
                 //fb->draw_char(cx, cy, original_char, console_fgcolor);
                 fb->draw_codepoint(cx, cy, original_char, console_fgcolor);
             }
@@ -339,195 +415,31 @@ void kconsole_update_cursor(void){
 }
 
 
-/*
-void kernel_stdout_write_char(char c, uint32_t color){
-    if (!fb || !current_tty) return;
-    uint8_t b = (uint8_t)c;
-
-    if (ansi_state == ANSI_STATE_NORMAL){
-        if (b == 0x1B) {
-            utf8_lead_byte = 0;
-            ansi_state = ANSI_STATE_ESC;
-            return;
-        }
-    }
-    else if (ansi_state == ANSI_STATE_ESC){
-        if (b == '['){
-            ansi_state = ANSI_STATE_CSI;
-            ansi_buf_idx = 0;
-            return;
-        } else {
-            ansi_state = ANSI_STATE_NORMAL;
-        }
-    }
-    else if (ansi_state == ANSI_STATE_CSI){
-        if ((b >= '0' && b <= '9') || b == ';'){
-            if (ansi_buf_idx < (ANSI_BUF_SIZE - 1)){
-                ansi_buffer[ansi_buf_idx++] = b;
-            }
-            return;
-        }
-        else if ((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')){
-            parse_and_execute_ansi(b);
-            ansi_state = ANSI_STATE_NORMAL;
-            return;
-        } else {
-            ansi_state = ANSI_STATE_NORMAL;
-            return;
-        }
-    }
-
-    void sync_input_grid_down(void){
-        if (current_tty->line_ready == false){
-            current_tty->input_start_y++;
-            if (current_tty->input_start_y >= current_tty->console_rows){
-                current_tty->input_start_y = current_tty->console_rows - 1;
-            }
-        }
-    }
-
-    if (b == 0xD0 || b == 0xD1){
-        utf8_lead_byte = b;
-        return;
-    }
-
-    if (utf8_lead_byte != 0){
-        uint8_t cp866_char = ' ';
-        if (utf8_lead_byte == 0xD0){
-            if (b >= 0x90 && b <= 0xBF){
-                if (b <= 0xAF) cp866_char = b - 0x90 + 0x80;
-                else           cp866_char = b - 0xB0 + 0xA0;
-            }
-            else if (b == 0x81) cp866_char = 0xF0;
-        }
-        else if (utf8_lead_byte == 0xD1){
-            if (b >= 0x80 && b <= 0x8F)  cp866_char = b - 0x80 + 0xE0;
-            else if (b == 0x91)          cp866_char = 0xF1;
-        }
-        b = cp866_char;
-        utf8_lead_byte = 0;
-    }
-
-    if (b == '\b'){
-        uint32_t current_row = current_tty->cursor_y / current_tty->cell_h;
-        if (current_row > current_tty->input_start_y){
-            if (current_tty->cursor_x >= current_tty->cell_w) {
-                current_tty->cursor_x -= current_tty->cell_w;
-            } else {
-                current_tty->cursor_y -= current_tty->cell_h;
-                current_tty->cursor_x = (current_tty->console_cols - 1) * current_tty->cell_w;
-            }
-            uint32_t cell_x = current_tty->cursor_x / current_tty->cell_w;
-            uint32_t cell_y = current_tty->cursor_y / current_tty->cell_h;
-            if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols){
-                current_tty->matrix[cell_y][cell_x].ascii = ' ';
-            }
-            if (fb && fb->clear_tile){
-                fb->clear_tile(current_tty->cursor_x, current_tty->cursor_y, console_bgcolor);
-            } else if (fb && fb->draw_char) {
-                fb->draw_char(current_tty->cursor_x, current_tty->cursor_y, ' ', console_bgcolor);
-            }
-        }
-        else if (current_row == current_tty->input_start_y){
-            if (current_tty->cursor_x > current_tty->input_start_x){
-                current_tty->cursor_x -= current_tty->cell_w;
-                uint32_t cell_x = current_tty->cursor_x / current_tty->cell_w;
-                uint32_t cell_y = current_tty->cursor_y / current_tty->cell_h;
-                if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols){
-                    current_tty->matrix[cell_y][cell_x].ascii = ' ';
-                }
-                if (fb && fb->clear_tile){
-                    fb->clear_tile(current_tty->cursor_x, current_tty->cursor_y, console_bgcolor);
-                } else if (fb && fb->draw_char){
-                    fb->draw_char(current_tty->cursor_x, current_tty->cursor_y, ' ', console_bgcolor);
-                }
-            }
-        }
-        return;
-    }
-
-    if (current_tty->cursor_x >= (current_tty->console_cols * current_tty->cell_w)){
-        current_tty->cursor_x = 0;
-        current_tty->cursor_y += current_tty->cell_h;
-        if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)){
-            kconsole_scroll_up();
-        } else {
-            sync_input_grid_down();
-        }
-    }
-
-    if (b == '\n'){
-        current_tty->cursor_x = 0;
-        current_tty->cursor_y += current_tty->cell_h;
-        if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)){
-            kconsole_scroll_up();
-        } else {
-            sync_input_grid_down();
-        }
-        return;
-    }
-
-    if (b == '\r'){
-        utf8_lead_byte = 0;
-        ansi_state = ANSI_STATE_NORMAL;
-        ansi_buf_idx = 0;
-        current_tty->cursor_x = 0;
-        return;
-    }
-
-    if (b == '\t'){
-        current_tty->cursor_x += 4 * current_tty->cell_w;
-        if (current_tty->cursor_x >= (current_tty->console_cols * current_tty->cell_w)){
-            current_tty->cursor_x = 0;
-            current_tty->cursor_y += current_tty->cell_h;
-            if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)){
-                kconsole_scroll_up();
-            } else {
-                sync_input_grid_down();
-            }
-        }
-        return;
-    }
-
-    uint32_t cell_x = current_tty->cursor_x / current_tty->cell_w;
-    uint32_t cell_y = current_tty->cursor_y / current_tty->cell_h;
-    if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols){
-        current_tty->matrix[cell_y][cell_x].ascii = b;
-        current_tty->matrix[cell_y][cell_x].color = color;
-    }
-    if (fb && fb->draw_char){
-        fb->draw_char(current_tty->cursor_x, current_tty->cursor_y, b, color);
-    }
-    current_tty->cursor_x += current_tty->cell_w;
-    if (current_tty->cursor_x >= (current_tty->console_cols * current_tty->cell_w)){
-        current_tty->cursor_x = 0;
-        current_tty->cursor_y += current_tty->cell_h;
-        if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)){
-            kconsole_scroll_up();
-        } else {
-            sync_input_grid_down();
-        }
-    }
-}
-*/
-
-void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color){
+void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
+{
     if (!fb || !current_tty) return;
 
-    void sync_input_grid_down(void){
-        if (current_tty->line_ready == false){
+    void sync_input_grid_down(void)
+    {
+        if (current_tty->line_ready == false)
+        {
             current_tty->input_start_y++;
             if (current_tty->input_start_y >= current_tty->console_rows)
                 current_tty->input_start_y = current_tty->console_rows - 1;
         }
     }
 
-    if (cp == '\b'){
+    if (cp == '\b')
+    {
         uint32_t current_row = current_tty->cursor_y / current_tty->cell_h;
-        if (current_row > current_tty->input_start_y){
+        if (current_row > current_tty->input_start_y)
+        {
             if (current_tty->cursor_x >= current_tty->cell_w) current_tty->cursor_x -= current_tty->cell_w;
-            else { current_tty->cursor_y -= current_tty->cell_h;
-                   current_tty->cursor_x = (current_tty->console_cols - 1) * current_tty->cell_w; }
+            else
+            {
+                current_tty->cursor_y -= current_tty->cell_h;
+                current_tty->cursor_x = (current_tty->console_cols - 1) * current_tty->cell_w;
+            }
             uint32_t cell_x = current_tty->cursor_x / current_tty->cell_w;
             uint32_t cell_y = current_tty->cursor_y / current_tty->cell_h;
             if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
@@ -535,8 +447,10 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color){
             if (fb && fb->clear_tile) fb->clear_tile(current_tty->cursor_x, current_tty->cursor_y, console_bgcolor);
             else if (fb && fb->draw_codepoint) fb->draw_codepoint(current_tty->cursor_x, current_tty->cursor_y, ' ', console_bgcolor);
         }
-        else if (current_row == current_tty->input_start_y){
-            if (current_tty->cursor_x > current_tty->input_start_x){
+        else if (current_row == current_tty->input_start_y)
+        {
+            if (current_tty->cursor_x > current_tty->input_start_x)
+            {
                 current_tty->cursor_x -= current_tty->cell_w;
                 uint32_t cell_x = current_tty->cursor_x / current_tty->cell_w;
                 uint32_t cell_y = current_tty->cursor_y / current_tty->cell_h;
@@ -549,14 +463,16 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color){
         return;
     }
 
-    if (current_tty->cursor_x >= (current_tty->console_cols * current_tty->cell_w)){
+    if (current_tty->cursor_x >= (current_tty->console_cols * current_tty->cell_w))
+    {
         current_tty->cursor_x = 0;
         current_tty->cursor_y += current_tty->cell_h;
         if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)) kconsole_scroll_up();
         else sync_input_grid_down();
     }
 
-    if (cp == '\n'){
+    if (cp == '\n')
+    {
         current_tty->cursor_x = 0;
         current_tty->cursor_y += current_tty->cell_h;
         if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)) kconsole_scroll_up();
@@ -564,11 +480,17 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color){
         return;
     }
 
-    if (cp == '\r'){ current_tty->cursor_x = 0; return; }
+    if (cp == '\r')
+    {
+        current_tty->cursor_x = 0;
+        return;
+    }
 
-    if (cp == '\t'){
+    if (cp == '\t')
+    {
         current_tty->cursor_x += 4 * current_tty->cell_w;
-        if (current_tty->cursor_x >= (current_tty->console_cols * current_tty->cell_w)){
+        if (current_tty->cursor_x >= (current_tty->console_cols * current_tty->cell_w))
+        {
             current_tty->cursor_x = 0;
             current_tty->cursor_y += current_tty->cell_h;
             if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)) kconsole_scroll_up();
@@ -581,23 +503,27 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color){
     uint32_t cell_y = current_tty->cursor_y / current_tty->cell_h;
     uint32_t cell_bg = console_bg_active ? console_bgcolor : 0xFFFFFFFF;
 
-    if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols){
+    if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
+    {
         current_tty->matrix[cell_y][cell_x].codepoint = cp;
         current_tty->matrix[cell_y][cell_x].color = color;
         current_tty->matrix[cell_y][cell_x].bg = cell_bg;
     }
 
     //заливка фона до глифа
-    if (cell_bg != 0xFFFFFFFF && fb && fb->fill_rect){
+    if (cell_bg != 0xFFFFFFFF && fb && fb->fill_rect)
+    {
         fb->fill_rect(current_tty->cursor_x, current_tty->cursor_y,
-                  current_tty->cell_w, current_tty->cell_h, cell_bg);
+                      current_tty->cell_w, current_tty->cell_h, cell_bg);
     }
 
-    if (fb && fb->draw_codepoint){
+    if (fb && fb->draw_codepoint)
+    {
         fb->draw_codepoint(current_tty->cursor_x, current_tty->cursor_y, cp, color);
     }
     current_tty->cursor_x += current_tty->cell_w;
-    if (current_tty->cursor_x >= (current_tty->console_cols * current_tty->cell_w)){
+    if (current_tty->cursor_x >= (current_tty->console_cols * current_tty->cell_w))
+    {
         current_tty->cursor_x = 0;
         current_tty->cursor_y += current_tty->cell_h;
         if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)) kconsole_scroll_up();
@@ -608,22 +534,43 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color){
 
 
 
-void kernel_stdout_write_char(char c, uint32_t color){
+void kernel_stdout_write_char(char c, uint32_t color)
+{
     if (!fb || !current_tty) return;
     uint8_t b = (uint8_t)c;
 
     //ANSI state machine — байтовый, как и раньше
-    if (ansi_state == ANSI_STATE_NORMAL){
-        if (b == 0x1B){ utf8_need = 0; ansi_state = ANSI_STATE_ESC; return; }
-    } else if (ansi_state == ANSI_STATE_ESC){
-        if (b == '['){ ansi_state = ANSI_STATE_CSI; ansi_buf_idx = 0; return; }
-        else { ansi_state = ANSI_STATE_NORMAL; }
-    } else if (ansi_state == ANSI_STATE_CSI){
-        if ((b >= '0' && b <= '9') || b == ';'){
+    if (ansi_state == ANSI_STATE_NORMAL)
+    {
+        if (b == 0x1B)
+        {
+            utf8_need = 0;
+            ansi_state = ANSI_STATE_ESC;
+            return;
+        }
+    }
+    else if (ansi_state == ANSI_STATE_ESC)
+    {
+        if (b == '[')
+        {
+            ansi_state = ANSI_STATE_CSI;
+            ansi_buf_idx = 0;
+            return;
+        }
+        else
+        {
+            ansi_state = ANSI_STATE_NORMAL;
+        }
+    }
+    else if (ansi_state == ANSI_STATE_CSI)
+    {
+        if ((b >= '0' && b <= '9') || b == ';')
+        {
             if (ansi_buf_idx < ANSI_BUF_SIZE - 1) ansi_buffer[ansi_buf_idx++] = b;
             return;
         }
-        if ((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')){
+        if ((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z'))
+        {
             parse_and_execute_ansi(b);
             ansi_state = ANSI_STATE_NORMAL;
             return;
@@ -641,20 +588,26 @@ void kernel_stdout_write_char(char c, uint32_t color){
 
 
 
-void kconsole_clear_current_line(void){
+void kconsole_clear_current_line(void)
+{
     if (!fb || !current_tty) return;
     uint32_t bg_color = console_bgcolor;
     //if (fb->get_bg){ bg_color = fb->get_bg(); }
 
     uint32_t current_row = current_tty->cursor_y / current_tty->cell_h;
-    for (uint32_t c = 0; c < current_tty->console_cols; c++){
-        if (current_row < current_tty->console_rows){
+    for (uint32_t c = 0; c < current_tty->console_cols; c++)
+    {
+        if (current_row < current_tty->console_rows)
+        {
             current_tty->matrix[current_row][c].codepoint = ' ';
         }
         //fb->draw_char(c * 8, current_tty->cursor_y, 0xDB, bg_color);
-        if (fb && fb->clear_tile) {
+        if (fb && fb->clear_tile)
+        {
             fb->clear_tile(c * current_tty->cell_w, current_tty->cursor_y, console_bgcolor);
-        } else {
+        }
+        else
+        {
             //fb->draw_char(c * current_tty->cell_w, current_tty->cursor_y, current_tty->cursor_code, console_bgcolor);
             fb->draw_codepoint(c * current_tty->cell_w, current_tty->cursor_y, current_tty->cursor_code, console_bgcolor);
         }
@@ -662,29 +615,37 @@ void kconsole_clear_current_line(void){
 }
 
 
-void kconsole_scroll_up(void){
+void kconsole_scroll_up(void)
+{
     if (!current_tty) return;
 
-    for (uint32_t r = 0; r < current_tty->console_rows - 1; r++){
-        for (uint32_t c = 0; c < current_tty->console_cols; c++){
+    for (uint32_t r = 0; r < current_tty->console_rows - 1; r++)
+    {
+        for (uint32_t c = 0; c < current_tty->console_cols; c++)
+        {
             current_tty->matrix[r][c] = current_tty->matrix[r + 1][c];
         }
     }
-    for (uint32_t c = 0; c < current_tty->console_cols; c++){
+    for (uint32_t c = 0; c < current_tty->console_cols; c++)
+    {
         current_tty->matrix[current_tty->console_rows - 1][c].codepoint = ' ';
         current_tty->matrix[current_tty->console_rows - 1][c].color = console_fgcolor;
         current_tty->matrix[current_tty->console_rows - 1][c].bg = 0xFFFFFFFF;
     }
 
     bool has_wp = (fb && fb->has_wallpaper && fb->has_wallpaper());
-    if (fb && fb->scroll_up && !has_wp){
+    if (fb && fb->scroll_up && !has_wp)
+    {
         fb->scroll_up(0, current_tty->console_rows * current_tty->cell_h, current_tty->cell_h);
-    } else {
+    }
+    else
+    {
         kconsole_redraw_screen();
     }
     //Если экран скроллится вверх из-за вывода фонового процесса,
     //мы должны подтянуть логическую сетку ввода вверх вслед за пикселями
-    if (current_tty->input_start_y > 0){
+    if (current_tty->input_start_y > 0)
+    {
         current_tty->input_start_y--;
     }
 
@@ -692,22 +653,27 @@ void kconsole_scroll_up(void){
 }
 
 
-void kconsole_redraw_screen(void){
+void kconsole_redraw_screen(void)
+{
     if (!fb || !fb->clear || !fb->draw_codepoint || !current_tty) return;
     fb->clear(console_bgcolor);
 
-    for (uint32_t r = 0; r < current_tty->console_rows; r++){
+    for (uint32_t r = 0; r < current_tty->console_rows; r++)
+    {
         uint32_t pixel_y = r * current_tty->cell_h;
-        for (uint32_t c = 0; c < current_tty->console_cols; c++){
+        for (uint32_t c = 0; c < current_tty->console_cols; c++)
+        {
             uint32_t pixel_x = c * current_tty->cell_w;
             uint32_t ch      = current_tty->matrix[r][c].codepoint;
             uint32_t cell_bg = current_tty->matrix[r][c].bg;
 
-            if (cell_bg != 0xFFFFFFFF && fb->fill_rect){                // ←
+            if (cell_bg != 0xFFFFFFFF && fb->fill_rect)                 // ←
+            {
                 fb->fill_rect(pixel_x, pixel_y,
                               current_tty->cell_w, current_tty->cell_h, cell_bg);
             }
-            if (ch != ' ' && ch != 0){
+            if (ch != ' ' && ch != 0)
+            {
                 fb->draw_codepoint(pixel_x, pixel_y, ch, current_tty->matrix[r][c].color);
             }
         }
@@ -715,19 +681,23 @@ void kconsole_redraw_screen(void){
 }
 
 
-uint32_t kconsole_get_char_at(uint32_t col, uint32_t row){
+uint32_t kconsole_get_char_at(uint32_t col, uint32_t row)
+{
     if (!current_tty || col >= current_tty->console_cols || row >= current_tty->console_rows) return 0;
     return current_tty->matrix[row][col].codepoint;
 }
 
 
-void kconsole_clear_screen(void){
+void kconsole_clear_screen(void)
+{
     if (!fb || !current_tty) return;
     load_screen_can_paint = false;
 
     uint32_t cell_bg = console_bg_active ? console_bgcolor : 0xFFFFFFFF;
-    for (uint32_t r = 0; r < current_tty->console_rows; r++){
-        for (uint32_t c = 0; c < current_tty->console_cols; c++){
+    for (uint32_t r = 0; r < current_tty->console_rows; r++)
+    {
+        for (uint32_t c = 0; c < current_tty->console_cols; c++)
+        {
             current_tty->matrix[r][c].codepoint = ' ';
             current_tty->matrix[r][c].color     = console_fgcolor;
             current_tty->matrix[r][c].bg        = cell_bg;
@@ -739,9 +709,12 @@ void kconsole_clear_screen(void){
     current_tty->input_start_y = 0;
     current_tty->line_cursor_pos = 0;
 
-    if (console_bg_active && fb->fill_rect){
+    if (console_bg_active && fb->fill_rect)
+    {
         fb->fill_rect(0, 0, boot_info->width, boot_info->height, console_bgcolor);
-    } else {
+    }
+    else
+    {
         fb->clear(console_bgcolor);
     }
 
@@ -751,60 +724,76 @@ void kconsole_clear_screen(void){
 }
 
 
-//printf for kernel
-void kprintf(const char *format, ...){
+//printf для ядра
+void kprintf(const char *format, ...)
+{
     if (!format) return;
 
     __builtin_va_list args;
     __builtin_va_start(args, format);
 
     const char *ptr = format;
-    while (*ptr != '\0') {
-        if (*ptr == '%') {
+    while (*ptr != '\0')
+    {
+        if (*ptr == '%')
+        {
             ptr++;
-            if (*ptr == 'c') {
+            if (*ptr == 'c')
+            {
                 char char_val = (char)__builtin_va_arg(args, int);
                 kernel_stdout_write_char(char_val, console_fgcolor);
             }
-            else if (*ptr == 's') {
+            else if (*ptr == 's')
+            {
                 const char *str_val = __builtin_va_arg(args, const char *);
-                if (str_val) {
-                    while (*str_val != '\0') {
+                if (str_val)
+                {
+                    while (*str_val != '\0')
+                    {
                         kernel_stdout_write_char(*str_val, console_fgcolor);
                         str_val++;
                     }
-                } else {
+                }
+                else
+                {
                     const char *null_str = "(null)";
-                    while (*null_str != '\0') {
+                    while (*null_str != '\0')
+                    {
                         kernel_stdout_write_char(*null_str, console_fgcolor);
                         null_str++;
                     }
                 }
             }
-            else if (*ptr == 'd' || *ptr == 'x' || *ptr == 'p') {
+            else if (*ptr == 'd' || *ptr == 'x' || *ptr == 'p')
+            {
                 uint32_t num_val = __builtin_va_arg(args, uint32_t);
                 char num_buf[32];
                 int i = 0;
                 uint32_t temp = num_val;
                 int base = (*ptr == 'x' || *ptr == 'p') ? 16 : 10;
 
-                if (*ptr == 'p') {
+                if (*ptr == 'p')
+                {
                     kernel_stdout_write_char('0', console_fgcolor);
                     kernel_stdout_write_char('x', console_fgcolor);
                 }
 
                 if (temp == 0) num_buf[i++] = '0';
-                while (temp > 0) {
+                while (temp > 0)
+                {
                     int r = temp % base;
                     num_buf[i++] = (r < 10) ? (r + '0') : (r - 10 + 'A');
                     temp /= base;
                 }
 
-                for (int j = i - 1; j >= 0; j--) {
+                for (int j = i - 1; j >= 0; j--)
+                {
                     kernel_stdout_write_char(num_buf[j], console_fgcolor);
                 }
             }
-        } else {
+        }
+        else
+        {
             kernel_stdout_write_char(*ptr, console_fgcolor);
         }
         ptr++;
@@ -814,8 +803,10 @@ void kprintf(const char *format, ...){
 
 
 
-void kconsole_init(void){
-    if(fb){
+void kconsole_init(void)
+{
+    if(fb)
+    {
         fb->set_bg(console_bgcolor);
         fb->set_fg(console_fgcolor);
         load_screen_can_paint = false;
@@ -823,7 +814,8 @@ void kconsole_init(void){
         load_screen_can_paint = true;
     }
 
-    for (int t = 0; t < TTY_TERMINALS_COUNT; t++) {
+    for (int t = 0; t < TTY_TERMINALS_COUNT; t++)
+    {
         tty_terminals[t].id = t;
         tty_terminals[t].copied_bytes = 0;
         tty_terminals[t].line_ready = false;
@@ -843,14 +835,17 @@ void kconsole_init(void){
         tty_terminals[t].cell_w = 8;
         tty_terminals[t].cell_h = LINE_HEIGHT;
 
-        for (uint32_t r = 0; r < CONSOLE_ROWS; r++){
-            for (uint32_t c = 0; c < CONSOLE_COLS; c++) {
+        for (uint32_t r = 0; r < CONSOLE_ROWS; r++)
+        {
+            for (uint32_t c = 0; c < CONSOLE_COLS; c++)
+            {
                 tty_terminals[t].matrix[r][c].codepoint = ' ';
                 tty_terminals[t].matrix[r][c].color = console_fgcolor;
                 tty_terminals[t].matrix[r][c].bg = 0xFFFFFFFF;
             }
         }
-        for (int i = 0; i < LINE_BUFFER_SIZE; i++) {
+        for (int i = 0; i < LINE_BUFFER_SIZE; i++)
+        {
             tty_terminals[t].line_buffer[i] = 0;
         }
     }
@@ -858,8 +853,10 @@ void kconsole_init(void){
 }
 
 
-void kconsole_reconfigure(cfg_file_t *cfg){
-    if (!cfg){
+void kconsole_reconfigure(cfg_file_t *cfg)
+{
+    if (!cfg)
+    {
         //kprintf("[ACPI] Warning: boot.cfg not found, keeping fallback theme.\n");
         return;
     }
@@ -878,16 +875,24 @@ void kconsole_reconfigure(cfg_file_t *cfg){
     //При загрузке ядра активной становится первая зарегистрированная локаль ("en" из font_vga_init),
     //находим её индекс в пуле и выставляем всем консолям TTY как стартовый
     const locale_t *active = locale_get_active();
-    if (active){
-        for (int t = 0; t < TTY_TERMINALS_COUNT; t++){
-            for (uint8_t i = 0; i < LOCALE_POOL_MAX; i++){
+    if (active)
+    {
+        for (int t = 0; t < TTY_TERMINALS_COUNT; t++)
+        {
+            for (uint8_t i = 0; i < LOCALE_POOL_MAX; i++)
+            {
                 const locale_t *l = locale_get_by_index(i);
                 if (!l) continue;
                 //Сравниваем по строковому коду локали, а не по указателю
                 const char *a = l->code;
                 const char *b = active->code;
-                while (*a && *a == *b){ a++; b++; }
-                if (*a == *b){
+                while (*a && *a == *b)
+                {
+                    a++;
+                    b++;
+                }
+                if (*a == *b)
+                {
                     tty_terminals[t].active_layout = i;
                     uint32_t cw = active->font->cell_width;
                     uint32_t ch = active->font->cell_height;
@@ -909,14 +914,18 @@ void kconsole_reconfigure(cfg_file_t *cfg){
         }
     }
 
-    if (fb){
+    if (fb)
+    {
         //Прописываем новые цвета низкоуровневому видеоадаптеру
         fb->set_bg(console_bgcolor);
         fb->set_fg(console_fgcolor);
         //Накатываем новые цвета текстовых символов на матрицы всех виртуальных консолей TTY
-        for (int t = 0; t < TTY_TERMINALS_COUNT; t++){
-            for (uint32_t r = 0; r < tty_terminals[t].console_rows; r++){
-                for (uint32_t c = 0; c < tty_terminals[t].console_cols; c++){
+        for (int t = 0; t < TTY_TERMINALS_COUNT; t++)
+        {
+            for (uint32_t r = 0; r < tty_terminals[t].console_rows; r++)
+            {
+                for (uint32_t c = 0; c < tty_terminals[t].console_cols; c++)
+                {
                     tty_terminals[t].matrix[r][c].color = console_fgcolor;
                 }
             }

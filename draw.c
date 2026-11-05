@@ -59,10 +59,13 @@ void _draw_char(unsigned int x, unsigned int y,
     uint8_t *fb_ptr = NULL;
     int has_lfb = (flags & 0x1);
 
-    if (has_lfb) {
+    if (has_lfb)
+    {
         if (lfb == 0) return;
         fb_ptr = (uint8_t *)lfb;
-    } else {
+    }
+    else
+    {
         uint32_t addr = graphics_get_fb_virt_addr();
         if (addr == 0) return;
         fb_ptr = (uint8_t *)addr;
@@ -77,10 +80,13 @@ void _draw_char(unsigned int x, unsigned int y,
     uint16_t bg_color16 = 0;
     uint8_t  bg_color8  = 0x00; // Черный для 8-бит по умолчанию
 
-    if (bpp == 16){
+    if (bpp == 16)
+    {
         fg_color16 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
         bg_color16 = ((bg_r >> 3) << 11) | ((bg_g >> 2) << 5) | (bg_b >> 3);
-    } else if (bpp == 24 || bpp == 32) {
+    }
+    else if (bpp == 24 || bpp == 32)
+    {
         fg_color32 = b | (g << 8) | (r << 16);
         bg_color32 = bg_b | (bg_g << 8) | (bg_r << 16);
     }
@@ -89,39 +95,49 @@ void _draw_char(unsigned int x, unsigned int y,
     unsigned char *glyph = font_data[c];
 
     //Построчный цикл отрисовки глифа (8 строк по 8 пикселей)
-    for (int row = 0; row < 8; row++) {
+    for (int row = 0; row < 8; row++)
+    {
         //Вычисляем указатель на начало конкретной строки на экране
         uint8_t *line_ptr = fb_ptr + ((y + row) * pitch) + (x * bytes_pp);
         unsigned char bits = glyph[row];
 
-        for (int col = 0; col < 8; col++) {
+        for (int col = 0; col < 8; col++)
+        {
             int is_fg_pixel = (bits & 0x80);
             //Если пиксель фоновый и включена прозрачность — просто пропускаем шаг
-            if (!is_fg_pixel && bg_transparent) {
+            if (!is_fg_pixel && bg_transparent)
+            {
                 line_ptr += bytes_pp;
                 bits <<= 1;
                 continue;
             }
             //Отрисовка в зависимости от битности режима
-            if (bpp == 16) {
+            if (bpp == 16)
+            {
                 *(uint16_t *)line_ptr = is_fg_pixel ? fg_color16 : bg_color16;
             }
-            else if (bpp == 32) {
+            else if (bpp == 32)
+            {
                 *(uint32_t *)line_ptr = is_fg_pixel ? fg_color32 : bg_color32;
             }
-            else if (bpp == 24) {
+            else if (bpp == 24)
+            {
                 //В 24-битном режиме адресация идет строго побайтово
-                if (is_fg_pixel) {
+                if (is_fg_pixel)
+                {
                     line_ptr[0] = b;
                     line_ptr[1] = g;
                     line_ptr[2] = r;
-                } else {
+                }
+                else
+                {
                     line_ptr[0] = bg_b;
                     line_ptr[1] = bg_g;
                     line_ptr[2] = bg_r;
                 }
             }
-            else {// 8 bit Indexed
+            else  //8 bit Indexed
+            {
                 *line_ptr = is_fg_pixel ? fg_color8 : bg_color8;
             }
 
@@ -132,14 +148,17 @@ void _draw_char(unsigned int x, unsigned int y,
 }
 
 
-void draw_char(unsigned int x, unsigned int y, unsigned char c){
+void draw_char(unsigned int x, unsigned int y, unsigned char c)
+{
     _draw_char(x,y,c,0xFF,0xFF,0xFF,1,0,0,0);
 }
 
 
 //Рисование строки
-void draw_string(unsigned int x, unsigned int y, const char *str){
-    while (*str){
+void draw_string(unsigned int x, unsigned int y, const char *str)
+{
+    while (*str)
+    {
         draw_char(x, y, *str);
         x += 8;
         str++;
@@ -148,7 +167,8 @@ void draw_string(unsigned int x, unsigned int y, const char *str){
 
 
 //Заливка экрана цветом (RGB)
-void fill_screen(unsigned char r, unsigned char g, unsigned char b) {
+void fill_screen(unsigned char r, unsigned char g, unsigned char b)
+{
     if (!boot_info) return;
     uint32_t lfb = boot_info->framebuffer;
     uint32_t width = boot_info->width;
@@ -164,15 +184,19 @@ void fill_screen(unsigned char r, unsigned char g, unsigned char b) {
 
     uint32_t addr = 0;
 
-    if (has_lfb) {
+    if (has_lfb)
+    {
         //Режим 1 - LFB активен, используем прямой адрес
         if (lfb == 0) return; //Ошибка инициализации
         fb_ptr = (uint8_t *)lfb;
-    } else {
+    }
+    else
+    {
         //Режим 2 - LFB нет, используем UMA fallback
 
         addr = graphics_get_fb_virt_addr();
-        if (addr == 0) {
+        if (addr == 0)
+        {
             com_puts("[FILL_SCREEN] ERROR: Framebuffer address is 0!\n");
             return;
         }
@@ -192,12 +216,18 @@ void fill_screen(unsigned char r, unsigned char g, unsigned char b) {
     }
 
     if (bpp == 0 || bpp > 32) bpp = 16; // Защита
-    com_puts("[FILL] Addr: "); com_puthex(addr);
-    com_puts(" W: "); com_puthex(width);
-    com_puts(" H: "); com_puthex(height);
-    com_puts(" Pitch: "); com_puthex(pitch);
-    com_puts(" BPP: "); com_puthex(bpp);
-    com_puts(" Bytes PP: "); com_puthex(bytes_pp);
+    com_puts("[FILL] Addr: ");
+    com_puthex(addr);
+    com_puts(" W: ");
+    com_puthex(width);
+    com_puts(" H: ");
+    com_puthex(height);
+    com_puts(" Pitch: ");
+    com_puthex(pitch);
+    com_puts(" BPP: ");
+    com_puthex(bpp);
+    com_puts(" Bytes PP: ");
+    com_puthex(bytes_pp);
     com_puts("\n");
 
     //Подготовка цветов
@@ -205,39 +235,54 @@ void fill_screen(unsigned char r, unsigned char g, unsigned char b) {
     uint32_t color_32 = 0;
     uint8_t color_8 = 0xFF;
 
-    if (bpp == 16){
+    if (bpp == 16)
+    {
         //RGB565
         color_16 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-    } else if (bpp == 24 || bpp == 32){
+    }
+    else if (bpp == 24 || bpp == 32)
+    {
         //BGR Little Endian
         color_32 = b | (g << 8) | (r << 16);
     }
 
     //Цикл отрисовки
-    for (uint32_t y = 0; y < height; y++){
+    for (uint32_t y = 0; y < height; y++)
+    {
         uint8_t *line = fb_ptr + (y * pitch);
 
-        if (bpp == 16){
+        if (bpp == 16)
+        {
             uint16_t *ptr = (uint16_t *)line;
-            for (uint32_t x = 0; x < width; x++){
+            for (uint32_t x = 0; x < width; x++)
+            {
                 ptr[x] = color_16;
             }
-        } else if (bpp == 32){
+        }
+        else if (bpp == 32)
+        {
             uint32_t *ptr = (uint32_t *)line;
-            for (uint32_t x = 0; x < width; x++){
+            for (uint32_t x = 0; x < width; x++)
+            {
                 ptr[x] = color_32;
             }
-        } else if (bpp == 24){
+        }
+        else if (bpp == 24)
+        {
             uint8_t *ptr = line;
-            for (uint32_t x = 0; x < width; x++){
+            for (uint32_t x = 0; x < width; x++)
+            {
                 ptr[0] = b;
                 ptr[1] = g;
                 ptr[2] = r;
                 ptr += 3;
             }
-        } else {
-            // 8 bit
-            for (uint32_t x = 0; x < width; x++){
+        }
+        else
+        {
+            //8 bit
+            for (uint32_t x = 0; x < width; x++)
+            {
                 line[x] = color_8;
             }
         }
@@ -248,7 +293,8 @@ void fill_screen(unsigned char r, unsigned char g, unsigned char b) {
 
 //Низкоуровневая заливка прямоугольника через LFB из boot_info
 //Используется как fallback, когда fb-драйвер ещё не загружен
-static void _fill_rect_raw(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color){
+static void _fill_rect_raw(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color)
+{
     if (!boot_info) return;
     uint32_t scr_w = boot_info->width;
     uint32_t scr_h = boot_info->height;
@@ -267,10 +313,13 @@ static void _fill_rect_raw(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint3
     if (w == 0 || h == 0) return;
 
     uint8_t *fb_ptr;
-    if (flags & 0x1){
+    if (flags & 0x1)
+    {
         if (lfb == 0) return;
         fb_ptr = (uint8_t *)lfb;
-    } else {
+    }
+    else
+    {
         uint32_t addr = graphics_get_fb_virt_addr();
         if (addr == 0) return;
         fb_ptr = (uint8_t *)addr;
@@ -280,33 +329,45 @@ static void _fill_rect_raw(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint3
     uint16_t color16 = 0;
     uint8_t  color8  = (uint8_t)(color & 0xFF);
 
-    if (bpp == 16){
+    if (bpp == 16)
+    {
         color16 = (uint16_t)((((color >> 19) & 0x1F) << 11) |
                              (((color >> 10) & 0x3F) <<  5) |
                              ( ((color >>  3) & 0x1F)      ));
-    } else if (bpp == 24 || bpp == 32){
+    }
+    else if (bpp == 24 || bpp == 32)
+    {
         uint8_t r = (color >> 16) & 0xFF;
         uint8_t g = (color >>  8) & 0xFF;
         uint8_t b =  color        & 0xFF;
         color32 = b | (g << 8) | (r << 16);
     }
 
-    for (uint32_t row = 0; row < h; row++){
+    for (uint32_t row = 0; row < h; row++)
+    {
         uint8_t *line = fb_ptr + (y + row) * pitch + x * bytes_pp;
-        if (bpp == 32){
+        if (bpp == 32)
+        {
             uint32_t *p = (uint32_t *)line;
             for (uint32_t i = 0; i < w; i++) p[i] = color32;
-        } else if (bpp == 24){
-            for (uint32_t i = 0; i < w; i++){
+        }
+        else if (bpp == 24)
+        {
+            for (uint32_t i = 0; i < w; i++)
+            {
                 line[0] =  color        & 0xFF;
                 line[1] = (color >>  8) & 0xFF;
                 line[2] = (color >> 16) & 0xFF;
                 line += 3;
             }
-        } else if (bpp == 16){
+        }
+        else if (bpp == 16)
+        {
             uint16_t *p = (uint16_t *)line;
             for (uint32_t i = 0; i < w; i++) p[i] = color16;
-        } else {
+        }
+        else
+        {
             for (uint32_t i = 0; i < w; i++) line[i] = color8;
         }
     }
@@ -314,25 +375,33 @@ static void _fill_rect_raw(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint3
 
 //Публичная заливка - через fb-драйвер, если он есть, иначе — через raw LFB.
 //Цвет в формате 0x00RRGGBB, как у fb->fill_rect.
-void kernel_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color){
-    if (fb && fb->fill_rect){
+void kernel_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color)
+{
+    if (fb && fb->fill_rect)
+    {
         fb->fill_rect((int)x, (int)y, (int)w, (int)h, color);
-    } else {
+    }
+    else
+    {
         _fill_rect_raw(x, y, w, h, color);
     }
 }
 
 
 
-void kernel_draw_char(uint32_t x,uint32_t y,unsigned char c,uint32_t color){
-    if(fb && fb->draw_char){
+void kernel_draw_char(uint32_t x,uint32_t y,unsigned char c,uint32_t color)
+{
+    if(fb && fb->draw_char)
+    {
         fb->draw_char(x,y,c,color);
     }
 }
 
 
-void kernel_fill_screen(uint32_t color){
-    if(fb && fb->clear){
+void kernel_fill_screen(uint32_t color)
+{
+    if(fb && fb->clear)
+    {
         fb->clear(color);
     }
 }
@@ -343,33 +412,43 @@ void kernel_fill_screen(uint32_t color){
 //Всё, что приходит, конвертируется в CP866-байты для _draw_char.
 //Это низкоуровневый путь для ранних паник; после init_drivers() сюда
 //попасть уже нельзя — fb->draw_string уйдёт в font_draw_codepoint.
-void kernel_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t color){
-    if (fb && fb->draw_string){
+void kernel_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t color)
+{
+    if (fb && fb->draw_string)
+    {
         fb->draw_string(x, y, str, color);
-    } else {
+    }
+    else
+    {
         //Драйвер фреймбуфера еще не загружен. Используем низкоуровневую функцию _draw_char(),
         //которая пишет напрямую по физическому адресу LFB из boot_info.
         //Добавляем локальный автомат UTF-8 -> CP866, чтобы ранняя отладка кириллицы работала
         uint8_t lead_byte = 0;
-        while (*str){
+        while (*str)
+        {
             uint8_t b = (uint8_t)*str;
             //Ловим стартовый байт русской буквы в UTF-8
-            if (b == 0xD0 || b == 0xD1){
+            if (b == 0xD0 || b == 0xD1)
+            {
                 lead_byte = b;
                 str++;
                 continue;
             }
             //Если есть сохраненный стартовый байт — транслируем кириллицу в CP866
-            if (lead_byte != 0){
+            if (lead_byte != 0)
+            {
                 uint8_t cp866_char = ' ';
-                if (lead_byte == 0xD0){
-                    if (b >= 0x90 && b <= 0xBF){
+                if (lead_byte == 0xD0)
+                {
+                    if (b >= 0x90 && b <= 0xBF)
+                    {
                         if (b <= 0xAF) cp866_char = b - 0x90 + 0x80;
                         else           cp866_char = b - 0xB0 + 0xA0;
                     }
                     else if (b == 0x81) cp866_char = 0xF0; //'Ё'
                 }
-                else if (lead_byte == 0xD1){
+                else if (lead_byte == 0xD1)
+                {
                     if (b >= 0x80 && b <= 0x8F)  cp866_char = b - 0x80 + 0xE0;
                     else if (b == 0x91)          cp866_char = 0xF1; //'ё'
                 }

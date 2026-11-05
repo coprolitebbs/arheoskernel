@@ -18,12 +18,13 @@
 #ifndef SEKHMET_H
 #define SEKHMET_H
 
-/* ---------- aliases ---------- */
+//Алиасы
 #define MAX_ALIASES     64
 #define ALIAS_NAME_LEN  32
 #define ALIAS_CMD_LEN   128
 
-typedef struct {
+typedef struct
+{
     char name[ALIAS_NAME_LEN];
     char cmd [ALIAS_CMD_LEN];
 } alias_t;

@@ -25,7 +25,8 @@
 //ASCII-диапазон 0x00..0x7F мапится как есть, остальное — по таблице
 //0 означает "нет отображения, глиф пропустить"
 
-static const uint16_t cp866_upper[128] = {
+static const uint16_t cp866_upper[128] =
+{
     //0x80..0x8F: А Б В Г Д Е Ж З И Й К Л М Н О П
     0x0410, 0x0411, 0x0412, 0x0413, 0x0414, 0x0415, 0x0416, 0x0417,
     0x0418, 0x0419, 0x041A, 0x041B, 0x041C, 0x041D, 0x041E, 0x041F,
@@ -57,7 +58,8 @@ static const uint16_t cp866_upper[128] = {
 static font_glyph_t g_vga_glyphs[VGA_GLYPH_MAX];
 static uint32_t g_vga_glyph_count;
 
-static font_t g_vga_font = {
+static font_t g_vga_font =
+{
     .name          = "vga-8x8",
     .cell_width    = 8,
     .cell_height   = 8,
@@ -68,7 +70,8 @@ static font_t g_vga_font = {
 };
 
 
-void font_vga_init(void){
+void font_vga_init(void)
+{
     font_registry_init();
     locale_registry_init();
 
@@ -76,7 +79,8 @@ void font_vga_init(void){
     g_vga_font.glyph_count = 0;
     g_vga_font.fallback    = 0;
 
-    for (uint32_t b = 0; b < 256; b++){
+    for (uint32_t b = 0; b < 256; b++)
+    {
         uint32_t cp = (b < 0x80) ? b : cp866_upper[b - 0x80];
         if (cp == 0) continue;
 
@@ -89,8 +93,10 @@ void font_vga_init(void){
     g_vga_font.glyph_count = g_vga_glyph_count;
 
     //Fallback — квадратик U+25A0. Он гарантированно есть в таблице
-    for (uint32_t i = 0; i < g_vga_glyph_count; i++){
-        if (g_vga_glyphs[i].codepoint == 0x25A0){
+    for (uint32_t i = 0; i < g_vga_glyph_count; i++)
+    {
+        if (g_vga_glyphs[i].codepoint == 0x25A0)
+        {
             g_vga_font.fallback = &g_vga_glyphs[i];
             break;
         }
@@ -107,7 +113,8 @@ void font_vga_init(void){
 }
 
 
-void init_standard_locales(void){
+void init_standard_locales(void)
+{
     locale_alloc("en", "English",&g_vga_font);
     locale_alloc("ru", "Русский",&g_vga_font);
 

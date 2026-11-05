@@ -45,15 +45,16 @@ extern int ready_queue_count;
 extern void switch_task(uint32_t new_esp);
 
 //Структура задачи
-typedef struct task{
+typedef struct task
+{
 
     uint32_t pid;
 
     uint32_t state;
 
-	uint32_t type;
+    uint32_t type;
 
-	uint32_t parameter;
+    uint32_t parameter;
 
     struct task *next;
 
@@ -64,23 +65,23 @@ typedef struct task{
     uint32_t esp;
 
     uint32_t user_stack;
-	uint32_t user_stack_phys;
+    uint32_t user_stack_phys;
 
-	uint32_t kernel_stack;
-	uint32_t kernel_stack_phys;
+    uint32_t kernel_stack;
+    uint32_t kernel_stack_phys;
 
-	uint32_t heap_next;
+    uint32_t heap_next;
 
-	vm_page_t *vm_pages;
+    vm_page_t *vm_pages;
 
-	uint32_t wait_reason;
+    uint32_t wait_reason;
 
-	uint32_t tty_flags;
+    uint32_t tty_flags;
 
-	//Локальная таблица дескрипторов процесса (потоки)
-	int fds[MAX_PROCESS_FDS];
+    //Локальная таблица дескрипторов процесса (потоки)
+    int fds[MAX_PROCESS_FDS];
 
-	char cwd[PATH_LEN_MAX];
+    char cwd[PATH_LEN_MAX];
 
 } task_t;
 
@@ -126,15 +127,11 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
 task_t* task_spawn_from_file(const char *path, uint32_t entry_virt, const char *cmdline);
 task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, const char *cmdline);
 
-/*Распространить только что созданный kernel-PDE
-   во все user-PD из ready_queue. */
+//Распространить только что созданный kernel-PDE во все user-PD из ready_queue
 void task_mirror_kernel_pde(uint32_t pd_index);
 
-/* Реализуется в task.c. Распространить PTE из critical PDE во все user-PD,
-   у которых в этом PDE свежая копия PT. */
+//Реализуется в task.c. Распространить PTE из critical PDE во все user-PD, у которых в этом PDE свежая копия PT
 void task_propagate_kernel_pte(uint32_t pd_index, uint32_t pt_index, uint32_t pte_val);
-
-
 
 task_t* create_kernel_thread(uint32_t entry_virt);
 void kernel_init_thread(void);

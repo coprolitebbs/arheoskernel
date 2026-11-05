@@ -22,7 +22,8 @@
 
 
 //Внутренние функции
-uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset){
+uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset)
+{
     //Вычисляем адрес по спецификации PCI Configuration Mechanism #1
     uint32_t address = (1UL << 31) |
                        ((uint32_t)bus << 16) |
@@ -40,8 +41,10 @@ uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t 
 //Внешние функции
 
 //Бип
-void beep(uint32_t count) {
-    for (uint32_t i = 0; i < count; i++) {
+void beep(uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++)
+    {
         //Включаем динамик (биты 0 и 1 в порту 0x61)
         outb(0x61, inb(0x61) | 3);
         // Задержка (длина звука)
@@ -54,16 +57,19 @@ void beep(uint32_t count) {
 }
 
 
-uint32_t enumerate_pci_ven_dev_ids(void){
+uint32_t enumerate_pci_ven_dev_ids(void)
+{
     uint32_t res = 0;
     int cnt = 0;
 
-    for (uint8_t slot = 0; slot < 32; slot++){
+    for (uint8_t slot = 0; slot < 32; slot++)
+    {
         uint32_t id = pci_read_config_dword(0, slot, 0, 0x00);
         uint16_t vendor = id & 0xFFFF;
         uint16_t device = id >> 16;
 
-        if(vendor != 0x0000FFFF && device != 0x0000FFFF){
+        if(vendor != 0x0000FFFF && device != 0x0000FFFF)
+        {
             com_puts("[KERNEL] Found PCI device: Num: ");
             com_puthex(slot);
             com_puts(" vendorid: ");
@@ -76,7 +82,8 @@ uint32_t enumerate_pci_ven_dev_ids(void){
         }
 
         // Vendor ID S3 = 0x5333, Device ID Trio64 = 0x8811
-        if (res == 0 && vendor == 0x5333 && device == 0x8811){
+        if (res == 0 && vendor == 0x5333 && device == 0x8811)
+        {
             uint32_t bar0 = pci_read_config_dword(0, slot, 0, 0x10);
             res =  bar0 & 0xFFFFFFF0; // Отсекаем флаги PCI, получаем физ. адрес
         }
@@ -88,7 +95,8 @@ uint32_t enumerate_pci_ven_dev_ids(void){
 //с целевым железом (плата TA-NC529V3 со встроенным видео), пришлось добавлять в настройках
 //карту [PCI] S3 Trio64 и делать отдельно поиск ее адреса по PCI и определение адреса
 //фреймбуффера
-void find_and_prepare_s3_trio64(void){
+void find_and_prepare_s3_trio64(void)
+{
     uint32_t s3a = enumerate_pci_ven_dev_ids();
     if(s3a == 0) return;
     //Разблокировка регистров S3 TRIO64

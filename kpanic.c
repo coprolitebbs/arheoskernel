@@ -23,15 +23,13 @@
 
 
 
-/*
- * Рисует по центру экрана окошко "Kernel Panic" с тенью, рамкой,
- * красной шапкой и списком пар "LABEL: 0xXXXXXXXX".
- *
- * Работает и через fb-драйвер, и через boot_info LFB (ранние стадии).
- * Если boot_info == 0 или экран не инициализирован — тихо ничего не рисует,
- * вызывающий всё равно попадает в for(;;).
- */
-void draw_kernel_panic(const char *title, const panic_field_t *fields, uint32_t count){
+//Рисует по центру экрана окошко "Kernel Panic" с тенью, рамкой,
+//красной шапкой и списком пар "LABEL: 0xXXXXXXXX"
+//Работает и через fb-драйвер, и через boot_info LFB (ранние стадии).
+//Если boot_info == 0 или экран не инициализирован — тихо ничего не рисует,
+//вызывающий всё равно попадает в for(;;).
+void draw_kernel_panic(const char *title, const panic_field_t *fields, uint32_t count)
+{
     if (!boot_info) return;
     uint32_t scr_w = boot_info->width;
     uint32_t scr_h = boot_info->height;
@@ -51,7 +49,8 @@ void draw_kernel_panic(const char *title, const panic_field_t *fields, uint32_t 
 
     //Длина самой длинной строки "LABEL: 0xXXXXXXXX" в символах
     uint32_t max_field_len = 0;
-    for (uint32_t i = 0; i < count; i++){
+    for (uint32_t i = 0; i < count; i++)
+    {
         uint32_t l = 0;
         while (fields[i].label[l]) l++;
         if (l + 12 > max_field_len) max_field_len = l + 12;
@@ -103,7 +102,8 @@ void draw_kernel_panic(const char *title, const panic_field_t *fields, uint32_t 
     uint32_t body_x = box_x + pad_x;
     uint32_t body_y = box_y + title_h + pad_y;
 
-    for (uint32_t i = 0; i < count; i++){
+    for (uint32_t i = 0; i < count; i++)
+    {
         uint32_t l = 0;
         while (fields[i].label[l]) l++;
 

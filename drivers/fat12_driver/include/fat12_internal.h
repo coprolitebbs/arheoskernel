@@ -27,7 +27,8 @@
 #define FAT12_FD_FILE  1
 #define FAT12_FD_DIR   2
 
-typedef struct __attribute__((packed)){
+typedef struct __attribute__((packed))
+{
     char     name[11];
     uint8_t  attr;
     uint8_t  nt_reserved;
@@ -40,7 +41,8 @@ typedef struct __attribute__((packed)){
     uint16_t modify_date;
     uint16_t cluster_low;
     uint32_t size;
-} __attribute__((packed)) fat12_dirent_t;
+}
+__attribute__((packed)) fat12_dirent_t;
 
 _Static_assert(sizeof(fat12_dirent_t) == 32, "bad FAT dirent size");
 
@@ -54,7 +56,8 @@ _Static_assert(sizeof(fat12_dirent_t) == 32, "bad FAT dirent size");
 //   0x00 - первый floppy
 //   0x01 - второй floppy
 
-typedef struct{
+typedef struct
+{
     uint32_t id;
     uint32_t mounted;
     // BIOS drive number:
@@ -96,7 +99,8 @@ typedef struct{
 
 
 
-typedef struct{
+typedef struct
+{
     uint32_t used;
 
     fat12_fs_t *vol;

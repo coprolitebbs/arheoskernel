@@ -172,6 +172,131 @@ int usb_set_configuration(usb_hc_t *hc, uint8_t addr, uint8_t cfg_val)
 }
 
 
+//---------------- Хабы (USB class 09) ----------------
+//Порт-ориентированные class-запросы (USB 2.0 spec §11.24):
+//  GET_STATUS(port)  : bmRequestType=0xA3 wValue=0 wIndex=port -> 4 байта
+//                      (wPortStatus, wPortChange)
+//  SET_FEATURE       : bmRequestType=0x23, wValue = селектор фичи
+//  CLEAR_FEATURE     : bmRequestType=0x23
+//Селекторы фич порта (include/uapi/linux/usb/ch11.h):
+//  PORT_RESET=4, PORT_POWER=8; C_PORT_CONNECTION=16(0x10), C_PORT_RESET=20(0x14)
+//Биты wPortStatus: bit0 CONNECTION, bit1 ENABLE, bit4 RESET,
+//                  bit8 POWER, bit9 LOW_SPEED, bit10 HIGH_SPEED
+//Биты wPortChange: bit0 C_CONNECTION, bit4 C_RESET
+
+#define HUB_REQ_GET_STATUS   0x00
+#define HUB_REQ_CLEAR_FEAT   0x01
+#define HUB_REQ_SET_FEAT     0x03
+
+#define HUB_FEAT_PORT_RESET        4
+#define HUB_FEAT_C_PORT_CONNECTION 16
+#define HUB_FEAT_C_PORT_RESET      20
+
+#define HUB_ST_CONNECTION 0x0001
+#define HUB_ST_RESET      0x0010
+#define HUB_ST_LOW_SPEED  0x0200
+#define HUB_ST_HIGH_SPEED 0x0400
+#define HUB_CH_C_RESET    0x0010
+
+//Класс-запрос к порту/устройству хаба. Возвращает 0 при успехе.
+static int hub_class_ctrl(usb_hc_t *hc, uint8_t hub_addr,
+                          uint8_t bm_req, uint8_t b_req,
+                          uint16_t w_value, uint16_t w_index,
+                          void *buf, uint16_t len)
+{
+    uint8_t setup[8] =
+    {
+        bm_req,
+        b_req,
+        (uint8_t)(w_value & 0xFF), (uint8_t)(w_value >> 8),
+        (uint8_t)(w_index & 0xFF), (uint8_t)(w_index >> 8),
+        (uint8_t)(len & 0xFF),     (uint8_t)(len >> 8)
+    };
+    int in = (bm_req & 0x80) ? 1 : 0;
+    int r = usb_hc_control_transfer(hc, hub_addr, setup, buf, len, in, 8);
+    return (r == (int)len) ? 0 : -1;
+}
+
+//Прочитать Hub Descriptor (class 0x29), узнать число нижних портов
+int usb_hub_probe(usb_hc_t *hc, uint8_t hub_addr, uint8_t *nports_out)
+{
+    if (!hc || !nports_out) return -1;
+    uint8_t hd[8];
+    memset(hd, 0, sizeof(hd));
+    //GET_DESCRIPTOR: class, device-recipient; wValue = (0x29 << 8) | index
+    if (hub_class_ctrl(hc, hub_addr, 0xA0, USB_REQ_GET_DESCRIPTOR,
+                       0x2900u, 0, hd, 8) != 0) return -2;
+    if (hd[1] != 0x29) return -3;          //не Hub Descriptor
+    if (hd[2] == 0 || hd[2] > 15) return -4;
+    *nports_out = hd[2];
+    return 0;
+}
+
+int usb_hub_port_connected(usb_hc_t *hc, uint8_t hub_addr, uint8_t port)
+{
+    uint8_t st[4];
+    memset(st, 0, sizeof(st));
+    if (hub_class_ctrl(hc, hub_addr, 0xA3, HUB_REQ_GET_STATUS,
+                       0, port, st, 4) != 0) return 0;
+    uint16_t wst = (uint16_t)(st[0] | ((uint16_t)st[1] << 8));
+    return (wst & HUB_ST_CONNECTION) ? 1 : 0;
+}
+
+//Сброс нижнего порта хаба + определение скорости. Возвращает 0 при успехе.
+int usb_hub_port_reset(usb_hc_t *hc, uint8_t hub_addr, uint8_t port,
+                       uint8_t *speed_out)
+{
+    uint8_t st[4];
+
+    //SET_FEATURE(PORT_RESET)
+    if (hub_class_ctrl(hc, hub_addr, 0x23, HUB_REQ_SET_FEAT,
+                       HUB_FEAT_PORT_RESET, port, NULL, 0) != 0) return -1;
+
+    //Ждём окончания сброса: снимется RESET в статусе или появится C_RESET.
+    //Спека: до 20 мс; даём 30 тиков (300 мс) запаса.
+    uint32_t t0 = (api_ptr && api_ptr->get_ticks) ? api_ptr->get_ticks() : 0;
+    uint16_t wst = 0;
+    for (;;){
+        memset(st, 0, sizeof(st));
+        if (hub_class_ctrl(hc, hub_addr, 0xA3, HUB_REQ_GET_STATUS,
+                           0, port, st, 4) != 0) return -2;
+        wst = (uint16_t)(st[0] | ((uint16_t)st[1] << 8));
+        uint16_t chg = (uint16_t)(st[2] | ((uint16_t)st[3] << 8));
+        if (!(wst & HUB_ST_RESET) || (chg & HUB_CH_C_RESET)) break;
+        if (api_ptr && api_ptr->get_ticks &&
+            (api_ptr->get_ticks() - t0) > 30) break;   //таймаут — выходим с тем, что есть
+    }
+
+    //Подчистить change-биты
+    hub_class_ctrl(hc, hub_addr, 0x23, HUB_REQ_CLEAR_FEAT,
+                   HUB_FEAT_C_PORT_RESET, port, NULL, 0);
+    hub_class_ctrl(hc, hub_addr, 0x23, HUB_REQ_CLEAR_FEAT,
+                   HUB_FEAT_C_PORT_CONNECTION, port, NULL, 0);
+
+    //Финальный статус: подключение + скорость
+    memset(st, 0, sizeof(st));
+    if (hub_class_ctrl(hc, hub_addr, 0xA3, HUB_REQ_GET_STATUS,
+                       0, port, st, 4) != 0) return -2;
+    wst = (uint16_t)(st[0] | ((uint16_t)st[1] << 8));
+    if (!(wst & HUB_ST_CONNECTION)) return -3;
+
+    uint8_t speed = 0;                          //FS
+    if (wst & HUB_ST_LOW_SPEED)  speed = 1;     //LS
+    else if (wst & HUB_ST_HIGH_SPEED) speed = 2;//HS
+    if (speed_out) *speed_out = speed;
+    return 0;
+}
+
+//Есть ли устройство на порту (корневом или за хабом)
+int usb_path_port_connected(usb_port_path_t *path)
+{
+    if (!path) return 0;
+    if (path->hub_addr == 0)
+        return usb_hc_port_connected(&path->hc, path->root_port);
+    return usb_hub_port_connected(&path->hc, path->hub_addr, path->hub_port);
+}
+
+
 int usb_parse_mass_storage(const void *config_buf, uint16_t total_len,
                            usb_msc_iface_t *out)
 {
@@ -231,32 +356,40 @@ int usb_parse_mass_storage(const void *config_buf, uint16_t total_len,
 }
 
 
-int usb_enumerate(usb_hc_t *hc, int port, uint8_t want_addr,
+int usb_enumerate(usb_port_path_t *path, uint8_t want_addr,
                   usb_device_desc_t *out_desc, uint8_t *out_addr)
 {
 
+    if (!path) return -10;
     if (want_addr == 0 || want_addr > 127) return -11;
 
-    //Сброс порта
-    int rp = usb_hc_port_reset(hc, port);
-    if (rp != 0) return rp;
-
-    //Определяем скорость устройства по PORTSC.
-    //UHCI: bits 4-5 (LS-line state).
-    //EHCI: bits 26-27 (PSPD: 0=FS, 1=LS, 2=HS, 3=undef).
-    uint32_t ps = usb_hc_port_status(hc, port);
+    //Сброс порта и определение скорости.
+    //Корневой порт — через PORTSC HC; порт за хабом — через class-запросы хаба.
     int is_ls = 0;
     uint8_t speed = 0;   // 0=FS, 1=LS, 2=HS
-    if (hc->type == USB_HC_UHCI){
-        is_ls = (ps & PORTSC_LSDA) ? 1 : 0;      // бит 8
-        speed = is_ls ? 1 : 0;   // UHCI: FS или LS
+    if (path->hub_addr == 0){
+        int rp = usb_hc_port_reset(&path->hc, path->root_port);
+        if (rp != 0) return rp;
+
+        //UHCI: LSDA бит 8 (QEMU/ICH) или line-status bits 4-5 (D- высокий — LS)
+        //EHCI: bits 26-27 (PSPD: 0=FS, 1=LS, 2=HS, 3=undef).
+        uint32_t ps = usb_hc_port_status(&path->hc, path->root_port);
+        if (path->hc.type == USB_HC_UHCI){
+            is_ls = ((ps & 0x0100u) || ((ps & 0x30) == 0x10)) ? 1 : 0;
+            speed = is_ls ? 1 : 0;   // UHCI: FS или LS
+        } else {
+            uint32_t pspd = (ps >> 26) & 0x3;
+            if (pspd == 1)      speed = 1;   // LS
+            else if (pspd == 2) speed = 2;   // HS
+            else                speed = 0;   // FS (в т.ч. pspd=3 → FS)
+            is_ls = (speed == 1) ? 1 : 0;
+        }
     } else {
-        uint32_t pspd = (ps >> 26) & 0x3;
-        if (pspd == 1)      speed = 1;   // LS
-        else if (pspd == 2) speed = 2;   // HS
-        else                speed = 0;   // FS (в т.ч. pspd=3 → FS)
+        int hr = usb_hub_port_reset(&path->hc, path->hub_addr, path->hub_port, &speed);
+        if (hr != 0) return (hr == -3) ? -21 : -22;
         is_ls = (speed == 1) ? 1 : 0;
     }
+    (void)is_ls;
     uhci_dev_is_ls[0]    = (uint8_t)is_ls;
     uhci_dev_is_ls[want_addr] = (uint8_t)is_ls;
     ehci_dev_speed[0]    = speed;
@@ -266,7 +399,7 @@ int usb_enumerate(usb_hc_t *hc, int port, uint8_t want_addr,
     //Устройство ещё отвечает на адрес 0
     usb_device_desc_t tmp;
     memset(&tmp, 0, sizeof(tmp));
-    if (usb_get_device_desc(hc, 0, &tmp, 8, 8) != 0) return -12;
+    if (usb_get_device_desc(&path->hc, 0, &tmp, 8, 8) != 0) return -12;
 
     if (tmp.bDeviceClass == 0x09)
     {
@@ -280,7 +413,7 @@ int usb_enumerate(usb_hc_t *hc, int port, uint8_t want_addr,
     }
 
     //SET_ADDRESS(want_addr)
-    if (usb_set_address(hc, want_addr) != 0) return -13;
+    if (usb_set_address(&path->hc, want_addr) != 0) return -13;
 
     //Пауза ≥ 2 мс после SET_ADDRESS. Используем тики (1 тик = 10 мс),
     //чтобы время было одинаковым на любой частоте CPU. Safety-net
@@ -296,7 +429,7 @@ int usb_enumerate(usb_hc_t *hc, int port, uint8_t want_addr,
     //Полный Device Descriptor (18 байт) с НОВЫМ адресом
     usb_device_desc_t full;
     memset(&full, 0, sizeof(full));
-    if (usb_get_device_desc(hc, want_addr, &full, 18, max_pkt) != 0) return -14;
+    if (usb_get_device_desc(&path->hc, want_addr, &full, 18, max_pkt) != 0) return -14;
 
     *out_desc = full;
     *out_addr = want_addr;

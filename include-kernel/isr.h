@@ -30,7 +30,8 @@ extern volatile uint8_t stdin_cancel_flag;
 //extern volatile uint32_t tty_foreground_pid;
 
 //Структура состояния регистров, передаваемая из обработчика
-struct regs{
+struct regs
+{
     uint32_t gs, fs, es, ds;
     uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax;
     uint32_t int_no, err_code;
@@ -39,7 +40,8 @@ struct regs{
 
 
 //Структура IDT
-struct idt_entry{
+struct idt_entry
+{
     uint16_t base_low;
     uint16_t sel;
     uint8_t  always0;
@@ -48,14 +50,16 @@ struct idt_entry{
 } __attribute__((packed));
 
 
-struct idt_ptr{
+struct idt_ptr
+{
     uint16_t limit;
     uint32_t base;
 } __attribute__((packed));
 
 
 
-struct ipc_message{
+struct ipc_message
+{
     uint32_t type;
 
     uint32_t arg1;

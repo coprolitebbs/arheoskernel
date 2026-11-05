@@ -26,19 +26,21 @@
 #define PCI_HOLE_START 0xC0000000ull
 
 //Структура записи E820 (для совместимости)
-struct e820_entry{
+struct e820_entry
+{
     uint64_t base;
     uint64_t length;
     uint32_t type;
     uint32_t acpi;
 } __attribute__((packed));
 
-typedef struct {
-    uint32_t total_pages;      // Всего страниц ОЗУ, найденных при старте (от GRUB)
-    uint32_t free_pages;       // Свободно физических страниц в PMM прямо сейчас
-    uint32_t used_pages;       // Занято физических страниц процессами и ядром
-    uint32_t heap_total_bytes; // Общий размер кучи ядра (kmalloc region) в байтах
-    uint32_t heap_used_bytes;  // Сколько байт кучи занято системными объектами
+typedef struct
+{
+    uint32_t total_pages;      //Всего страниц ОЗУ, найденных при старте (от GRUB)
+    uint32_t free_pages;       //Свободно физических страниц в PMM прямо сейчас
+    uint32_t used_pages;       //Занято физических страниц процессами и ядром
+    uint32_t heap_total_bytes; //Общий размер кучи ядра (kmalloc region) в байтах
+    uint32_t heap_used_bytes;  //Сколько байт кучи занято системными объектами
 } am_mem_info_t;
 
 extern uint32_t uma_video_base;

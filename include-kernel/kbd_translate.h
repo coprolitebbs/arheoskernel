@@ -28,7 +28,7 @@
 
 extern uint8_t locale_hotkey;
 
-// Возвращает:
+//Возвращает:
 // > 0 : печатный Unicode codepoint
 // = 0 : непечатное событие (модификатор, стрелка)
 uint32_t kbd_translate_event(uint32_t packed_event);

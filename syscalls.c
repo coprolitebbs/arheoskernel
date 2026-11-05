@@ -41,42 +41,51 @@
 bool shift_pressed = false;
 
 //таблица векторов системных вызовов
-syscall_vectors_table_t syscalls_table[MAX_SYSCALLS]={0};
+syscall_vectors_table_t syscalls_table[MAX_SYSCALLS]= {0};
 
-void syscall_handler(struct regs *r){
+void syscall_handler(struct regs *r)
+{
 
-    if (r->eax < MAX_SYSCALLS && syscalls_table[r->eax].func){
+    if (r->eax < MAX_SYSCALLS && syscalls_table[r->eax].func)
+    {
         syscalls_table[r->eax].func(r);
-    } else {
+    }
+    else
+    {
         r->eax = -1;//Неизвестный системный вызов
     }
 
 }
 
-uint32_t tty_get_copied_bytes(void){
+uint32_t tty_get_copied_bytes(void)
+{
     return current_tty ? current_tty->copied_bytes : 0;
 }
 
 
 
 
-void systemcall_fill_screen(struct regs *r){
+void systemcall_fill_screen(struct regs *r)
+{
     kernel_fill_screen(r->ebx);
 }
 
-void systemcall_exit(struct regs *r){
+void systemcall_exit(struct regs *r)
+{
     current_task->state = TASK_TERMINATED;
     current_task->esp = 0;
     schedule(r);
     for(;;);
 }
 
-void systemcall_yield(struct regs *r){
+void systemcall_yield(struct regs *r)
+{
     r->eax = 0;
     schedule(r);
 }
 
-void systemcall_draw_string(struct regs *r){
+void systemcall_draw_string(struct regs *r)
+{
     uint32_t x = r->ebx;
     uint32_t y = r->ecx;
     const char *user_str = (const char *)r->edx;
@@ -84,7 +93,8 @@ void systemcall_draw_string(struct regs *r){
     if (!user_str) return;
     //Проверяем валидность указателя в пространстве пользователя.
     //Строка должна лежать в границах Userspace кучи/стека (выше 0x40000000)
-    if ((uint32_t)user_str < 0x40000000){
+    if ((uint32_t)user_str < 0x40000000)
+    {
         r->eax = -1;
         return;
     }
@@ -92,22 +102,29 @@ void systemcall_draw_string(struct regs *r){
     //kernel_draw_string(x, y, user_str, color);
     char buf[256];
     int i = 0;
-    while (i < 255 && user_str[i]) { buf[i] = user_str[i]; i++; }
+    while (i < 255 && user_str[i])
+    {
+        buf[i] = user_str[i];
+        i++;
+    }
     buf[i] = 0;
     kernel_draw_string(x, y, buf, color);
     r->eax = 0;
 }
 
-void systemcall_draw_char(struct regs *r){
+void systemcall_draw_char(struct regs *r)
+{
     if(r->ebx >= boot_info->width || r->ecx >=boot_info->height) return;
-    if(fb && fb->draw_codepoint){
+    if(fb && fb->draw_codepoint)
+    {
         //fb->draw_char(r->ebx,r->ecx,(unsigned char)r->edx,r->esi);
         fb->draw_codepoint(r->ebx, r->ecx, r->edx, r->esi);
     }
 
 }
 
-void systemcall_get_fb_info(struct regs *r){
+void systemcall_get_fb_info(struct regs *r)
+{
     r->eax = boot_info->pitch;
     r->ebx = boot_info->bpp;
     r->ecx = boot_info->width;
@@ -115,11 +132,17 @@ void systemcall_get_fb_info(struct regs *r){
 }
 
 
-void systemcall_alloc_page(struct regs *r){
-    if (current_task->heap_next >= 0x7FFF0000) { r->eax = 0; return; }
+void systemcall_alloc_page(struct regs *r)
+{
+    if (current_task->heap_next >= 0x7FFF0000)
+    {
+        r->eax = 0;
+        return;
+    }
     uint32_t virt = current_task->heap_next;
     uint32_t phys = (uint32_t)pmm_alloc_page();
-    if (phys == 0) {
+    if (phys == 0)
+    {
         r->eax = 0;
         return;
     }
@@ -133,7 +156,8 @@ void systemcall_alloc_page(struct regs *r){
     //Мапим страницу
     vmm_map_page(current_task->page_dir, virt, phys, flags);
     memset((void*)virt, 0, PAGE_SIZE);
-    if (vmm_get_phys_addr(current_task->page_dir, virt) == 0){
+    if (vmm_get_phys_addr(current_task->page_dir, virt) == 0)
+    {
         /* маппинг провалился — не memset'им в никуда, откатываемся */
         pmm_free_page((void*)phys);
         r->eax = 0;
@@ -141,7 +165,8 @@ void systemcall_alloc_page(struct regs *r){
     }
     memset((void*)virt, 0, PAGE_SIZE);
 
-    if(!vm_page_add(current_task, virt, phys, flags)){
+    if(!vm_page_add(current_task, virt, phys, flags))
+    {
         vmm_unmap_page(current_task->page_dir, virt);
         pmm_free_page((void*)phys);
         vmm_switch_directory(current_task->page_dir_phys);
@@ -160,23 +185,35 @@ void systemcall_alloc_page(struct regs *r){
 }
 
 //ebx = виртуальный адрес освобождаемой страницы (virt)
-void systemcall_free_page(struct regs *r){
+void systemcall_free_page(struct regs *r)
+{
     uint32_t virt = r->ebx;
-    if ((virt & 0xFFF) != 0 || virt < 0x50000000 || virt >= 0x7FFFF000){
-        r->eax = -1; return;
+    if ((virt & 0xFFF) != 0 || virt < 0x50000000 || virt >= 0x7FFFF000)
+    {
+        r->eax = -1;
+        return;
     }
     kernel_schedule_lock = 1;
     uint32_t pd_index = virt >> 22;
     uint32_t pde = (uint32_t)current_task->page_dir[pd_index];
-    if (!(pde & PAGE_PRESENT) || (pde & 0xFFFFF000) >= 0xC0000000){
-        kernel_schedule_lock = 0; r->eax = -1; return;
+    if (!(pde & PAGE_PRESENT) || (pde & 0xFFFFF000) >= 0xC0000000)
+    {
+        kernel_schedule_lock = 0;
+        r->eax = -1;
+        return;
     }
     uint32_t phys = vmm_get_phys_addr(current_task->page_dir, virt);
-    if (phys == 0){
-        kernel_schedule_lock = 0; r->eax = -1; return;
+    if (phys == 0)
+    {
+        kernel_schedule_lock = 0;
+        r->eax = -1;
+        return;
     }
-    if (!vm_page_remove(current_task, virt)){
-        kernel_schedule_lock = 0; r->eax = -1; return;
+    if (!vm_page_remove(current_task, virt))
+    {
+        kernel_schedule_lock = 0;
+        r->eax = -1;
+        return;
     }
     // Unmap FIRST, then return phys to PMM
     vmm_unmap_page(current_task->page_dir, virt);
@@ -186,39 +223,47 @@ void systemcall_free_page(struct regs *r){
 }
 
 //SYS_OPEN (ebx = const char *path, ecx = flags_o)
-void systemcall_file_open(struct regs *r){
+void systemcall_file_open(struct regs *r)
+{
     const char *user_path = (const char *)r->ebx;
     uint32_t flags_o = r->ecx;
-    if (!user_path){
+    if (!user_path)
+    {
         r->eax = -1;
         return;
     }
     //Ищем свободный локальный слот внутри текущей задачи (начиная со слота 3)
     int local_fd = -1;
-    for (int i = 3; i < MAX_PROCESS_FDS; i++){
-        if (current_task->fds[i] == -1){
+    for (int i = 3; i < MAX_PROCESS_FDS; i++)
+    {
+        if (current_task->fds[i] == -1)
+        {
             local_fd = i;
             break;
         }
     }
-    if (local_fd == -1){
+    if (local_fd == -1)
+    {
         r->eax = -1;
         return;
     }
     //Выделяем память в куче под временный буфер пути Ring 3
     char *kernel_path = (char *)kmalloc(VFS_PATH_MAX);
-    if (!kernel_path){
+    if (!kernel_path)
+    {
         r->eax = -1;
         return;
     }
     memset(kernel_path, 0, VFS_PATH_MAX);
     //Маршалим строку из пространства пользователя в кучу ядра
-    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path[i] != '\0'; i++){
+    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path[i] != '\0'; i++)
+    {
         kernel_path[i] = user_path[i];
     }
     //Выделяем память под итоговый абсолютный каноничный путь
     char *absolute_path = (char *)kmalloc(VFS_PATH_MAX);
-    if (!absolute_path){
+    if (!absolute_path)
+    {
         kfree(kernel_path);
         r->eax = -1;
         return;
@@ -231,7 +276,8 @@ void systemcall_file_open(struct regs *r){
     global_vfs_fd = vfs_open(absolute_path, flags_o);
 
     kfree(absolute_path);
-    if (global_vfs_fd < 0){
+    if (global_vfs_fd < 0)
+    {
         r->eax = global_vfs_fd;
         return;
     }
@@ -241,44 +287,64 @@ void systemcall_file_open(struct regs *r){
 }
 
 //SYS_CLOSE (ebx = int file_d)
-void systemcall_file_close(struct regs *r){
+void systemcall_file_close(struct regs *r)
+{
     int file_d = (int)r->ebx;
-    if (file_d < 0 || file_d >= MAX_PROCESS_FDS) { r->eax = -1; return; }
+    if (file_d < 0 || file_d >= MAX_PROCESS_FDS)
+    {
+        r->eax = -1;
+        return;
+    }
     int global_fd = current_task->fds[file_d];
-    if (global_fd < 0) { r->eax = -1; return; }
+    if (global_fd < 0)
+    {
+        r->eax = -1;
+        return;
+    }
 
-    // Считаем, есть ли в других слотах процесса ссылка на тот же global_fd
+    //Считаем, есть ли в других слотах процесса ссылка на тот же global_fd
     int refs = 0;
-    for (int i = 0; i < MAX_PROCESS_FDS; i++) {
+    for (int i = 0; i < MAX_PROCESS_FDS; i++)
+    {
         if (i != file_d && current_task->fds[i] == global_fd) refs++;
     }
 
     current_task->fds[file_d] = -1;
 
-    // Реально закрываем только когда ссылок больше нет и это не std-поток
-    if (refs == 0 && global_fd > 2) {
+    //Реально закрываем только когда ссылок больше нет и это не std-поток
+    if (refs == 0 && global_fd > 2)
+    {
         r->eax = vfs_close(global_fd);
-    } else {
+    }
+    else
+    {
         r->eax = FS_OK;
     }
 }
 
 //SYS_READDIR (ebx = file_d, ecx = fs_dirent_t*)
-void systemcall_readdir(struct regs *r){
+void systemcall_readdir(struct regs *r)
+{
     int file_d = (int)r->ebx;
     fs_dirent_t *user_entry = (fs_dirent_t *)r->ecx;
-    if (!user_entry || file_d < 0 || file_d >= MAX_PROCESS_FDS){
+    if (!user_entry || file_d < 0 || file_d >= MAX_PROCESS_FDS)
+    {
         r->eax = -1;
         return;
     }
     int global_fd = current_task->fds[file_d];
-    if (global_fd < 0) { r->eax = -1; return; }
+    if (global_fd < 0)
+    {
+        r->eax = -1;
+        return;
+    }
 
     fs_dirent_t kernel_entry;
     memset(&kernel_entry, 0, sizeof(fs_dirent_t));
 
     int vfs_res = vfs_readdir(global_fd, &kernel_entry);
-    if (vfs_res != FS_OK){
+    if (vfs_res != FS_OK)
+    {
         r->eax = vfs_res;
         return;
     }
@@ -289,9 +355,11 @@ void systemcall_readdir(struct regs *r){
     user_entry->id         = kernel_entry.id;
 
     int i = 0;
-    for (i = 0; i < 255; i++){
+    for (i = 0; i < 255; i++)
+    {
         user_entry->name[i] = kernel_entry.name[i];
-        if (kernel_entry.name[i] == '\0') {
+        if (kernel_entry.name[i] == '\0')
+        {
             break;
         }
     }
@@ -299,7 +367,8 @@ void systemcall_readdir(struct regs *r){
     r->eax = FS_OK;
 }
 
-void systemcall_file_read(struct regs *r){
+void systemcall_file_read(struct regs *r)
+{
     //Непрерывные UTF-8 байты, которые не удалось отдать за один SYS_READ
     //Хранятся для следующего вызова SYS_READ от того же task'а (cooked STDIN)
     static uint8_t  cooked_pending_buf[4];
@@ -310,34 +379,64 @@ void systemcall_file_read(struct regs *r){
     void *user_buf = (void *)r->ecx;
     uint32_t count = r->edx;
 
-    if (!user_buf || count == 0){ r->eax = -1; return; }
+    if (!user_buf || count == 0)
+    {
+        r->eax = -1;
+        return;
+    }
 
     int global_fd = current_task->fds[file_d];
-    if (global_fd < 0){ r->eax = -1; return; }
+    if (global_fd < 0)
+    {
+        r->eax = -1;
+        return;
+    }
 
-    if (global_fd == 0){
-        if (!kbd_driver_api){ r->eax = -1; return; }
+    if (global_fd == 0)
+    {
+        if (!kbd_driver_api)
+        {
+            r->eax = -1;
+            return;
+        }
 
-        // ---- RAW-режим (без изменений) ----
-        if (current_task->tty_flags & TTY_KBD_RAW){
-            if (kbd_driver_api->has_chars()){
+        //RAW-режим
+        if (current_task->tty_flags & TTY_KBD_RAW)
+        {
+            if (kbd_driver_api->has_chars())
+            {
                 uint32_t packed = kbd_driver_api->get_char_blocked();
-                if (count >= 4)      { *(uint32_t*)user_buf = packed; r->eax = 4; }
-                else if (count >= 1) { *(uint8_t*)user_buf  = (uint8_t)(packed & 0xFF); r->eax = 1; }
-                else                 { r->eax = 0; }
-            } else {
+                if (count >= 4)
+                {
+                    *(uint32_t*)user_buf = packed;
+                    r->eax = 4;
+                }
+                else if (count >= 1)
+                {
+                    *(uint8_t*)user_buf  = (uint8_t)(packed & 0xFF);
+                    r->eax = 1;
+                }
+                else
+                {
+                    r->eax = 0;
+                }
+            }
+            else
+            {
                 r->eax = 0;
             }
             return;
         }
-        // ---- COOKED: сначала доставляем то, что осталось с прошлого раза ----
-        if (cooked_pending_pos < cooked_pending_len){
+        //COOKED: сначала доставляем то, что осталось с прошлого раза
+        if (cooked_pending_pos < cooked_pending_len)
+        {
             uint32_t avail = (uint32_t)(cooked_pending_len - cooked_pending_pos);
             uint32_t to_copy = (count < avail) ? count : avail;
             for (uint32_t i = 0; i < to_copy; i++)
                 ((uint8_t*)user_buf)[i] = cooked_pending_buf[cooked_pending_pos + i];
             cooked_pending_pos += (int)to_copy;
-            if (cooked_pending_pos >= cooked_pending_len){
+            if (cooked_pending_pos >= cooked_pending_len)
+            {
                 cooked_pending_pos = 0;
                 cooked_pending_len = 0;
             }
@@ -345,37 +444,54 @@ void systemcall_file_read(struct regs *r){
             return;
         }
 
-        // ---- COOKED: иначе берём новое событие из клавиатуры ----
-        while (kbd_driver_api->has_chars()){
+        //COOKED: иначе берём новое событие из клавиатуры
+        while (kbd_driver_api->has_chars())
+        {
             uint32_t packed = kbd_driver_api->get_char_blocked();
             uint32_t cp = kbd_translate_event(packed);
-            if (cp == 0) continue;   // модификатор — проглотили
+            if (cp == 0) continue;   //модификатор — проглотили
 
-            // Кодируем codepoint в UTF-8
+            //Кодируем codepoint в UTF-8
             uint8_t utf8[4];
             int n = 0;
-            if (cp < 0x80)        { utf8[n++] = (uint8_t)cp; }
-            else if (cp < 0x800)  { utf8[n++] = 0xC0 | (cp >> 6); utf8[n++] = 0x80 | (cp & 0x3F); }
-            else if (cp < 0x10000){ utf8[n++] = 0xE0 | (cp >> 12); utf8[n++] = 0x80 | ((cp >> 6) & 0x3F);
-                                utf8[n++] = 0x80 | (cp & 0x3F); }
-            else                  { utf8[n++] = 0xF0 | (cp >> 18);
-                                utf8[n++] = 0x80 | ((cp >> 12) & 0x3F);
-                                utf8[n++] = 0x80 | ((cp >> 6)  & 0x3F);
-                                utf8[n++] = 0x80 | (cp & 0x3F); }
+            if (cp < 0x80)
+            {
+                utf8[n++] = (uint8_t)cp;
+            }
+            else if (cp < 0x800)
+            {
+                utf8[n++] = 0xC0 | (cp >> 6);
+                utf8[n++] = 0x80 | (cp & 0x3F);
+            }
+            else if (cp < 0x10000)
+            {
+                utf8[n++] = 0xE0 | (cp >> 12);
+                utf8[n++] = 0x80 | ((cp >> 6) & 0x3F);
+                utf8[n++] = 0x80 | (cp & 0x3F);
+            }
+            else
+            {
+                utf8[n++] = 0xF0 | (cp >> 18);
+                utf8[n++] = 0x80 | ((cp >> 12) & 0x3F);
+                utf8[n++] = 0x80 | ((cp >> 6)  & 0x3F);
+                utf8[n++] = 0x80 | (cp & 0x3F);
+            }
 
-            // Эхо — печатаем ВЕСЬ codepoint сейчас, целиком, а не частями
-            if (current_task->tty_flags & TTY_ECHO){
+            //Эхо — печатаем весь codepoint
+            if (current_task->tty_flags & TTY_ECHO)
+            {
                 for (int i = 0; i < n; i++)
                     kernel_stdout_write_char((char)utf8[i], console_fgcolor);
             }
 
-            // Сколько сможем отдать сразу
+            //Сколько сможем отдать сразу
             uint32_t to_copy = (count < (uint32_t)n) ? count : (uint32_t)n;
             for (uint32_t i = 0; i < to_copy; i++)
                 ((uint8_t*)user_buf)[i] = utf8[i];
 
-            // Остаток кладём в pending для следующего SYS_READ
-            if (to_copy < (uint32_t)n){
+            //Остаток кладём в pending для следующего SYS_READ
+            if (to_copy < (uint32_t)n)
+            {
                 for (int i = 0; i < n - (int)to_copy; i++)
                     cooked_pending_buf[i] = utf8[to_copy + i];
                 cooked_pending_len = n - (int)to_copy;
@@ -386,17 +502,21 @@ void systemcall_file_read(struct regs *r){
             return;
         }
 
-        r->eax = 0;   // печатных данных пока нет
+        r->eax = 0;   //печатных данных пока нет
         return;
     }
 
     //Чтение обычных дисковых файлов (VFS)
     if (count > 32768) count = 32768;
     uint8_t *kernel_buf = (uint8_t *)kmalloc(count);
-    if (!kernel_buf) { r->eax = -1; return; }
+    if (!kernel_buf)
+    {
+        r->eax = -1;
+        return;
+    }
     memset(kernel_buf, 0, count);
 
-    // Читаем из честного глобального VFS описания
+    //Читаем из честного глобального VFS описания
     int bytes_read = vfs_read(global_fd, kernel_buf, count);
     if (bytes_read > 0) memcpy(user_buf, kernel_buf, bytes_read);
     kfree(kernel_buf);
@@ -406,26 +526,31 @@ void systemcall_file_read(struct regs *r){
 
 
 //SYS_WRITE (ebx = fd, ecx = буфер const void*, edx = count)
-void systemcall_file_write(struct regs *r){
+void systemcall_file_write(struct regs *r)
+{
     int fd_wr = (int)r->ebx;
     const void *user_src = (const void *)r->ecx;
     uint32_t count_wr = r->edx;
 
-    if (!user_src || count_wr == 0){
+    if (!user_src || count_wr == 0)
+    {
         r->eax = -1;
         return;
     }
 
     int global_fd = current_task->fds[fd_wr];
-    if (global_fd < 0) {
+    if (global_fd < 0)
+    {
         r->eax = -1;
         return;
     }
 
-    if (global_fd == 1 || global_fd == 2){
+    if (global_fd == 1 || global_fd == 2)
+    {
         uint32_t written_bytes = 0;
         const char *src_chars = (const char *)user_src;
-        while (written_bytes < count_wr){
+        while (written_bytes < count_wr)
+        {
             char c = src_chars[written_bytes];
             kernel_stdout_write_char(c, console_fgcolor);
             written_bytes++;
@@ -436,7 +561,8 @@ void systemcall_file_write(struct regs *r){
 
     if (count_wr > 32768) count_wr = 32768;
     char *kernel_buf_wr = (char *)kmalloc(count_wr + 1);
-    if (!kernel_buf_wr){
+    if (!kernel_buf_wr)
+    {
         r->eax = -1;
         return;
     }
@@ -457,23 +583,27 @@ void systemcall_file_write(struct regs *r){
 
 
 //SYS_MKDIR (ebx = Путь const char *path)
-void systemcall_mkdir(struct regs *r){
+void systemcall_mkdir(struct regs *r)
+{
     const char *user_path_nm = (const char *)r->ebx;
-    if (!user_path_nm){
+    if (!user_path_nm)
+    {
         r->eax = -1;
         return;
     }
     //Динамическая аллокация в куче Ring 0 для защиты 4 КБ стека ядра
     char *kernel_path_nm = (char *)kmalloc(VFS_PATH_MAX);
     char *absolute_path_nm = (char *)kmalloc(VFS_PATH_MAX);
-    if (!kernel_path_nm || !absolute_path_nm){
+    if (!kernel_path_nm || !absolute_path_nm)
+    {
         if (kernel_path_nm) kfree(kernel_path_nm);
         if (absolute_path_nm) kfree(absolute_path_nm);
         r->eax = -1;
         return;
     }
     memset(kernel_path_nm, 0, VFS_PATH_MAX);
-    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path_nm[i] != '\0'; i++){
+    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path_nm[i] != '\0'; i++)
+    {
         kernel_path_nm[i] = user_path_nm[i];
     }
     //Преобразуем относительный путь в абсолютный на базе CWD активного процесса
@@ -484,22 +614,26 @@ void systemcall_mkdir(struct regs *r){
 }
 
 
-void systemcall_file_unlink(struct regs *r){
+void systemcall_file_unlink(struct regs *r)
+{
     const char *user_path_un = (const char *)r->ebx;
-    if (!user_path_un){
+    if (!user_path_un)
+    {
         r->eax = -1;
         return;
     }
     char *kernel_path_un = (char *)kmalloc(VFS_PATH_MAX);
     char *absolute_path_un = (char *)kmalloc(VFS_PATH_MAX);
-    if (!kernel_path_un || !absolute_path_un){
+    if (!kernel_path_un || !absolute_path_un)
+    {
         if (kernel_path_un) kfree(kernel_path_un);
         if (absolute_path_un) kfree(absolute_path_un);
         r->eax = -1;
         return;
     }
     memset(kernel_path_un, 0, VFS_PATH_MAX);
-    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path_un[i] != '\0'; i++){
+    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path_un[i] != '\0'; i++)
+    {
         kernel_path_un[i] = user_path_un[i];
     }
     vfs_resolve_relative_path(kernel_path_un, absolute_path_un);
@@ -510,22 +644,26 @@ void systemcall_file_unlink(struct regs *r){
 }
 
 //SYS_RMDIR (ebx = пользовательский путь const char *path)
-void systemcall_rmdir(struct regs *r){
+void systemcall_rmdir(struct regs *r)
+{
     const char *user_path_rm = (const char *)r->ebx;
-    if (!user_path_rm){
+    if (!user_path_rm)
+    {
         r->eax = -1;
         return;
     }
     char *kernel_path_rm = (char *)kmalloc(VFS_PATH_MAX);
     char *absolute_path_rm = (char *)kmalloc(VFS_PATH_MAX);
-    if (!kernel_path_rm || !absolute_path_rm){
+    if (!kernel_path_rm || !absolute_path_rm)
+    {
         if (kernel_path_rm) kfree(kernel_path_rm);
         if (absolute_path_rm) kfree(absolute_path_rm);
         r->eax = -1;
         return;
     }
     memset(kernel_path_rm, 0, VFS_PATH_MAX);
-    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path_rm[i] != '\0'; i++){
+    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path_rm[i] != '\0'; i++)
+    {
         kernel_path_rm[i] = user_path_rm[i];
     }
     //Разрешаем относительные пути и для удаления каталогов
@@ -537,21 +675,28 @@ void systemcall_rmdir(struct regs *r){
 
 
 
-void systemcall_file_rename(struct regs *r){
+void systemcall_file_rename(struct regs *r)
+{
     const char *user_old = (const char *)r->ebx;
     const char *user_new = (const char *)r->ecx;
-    if (!user_old || !user_new){ r->eax = -1; return; }
+    if (!user_old || !user_new)
+    {
+        r->eax = -1;
+        return;
+    }
 
     char *k_old = (char *)kmalloc(VFS_PATH_MAX);
     char *k_new = (char *)kmalloc(VFS_PATH_MAX);
     char *abs_old = (char *)kmalloc(VFS_PATH_MAX);
     char *abs_new = (char *)kmalloc(VFS_PATH_MAX);
-    if (!k_old || !k_new || !abs_old || !abs_new){
+    if (!k_old || !k_new || !abs_old || !abs_new)
+    {
         if (k_old) kfree(k_old);
         if (k_new) kfree(k_new);
         if (abs_old) kfree(abs_old);
         if (abs_new) kfree(abs_new);
-        r->eax = -1; return;
+        r->eax = -1;
+        return;
     }
     memset(k_old, 0, VFS_PATH_MAX);
     memset(k_new, 0, VFS_PATH_MAX);
@@ -560,23 +705,28 @@ void systemcall_file_rename(struct regs *r){
 
     vfs_resolve_relative_path(k_old, abs_old);
     vfs_resolve_relative_path(k_new, abs_new);
-    kfree(k_old); kfree(k_new);
+    kfree(k_old);
+    kfree(k_new);
     r->eax = vfs_rename(abs_old, abs_new);
-    kfree(abs_old); kfree(abs_new);
+    kfree(abs_old);
+    kfree(abs_new);
 }
 
 //ebx = const char *path, ecx = fs_stat_t *st
-void systemcall_file_stat(struct regs *r){
+void systemcall_file_stat(struct regs *r)
+{
     const char *user_path = (const char *)r->ebx;
     fs_stat_t *user_st = (fs_stat_t *)r->ecx;
-    if (!user_path || !user_st){
+    if (!user_path || !user_st)
+    {
         r->eax = -1;
         return;
     }
     //Выделяем 4096-байтные буферы в куче ядра
     char *kernel_path = (char *)kmalloc(VFS_PATH_MAX);
     char *absolute_path = (char *)kmalloc(VFS_PATH_MAX);
-    if (!kernel_path || !absolute_path){
+    if (!kernel_path || !absolute_path)
+    {
         if (kernel_path) kfree(kernel_path);
         if (absolute_path) kfree(absolute_path);
         r->eax = -1;
@@ -584,7 +734,8 @@ void systemcall_file_stat(struct regs *r){
     }
     //Маршалим имя файла из Ring 3 памяти в кучу ядра
     memset(kernel_path, 0, VFS_PATH_MAX);
-    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path[i] != '\0'; i++){
+    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path[i] != '\0'; i++)
+    {
         kernel_path[i] = user_path[i];
     }
     //Разрешаем относительные пути и точки "." / ".."
@@ -596,7 +747,8 @@ void systemcall_file_stat(struct regs *r){
     //Запрашиваем данные у VFS и драйвера файловой системы
     int vfs_res = vfs_stat(absolute_path, &kernel_st);
     kfree(absolute_path);
-    if (vfs_res != VFS_STATUS_OK) {
+    if (vfs_res != VFS_STATUS_OK)
+    {
         r->eax = vfs_res;
         return;
     }
@@ -608,51 +760,37 @@ void systemcall_file_stat(struct regs *r){
 }
 
 
-void systemcall_file_seek(struct regs *r){
+void systemcall_file_seek(struct regs *r)
+{
     int file_d = (int)r->ebx;
     uint32_t position = r->ecx;
     int global_fd = current_task->fds[file_d];
-    if (global_fd < 0) { r->eax = -1; return; }
+    if (global_fd < 0)
+    {
+        r->eax = -1;
+        return;
+    }
     r->eax = vfs_seek(global_fd, position);
 }
 
 //Системный вызов очистки консоли TTY и фреймбуфера
-void systemcall_clear_screen(struct regs *r){
+void systemcall_clear_screen(struct regs *r)
+{
     kconsole_clear_screen();
     r->eax = 0;
 }
 
 
-/*
-void systemcall_spawn_process(struct regs *r){
+
+void systemcall_spawn_process(struct regs *r)
+{
     const char *user_path = (const char *)r->ebx;
     const char *user_cmdline = (const char *)r->ecx;
-    if (!user_path){
+    if (!user_path)
+    {
         r->eax = -1;
         return;
     }
-    //Маршалинг строк пути и командной строки из памяти Ring 3 в ядро
-    char k_path[128];
-    char k_cmdline[128];
-    memset(k_path, 0, 128);
-    memset(k_cmdline, 0, 128);
-    for (int i = 0; i < 127 && user_path[i] != '\0'; i++) k_path[i] = user_path[i];
-    if (user_cmdline) {
-        for (int i = 0; i < 127 && user_cmdline[i] != '\0'; i++) k_cmdline[i] = user_cmdline[i];
-    }
-    //Вызываем функцию загрузки бинарника с диска
-    task_t *new_task = task_spawn_from_file(k_path, 0x40000000, user_cmdline ? k_cmdline : NULL);
-    if (new_task) {
-        r->eax = new_task->pid; //Возвращаем PID созданного процесса
-    } else {
-        r->eax = -1;
-    }
-}
-*/
-void systemcall_spawn_process(struct regs *r){
-    const char *user_path = (const char *)r->ebx;
-    const char *user_cmdline = (const char *)r->ecx;
-    if (!user_path){ r->eax = -1; return; }
 
     char k_path[128];
     char k_cmdline[256];
@@ -670,7 +808,8 @@ void systemcall_spawn_process(struct regs *r){
     vfs_close(probe_fd);
     */
 
-    if (user_cmdline){
+    if (user_cmdline)
+    {
         for (int i = 0; i < 255 && user_cmdline[i] != '\0'; i++) k_cmdline[i] = user_cmdline[i];
     }
 
@@ -681,8 +820,10 @@ void systemcall_spawn_process(struct regs *r){
     bool do_out_redirect = false;
     bool do_in_redirect  = false;
 
-    for (int i = 0; k_cmdline[i] != '\0'; i++){
-        if (k_cmdline[i] == '>' && (i == 0 || k_cmdline[i-1] == ' ')){
+    for (int i = 0; k_cmdline[i] != '\0'; i++)
+    {
+        if (k_cmdline[i] == '>' && (i == 0 || k_cmdline[i-1] == ' '))
+        {
             do_out_redirect = true;
             k_cmdline[i] = '\0';
 
@@ -690,19 +831,22 @@ void systemcall_spawn_process(struct regs *r){
             while (k_cmdline[skip] == ' ' || k_cmdline[skip] == '\t') skip++;
 
             int f_idx = 0;
-            while (k_cmdline[skip] != '\0' && k_cmdline[skip] != ' ' && f_idx < 127){
+            while (k_cmdline[skip] != '\0' && k_cmdline[skip] != ' ' && f_idx < 127)
+            {
                 out_redirect_file[f_idx++] = k_cmdline[skip++];
             }
             out_redirect_file[f_idx] = '\0';
             break;
         }
-        if (k_cmdline[i] == '<' && (i == 0 || k_cmdline[i-1] == ' ')){
+        if (k_cmdline[i] == '<' && (i == 0 || k_cmdline[i-1] == ' '))
+        {
             do_in_redirect = true;
             k_cmdline[i] = '\0';
             int skip = i + 1;
             while (k_cmdline[skip] == ' ' || k_cmdline[skip] == '\t') skip++;
             int f_idx = 0;
-            while (k_cmdline[skip] != '\0' && k_cmdline[skip] != ' ' && f_idx < 127){
+            while (k_cmdline[skip] != '\0' && k_cmdline[skip] != ' ' && f_idx < 127)
+            {
                 in_redirect_file[f_idx++] = k_cmdline[skip++];
             }
             break;
@@ -710,39 +854,50 @@ void systemcall_spawn_process(struct regs *r){
     }
 
     int end_space = strlen(k_cmdline) - 1;
-    while (end_space >= 0 && (k_cmdline[end_space] == ' ' || k_cmdline[end_space] == '\t')){
+    while (end_space >= 0 && (k_cmdline[end_space] == ' ' || k_cmdline[end_space] == '\t'))
+    {
         k_cmdline[end_space--] = '\0';
     }
 
     task_t *new_task = task_spawn_from_file(k_path, 0x40000000, k_cmdline[0] != '\0' ? k_cmdline : NULL);
-    if (!new_task){ r->eax = -1; return; }
+    if (!new_task)
+    {
+        r->eax = -1;
+        return;
+    }
 
-    if (do_out_redirect && out_redirect_file[0] != '\0'){
+    if (do_out_redirect && out_redirect_file[0] != '\0')
+    {
         // Резолвим относительный путь к абсолютному на базе CWD текущего процесса
         char *abs_redirect = (char *)kmalloc(VFS_PATH_MAX);
 
-        if (abs_redirect){
+        if (abs_redirect)
+        {
             memset(abs_redirect, 0, VFS_PATH_MAX);
             vfs_resolve_relative_path(out_redirect_file, abs_redirect);
 
             int global_vfs_fd = vfs_open(abs_redirect,
-                                     FS_OPEN_CREATE | FS_OPEN_WRITE | FS_OPEN_TRUNCATE);
+                                         FS_OPEN_CREATE | FS_OPEN_WRITE | FS_OPEN_TRUNCATE);
             kfree(abs_redirect);
 
-            if (global_vfs_fd >= 0){
+            if (global_vfs_fd >= 0)
+            {
                 new_task->fds[1] = global_vfs_fd;
             }
         }
     }
 
-    if (do_in_redirect && in_redirect_file[0] != '\0'){
+    if (do_in_redirect && in_redirect_file[0] != '\0')
+    {
         char *abs_redirect = (char *)kmalloc(VFS_PATH_MAX);
-            if (abs_redirect){
+        if (abs_redirect)
+        {
             memset(abs_redirect, 0, VFS_PATH_MAX);
             vfs_resolve_relative_path(in_redirect_file, abs_redirect);
             int global_vfs_fd = vfs_open(abs_redirect, FS_OPEN_READ);
             kfree(abs_redirect);
-            if (global_vfs_fd >= 0){
+            if (global_vfs_fd >= 0)
+            {
                 new_task->fds[0] = global_vfs_fd;
             }
         }
@@ -754,24 +909,30 @@ void systemcall_spawn_process(struct regs *r){
 
 
 
-void systemcall_wait_process_with_pid(struct regs *r){
+void systemcall_wait_process_with_pid(struct regs *r)
+{
     uint32_t target_pid = r->ebx;
     r->eax = -1; //По умолчанию возвращаем ошибку (процесс не найден)
-    if (ready_queue){
+    if (ready_queue)
+    {
         task_t *start = ready_queue;
         task_t *t = start;
         bool found = false;
         //Перебираем кольцевую очередь в поисках живого дочернего процесса
-        do{
-            if (t->pid == target_pid){
+        do
+        {
+            if (t->pid == target_pid)
+            {
                 found = true;
                 break;
             }
             t = t->next;
-        } while (t != start);
+        }
+        while (t != start);
         //Если процесс найден в кольце и он еще выполняет свой код,
         //возвращаем статус PROCESS_IS_ACTIVE
-        if (found && t->state != TASK_TERMINATED){
+        if (found && t->state != TASK_TERMINATED)
+        {
             r->eax = PROCESS_IS_ACTIVE;
             return;
         }
@@ -781,18 +942,25 @@ void systemcall_wait_process_with_pid(struct regs *r){
 }
 
 
-void systemcall_isatty(struct regs *r){
+void systemcall_isatty(struct regs *r)
+{
     int fd = (int)r->ebx;
-    if (fd < 0 || fd >= MAX_PROCESS_FDS){ r->eax = 0; return; }
+    if (fd < 0 || fd >= MAX_PROCESS_FDS)
+    {
+        r->eax = 0;
+        return;
+    }
     int global_fd = current_task->fds[fd];
     // 0 = keyboard marker
     r->eax = (global_fd == 0) ? 1 : 0;
 }
 
 //ebx = am_mem_info_t *user_info
-void systemcall_get_memory_info(struct regs *r){
+void systemcall_get_memory_info(struct regs *r)
+{
     am_mem_info_t *user_info = (am_mem_info_t *)r->ebx;
-    if (!user_info){
+    if (!user_info)
+    {
         r->eax = -1;
         return;
     }
@@ -806,43 +974,52 @@ void systemcall_get_memory_info(struct regs *r){
     //Безопасно копируем собранную структуру Ring 0 в память Ring 3
     char *dst = (char *)user_info;
     char *src = (char *)&kernel_info;
-    for (uint32_t i = 0; i < sizeof(am_mem_info_t); i++){
+    for (uint32_t i = 0; i < sizeof(am_mem_info_t); i++)
+    {
         dst[i] = src[i];
     }
     r->eax = 0;
 }
 
 
-void systemcall_set_framebuffer_wallpaper(struct regs *r){
+void systemcall_set_framebuffer_wallpaper(struct regs *r)
+{
     const void *user_buf = (const void *)r->ebx;
     uint32_t size = r->ecx;
-    if (!user_buf || size == 0){
+    if (!user_buf || size == 0)
+    {
         r->eax = -1;
         return;
     }
-    if (fb && fb->set_wallpaper){
+    if (fb && fb->set_wallpaper)
+    {
         uint8_t saved = kernel_schedule_lock;
         kernel_schedule_lock = 1;
         fb->set_wallpaper(user_buf, size);
         kernel_schedule_lock = saved;
         r->eax = 0;
-    } else {
+    }
+    else
+    {
         r->eax = -1;
     }
 }
 
 //ebx = int32_t increment (приращение кучи в байтах)
-void systemcall_sbrk(struct regs *r){
+void systemcall_sbrk(struct regs *r)
+{
     int32_t increment = (int32_t)r->ebx;
     uint32_t old_heap_next = current_task->heap_next;
-    if (increment <= 0){
+    if (increment <= 0)
+    {
         r->eax = old_heap_next;
         return;
     }
     //Вычисляем, сколько страниц ОЗУ нужно выделить под этот запрос
     uint32_t pages_needed = (increment + PAGE_SIZE - 1) / PAGE_SIZE;
     //Защитный барьер кучи Ring 3 (ограничиваем 16 МБ до границы стека)
-    if (current_task->heap_next + (pages_needed * PAGE_SIZE) >= 0x7FFFF000) {
+    if (current_task->heap_next + (pages_needed * PAGE_SIZE) >= 0x7FFFF000)
+    {
         r->eax = 0;
         return;
     }
@@ -851,21 +1028,25 @@ void systemcall_sbrk(struct regs *r){
     //Принудительно загружаем физический каталог страниц текущего процесса в CR3
     vmm_switch_directory(current_task->page_dir_phys);
     bool alloc_success = true;
-    for (uint32_t i = 0; i < pages_needed; i++){
+    for (uint32_t i = 0; i < pages_needed; i++)
+    {
         uint32_t virt = current_task->heap_next;
         uint32_t phys = 0;
         //Такой же Memory Shield для защищённых sbrk массивов
-        for (int attempt = 0; attempt < 1024; attempt++){
+        for (int attempt = 0; attempt < 1024; attempt++)
+        {
             phys = (uint32_t)pmm_alloc_page();
             if (!phys) break;
             uint32_t kstack_page = current_task->kernel_stack_phys;
-            if (phys >= 0x00100000 && phys < 0xC0000000 && phys != kstack_page){
+            if (phys >= 0x00100000 && phys < 0xC0000000 && phys != kstack_page)
+            {
                 break;
             }
             pmm_free_page((void*)phys);
             phys = 0;
         }
-        if (phys == 0) {
+        if (phys == 0)
+        {
             alloc_success = false;
             break;
         }
@@ -873,7 +1054,8 @@ void systemcall_sbrk(struct regs *r){
         vmm_map_page(current_task->page_dir, virt, phys, flags);
         //Зануляем по виртуальному адресу кучи Ring 3
         memset((void*)virt, 0, PAGE_SIZE);
-        if (!vm_page_add(current_task, virt, phys, flags)){
+        if (!vm_page_add(current_task, virt, phys, flags))
+        {
             vmm_unmap_page(current_task->page_dir, virt);
             pmm_free_page((void*)phys);
             alloc_success = false;
@@ -885,12 +1067,15 @@ void systemcall_sbrk(struct regs *r){
     vmm_switch_directory(current_task->page_dir_phys);
     //Откат частичного выделения: если цикл прервался на i-й странице, у нас замаплены
     //страницы от old_heap_next до current_task->heap_next, возвращаем их PMM и откатываем heap_next
-    if (!alloc_success){
-        while (current_task->heap_next > old_heap_next){
+    if (!alloc_success)
+    {
+        while (current_task->heap_next > old_heap_next)
+        {
             current_task->heap_next -= PAGE_SIZE;
             uint32_t virt = current_task->heap_next;
             uint32_t phys = vmm_get_phys_addr(current_task->page_dir, virt);
-            if (phys != 0){
+            if (phys != 0)
+            {
                 vmm_unmap_page(current_task->page_dir, virt);
                 pmm_free_page((void*)(phys & 0xFFFFF000));
                 vm_page_remove(current_task, virt);   // ← теперь освобождает
@@ -900,28 +1085,38 @@ void systemcall_sbrk(struct regs *r){
     //Разблокируем кооперативный планировщик ядра
     kernel_schedule_lock = 0;
 
-    if (!alloc_success){
+    if (!alloc_success)
+    {
         r->eax = 0;
-    } else {
+    }
+    else
+    {
         r->eax = old_heap_next; //Возвращаем стартовый адрес выделенного региона кучи
     }
 }
 
 // ebx = const char *path
-void systemcall_chdir(struct regs *r){
+void systemcall_chdir(struct regs *r)
+{
     const char *user_path = (const char *)r->ebx;
-    if (!user_path) { r->eax = -1; return; }
+    if (!user_path)
+    {
+        r->eax = -1;
+        return;
+    }
 
     char *kernel_path = (char *)kmalloc(VFS_PATH_MAX);
     char *absolute_path = (char *)kmalloc(VFS_PATH_MAX);
-    if (!kernel_path || !absolute_path){
+    if (!kernel_path || !absolute_path)
+    {
         if (kernel_path) kfree(kernel_path);
         if (absolute_path) kfree(absolute_path);
         r->eax = -1;
         return;
     }
     memset(kernel_path, 0, VFS_PATH_MAX);
-    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path[i] != '\0'; i++){
+    for (int i = 0; i < (VFS_PATH_MAX - 1) && user_path[i] != '\0'; i++)
+    {
         kernel_path[i] = user_path[i];
     }
     vfs_resolve_relative_path(kernel_path, absolute_path);
@@ -931,7 +1126,8 @@ void systemcall_chdir(struct regs *r){
     memset(&st, 0, sizeof(st));
     int st_res = vfs_stat(absolute_path, &st);
 
-    if (st_res != VFS_STATUS_OK || !(st.attributes & FS_ATTR_DIRECTORY)){
+    if (st_res != VFS_STATUS_OK || !(st.attributes & FS_ATTR_DIRECTORY))
+    {
         kfree(absolute_path);
         r->eax = -1;
         return;
@@ -945,17 +1141,20 @@ void systemcall_chdir(struct regs *r){
 
 
 //ebx = char *buf, ecx = uint32_t max_len
-void systemcall_get_current_work_dir(struct regs *r){
+void systemcall_get_current_work_dir(struct regs *r)
+{
     char *user_buf = (char *)r->ebx;
     uint32_t max_len = r->ecx;
-    if (!user_buf || max_len == 0){
+    if (!user_buf || max_len == 0)
+    {
         r->eax = -1;
         return;
     }
     //Безопасно копируем CWD из дескриптора задачи на стек Ring 3 процесса
     uint32_t len = strlen(current_task->cwd);
     if (len >= max_len) len = max_len - 1;
-    for (uint32_t i = 0; i < len; i++){
+    for (uint32_t i = 0; i < len; i++)
+    {
         user_buf[i] = current_task->cwd[i];
     }
     user_buf[len] = '\0';
@@ -963,50 +1162,65 @@ void systemcall_get_current_work_dir(struct regs *r){
 }
 
 
-void systemcall_file_tell(struct regs *r){
+void systemcall_file_tell(struct regs *r)
+{
     int file_d = (int)r->ebx;
     int global_fd = current_task->fds[file_d];
-    if (global_fd < 0) { r->eax = -1; return; }
+    if (global_fd < 0)
+    {
+        r->eax = -1;
+        return;
+    }
     r->eax = vfs_tell(global_fd);
 }
 
 
-void systemcall_get_bootinfo_struct(struct regs *r){
+void systemcall_get_bootinfo_struct(struct regs *r)
+{
     r->eax = 0;
 }
 
 
-void systemcall_kbd_hit(struct regs *r){
-    if (kbd_driver_api && kbd_driver_api->has_chars){
+void systemcall_kbd_hit(struct regs *r)
+{
+    if (kbd_driver_api && kbd_driver_api->has_chars)
+    {
         r->eax = kbd_driver_api->has_chars(); //Вернет 1 или 0
-    } else {
+    }
+    else
+    {
         r->eax = 0;
     }
 }
 
 
-void systemcall_framebuffer_clear_tile(struct regs *r){
+void systemcall_framebuffer_clear_tile(struct regs *r)
+{
     uint32_t x = r->ebx;
     uint32_t y = r->ecx;
     uint32_t color = r->edx;
     //Если драйвер фреймбуфера загружен — вызываем его функцию fb_clear_tile, восстанавливающую кусок обоев
-    if (fb && fb->clear_tile){
+    if (fb && fb->clear_tile)
+    {
         fb->clear_tile(x, y, color);
     }
 }
 
 
-void systemcall_get_system_ticks(struct regs *r){
+void systemcall_get_system_ticks(struct regs *r)
+{
     r->eax = tick_count;
 }
 
 
-void systemcall_system_halt(struct regs *r){
+void systemcall_system_halt(struct regs *r)
+{
     //Пытаемся безопасно размонтировать VFS и проверить открытые дескрипторы
     int shutdown_res = vfs_shutdown_system();
     //Если ФС занята или драйвер отклонил umount — не выключаем ПК
     //Возвращаем код ошибки обратно пользовательской утилите
-    if (shutdown_res != HALT_SUCCESS){
+    if (shutdown_res != HALT_SUCCESS)
+    {
         r->eax = shutdown_res;
         return;
     }
@@ -1017,21 +1231,37 @@ void systemcall_system_halt(struct regs *r){
 
 
 
-void systemcall_dup2(struct regs *r){
+void systemcall_dup2(struct regs *r)
+{
     int oldfd = (int)r->ebx;
     int newfd = (int)r->ecx;
     if (oldfd < 0 || oldfd >= MAX_PROCESS_FDS ||
-        newfd < 0 || newfd >= MAX_PROCESS_FDS){ r->eax = -1; return; }
-    if (oldfd == newfd){ r->eax = newfd; return; }
+            newfd < 0 || newfd >= MAX_PROCESS_FDS)
+    {
+        r->eax = -1;
+        return;
+    }
+    if (oldfd == newfd)
+    {
+        r->eax = newfd;
+        return;
+    }
 
     int global_old_fd = current_task->fds[oldfd];
-    if (global_old_fd < 0){ r->eax = -1; return; }
+    if (global_old_fd < 0)
+    {
+        r->eax = -1;
+        return;
+    }
 
-    if (current_task->fds[newfd] >= 0) {
+    if (current_task->fds[newfd] >= 0)
+    {
         int global_new_fd = current_task->fds[newfd];
-        if (global_new_fd > 2) {
+        if (global_new_fd > 2)
+        {
             int refs = 0;
-            for (int i = 0; i < MAX_PROCESS_FDS; i++) {
+            for (int i = 0; i < MAX_PROCESS_FDS; i++)
+            {
                 if (i != newfd && current_task->fds[i] == global_new_fd) refs++;
             }
             // Закрываем только если это последняя ссылка
@@ -1043,42 +1273,55 @@ void systemcall_dup2(struct regs *r){
 }
 
 
-void systemcall_kbd_set_mode(struct regs *r){
-    if (r->ebx != 0){
+void systemcall_kbd_set_mode(struct regs *r)
+{
+    if (r->ebx != 0)
+    {
         current_task->tty_flags |= TTY_KBD_RAW;
-    } else {
+    }
+    else
+    {
         current_task->tty_flags &= ~TTY_KBD_RAW;
     }
     kbd_translate_reset();
     r->eax = 0;
 }
 
-void systemcall_tty_get_flags(struct regs *r){
+void systemcall_tty_get_flags(struct regs *r)
+{
     r->eax = current_task->tty_flags;
 }
 
-void systemcall_tty_set_flags(struct regs *r){
+void systemcall_tty_set_flags(struct regs *r)
+{
     // ebx = new_flags, ecx = mask (0 = писать все биты)
     uint32_t new_flags = r->ebx;
     uint32_t mask      = r->ecx;
     if (mask == 0) mask = 0xFFFFFFFF;
 
     current_task->tty_flags = (current_task->tty_flags & ~mask)
-                            | (new_flags & mask);
+                              | (new_flags & mask);
     kbd_translate_reset();
     r->eax = 0;
 }
 
 
-//Получить индекс активной раскладки в пуле локалей
-//0 = первая зарегистрированная (en), 1 = вторая (ru), и т. д.
+//Получить индекс активной раскладки в пуле локалей, 0 = первая зарегистрированная (en),
+//1 = вторая (ru), и т. д.
 //Возвращает -1, если пул пуст или что-то пошло не так
-void systemcall_locale_get(struct regs *r){
+void systemcall_locale_get(struct regs *r)
+{
     const locale_t *active = locale_get_active();
-    if (!active){ r->eax = -1; return; }
+    if (!active)
+    {
+        r->eax = -1;
+        return;
+    }
 
-    for (uint8_t i = 0; i < LOCALE_POOL_MAX; i++){
-        if (locale_get_by_index(i) == active){
+    for (uint8_t i = 0; i < LOCALE_POOL_MAX; i++)
+    {
+        if (locale_get_by_index(i) == active)
+        {
             r->eax = i;
             return;
         }
@@ -1087,22 +1330,40 @@ void systemcall_locale_get(struct regs *r){
 }
 
 
-// SYS_LOCALE_GET_KEYMAP (ebx = locale_keymap_t *user_buf)
-void systemcall_locale_get_keymap(struct regs *r){
+//SYS_LOCALE_GET_KEYMAP (ebx = locale_keymap_t *user_buf)
+void systemcall_locale_get_keymap(struct regs *r)
+{
     locale_keymap_t *user_buf = (locale_keymap_t *)r->ebx;
-    if (!user_buf){ r->eax = -1; return; }
-    // Та же защита, что в draw_string: не даём писать в ядерное пространство
-    if ((uint32_t)user_buf < 0x40000000){ r->eax = -1; return; }
+    if (!user_buf)
+    {
+        r->eax = -1;
+        return;
+    }
+    //Та же защита, что в draw_string: не даём писать в ядерное пространство
+    if ((uint32_t)user_buf < 0x40000000)
+    {
+        r->eax = -1;
+        return;
+    }
 
     const locale_t *active = locale_get_active();
-    if (!active){ r->eax = -1; return; }
+    if (!active)
+    {
+        r->eax = -1;
+        return;
+    }
 
-    // Собираем таблицу в локальный буфер ядра (1 КБ на стеке — многовато,
-    // лучше через kmalloc, чтобы не рисковать переполнением kernel stack)
+    //Собираем таблицу в локальный буфер ядра (1 КБ на стеке — многовато,
+    //лучше через kmalloc, чтобы не рисковать переполнением kernel stack)
     locale_keymap_t *kmap = (locale_keymap_t *)kmalloc(sizeof(locale_keymap_t));
-    if (!kmap){ r->eax = -1; return; }
+    if (!kmap)
+    {
+        r->eax = -1;
+        return;
+    }
 
-    for (int sc = 0; sc < 128; sc++){
+    for (int sc = 0; sc < 128; sc++)
+    {
         kmap->normal[sc] = locale_resolve_key(active, (uint8_t)sc, false);
         kmap->shift [sc] = locale_resolve_key(active, (uint8_t)sc, true );
     }
@@ -1116,13 +1377,19 @@ void systemcall_locale_get_keymap(struct regs *r){
 //SYS_GET_CONSOLE_GEOMETRY
 //Возвращает геометрию текстовой сетки консоли:
 //eax = cols, ebx = rows, ecx = cell_w, edx = cell_h
-void systemcall_get_console_geometry(struct regs *r){
-    if (!current_tty){
-        r->eax = 0; r->ebx = 0; r->ecx = 0; r->edx = 0;
+void systemcall_get_console_geometry(struct regs *r)
+{
+    if (!current_tty)
+    {
+        r->eax = 0;
+        r->ebx = 0;
+        r->ecx = 0;
+        r->edx = 0;
         return;
     }
     const locale_t *loc = locale_get_by_index(current_tty->active_layout);
-    if (!loc || !loc->font){
+    if (!loc || !loc->font)
+    {
         //Фоллбек на заведомо безопасный 8×8
         r->eax = current_tty->console_cols;
         r->ebx = current_tty->console_rows;
@@ -1146,8 +1413,10 @@ void systemcall_get_console_geometry(struct regs *r){
 //Полоса, освободившаяся после сдвига, заливается текущим фоном fb-драйвера
 //(тот же цвет, что console_bgcolor; редактору достаточно выставить его через
 //ANSI-последовательность или через прямой вызов set_bg до начала работы)
-void systemcall_scroll_rect(struct regs *r){
-    if (!fb || !fb->scroll_rect || !fb->get_bg){
+void systemcall_scroll_rect(struct regs *r)
+{
+    if (!fb || !fb->scroll_rect || !fb->get_bg)
+    {
         r->eax = -1;
         return;
     }
@@ -1156,10 +1425,26 @@ void systemcall_scroll_rect(struct regs *r){
     int32_t w  = (int32_t)r->edx;
     int32_t h  = (int32_t)r->esi;
     int32_t dy = (int32_t)r->edi;
-    if (x < 0 || y < 0 || w <= 0 || h <= 0){ r->eax = -1; return; }
-    if (x + w > (int32_t)boot_info->width){  r->eax = -1; return; }
-    if (y + h > (int32_t)boot_info->height){ r->eax = -1; return; }
-    if (dy == 0){ r->eax = 0; return; }
+    if (x < 0 || y < 0 || w <= 0 || h <= 0)
+    {
+        r->eax = -1;
+        return;
+    }
+    if (x + w > (int32_t)boot_info->width)
+    {
+        r->eax = -1;
+        return;
+    }
+    if (y + h > (int32_t)boot_info->height)
+    {
+        r->eax = -1;
+        return;
+    }
+    if (dy == 0)
+    {
+        r->eax = 0;
+        return;
+    }
     uint32_t fill = fb->get_bg();
     r->eax = fb->scroll_rect(x, y, w, h, dy, fill);
 }
@@ -1173,8 +1458,10 @@ void systemcall_scroll_rect(struct regs *r){
 //   esi = h
 //   edi = const void *src  (буфер в пространстве пользователя,
 //пиксели в формате текущего bpp, row-pitch = w * bytes_pp)
-void systemcall_fb_blit(struct regs *r){
-    if (!fb || !fb->blit){
+void systemcall_fb_blit(struct regs *r)
+{
+    if (!fb || !fb->blit)
+    {
         r->eax = -1;
         return;
     }
@@ -1183,65 +1470,94 @@ void systemcall_fb_blit(struct regs *r){
     int32_t w = (int32_t)r->edx;
     int32_t h = (int32_t)r->esi;
     const void *src = (const void *)r->edi;
-    if (!src){ r->eax = -1; return; }
+    if (!src)
+    {
+        r->eax = -1;
+        return;
+    }
     //Та же защита от записи в ядерное пространство, что в draw_string
-    if ((uint32_t)src < 0x40000000){ r->eax = -1; return; }
-    if (x < 0 || y < 0 || w <= 0 || h <= 0){ r->eax = -1; return; }
-    if (x + w > (int32_t)boot_info->width){  r->eax = -1; return; }
-    if (y + h > (int32_t)boot_info->height){ r->eax = -1; return; }
+    if ((uint32_t)src < 0x40000000)
+    {
+        r->eax = -1;
+        return;
+    }
+    if (x < 0 || y < 0 || w <= 0 || h <= 0)
+    {
+        r->eax = -1;
+        return;
+    }
+    if (x + w > (int32_t)boot_info->width)
+    {
+        r->eax = -1;
+        return;
+    }
+    if (y + h > (int32_t)boot_info->height)
+    {
+        r->eax = -1;
+        return;
+    }
     r->eax = fb->blit(x, y, w, h, src);
 }
 
 
-void systemcall_clipboard(struct regs *r){
+void systemcall_clipboard(struct regs *r)
+{
     uint32_t op   = r->ebx;
     uint8_t *buf  = (uint8_t *)r->ecx;
     uint32_t size = r->edx;
 
-    /* защита от user-указателей ниже user-base (кроме GET_SIZE) */
-    if (op != CLIP_OP_GET_SIZE && buf && (uint32_t)buf < 0x40000000){
+    //защита от user-указателей ниже user-base (кроме GET_SIZE)
+    if (op != CLIP_OP_GET_SIZE && buf && (uint32_t)buf < 0x40000000)
+    {
         r->eax = -1;
         return;
     }
 
-    switch (op){
-        case CLIP_OP_GET_SIZE:
-            r->eax = kernel_clipboard_get(NULL, 0);
-            break;
-        case CLIP_OP_GET:
-            r->eax = kernel_clipboard_get(buf, size);
-            break;
-        case CLIP_OP_SET:
-            kernel_clipboard_set(buf, size);
-            r->eax = 0;
-            break;
-        case CLIP_OP_CLEAR:
-            kernel_clipboard_clear();
-            r->eax = 0;
-            break;
-        default:
-            r->eax = -1;
+    switch (op)
+    {
+    case CLIP_OP_GET_SIZE:
+        r->eax = kernel_clipboard_get(NULL, 0);
+        break;
+    case CLIP_OP_GET:
+        r->eax = kernel_clipboard_get(buf, size);
+        break;
+    case CLIP_OP_SET:
+        kernel_clipboard_set(buf, size);
+        r->eax = 0;
+        break;
+    case CLIP_OP_CLEAR:
+        kernel_clipboard_clear();
+        r->eax = 0;
+        break;
+    default:
+        r->eax = -1;
     }
 }
 
 
-void systemcall_usb_count(struct regs *r){
+void systemcall_usb_count(struct regs *r)
+{
     r->eax = usb_registry_count();
 }
 
 
 
-void systemcall_usb_get_dev(struct regs *r){
+void systemcall_usb_get_dev(struct regs *r)
+{
     int idx = (int)r->ebx;
     u_usb_dev_t *user_out = (u_usb_dev_t *)r->ecx;
 
-    if (!user_out || (uint32_t)user_out < 0x40000000){
-        r->eax = -1; return;
+    if (!user_out || (uint32_t)user_out < 0x40000000)
+    {
+        r->eax = -1;
+        return;
     }
 
     usb_dev_record_t rec;
-    if (usb_registry_get(idx, &rec) != 0){
-        r->eax = -1; return;
+    if (usb_registry_get(idx, &rec) != 0)
+    {
+        r->eax = -1;
+        return;
     }
 
     user_out->vid          = rec.vid;
@@ -1259,9 +1575,12 @@ void systemcall_usb_get_dev(struct regs *r){
     r->eax = 0;
 }
 
-void systemcall_get_tty_cursor_pos(struct regs *r){
-if (!current_tty){
-        r->eax = 0; r->ebx = 0;
+void systemcall_get_tty_cursor_pos(struct regs *r)
+{
+    if (!current_tty)
+    {
+        r->eax = 0;
+        r->ebx = 0;
         return;
     }
     r->eax = (uint32_t)(current_tty->cursor_x / current_tty->cell_w);
@@ -1270,15 +1589,21 @@ if (!current_tty){
 
 
 
-void systemcall_get_mount_count(struct regs *r){
+void systemcall_get_mount_count(struct regs *r)
+{
     r->eax = vfs_get_mount_count();
 }
 
-/* ebx = int idx, ecx = u_mount_info_t *user_out */
-void systemcall_get_mount_info(struct regs *r){
+//ebx = int idx, ecx = u_mount_info_t *user_out
+void systemcall_get_mount_info(struct regs *r)
+{
     int idx = (int)r->ebx;
     u_mount_info_t *user_out = (u_mount_info_t *)r->ecx;
-    if (!user_out || (uint32_t)user_out < 0x40000000){ r->eax = -1; return; }
+    if (!user_out || (uint32_t)user_out < 0x40000000)
+    {
+        r->eax = -1;
+        return;
+    }
 
     char k_mp[256];
     uint32_t k_drive = 0;
@@ -1287,17 +1612,30 @@ void systemcall_get_mount_info(struct regs *r){
     memset(&k_st, 0, sizeof(k_st));
 
     int res = vfs_get_mount_info(idx, k_mp, sizeof(k_mp), &k_drive, &k_fsname, &k_st);
-    if (res != FS_OK && res != FS_NOT_SUPPORTED){ r->eax = res; return; }
+    if (res != FS_OK && res != FS_NOT_SUPPORTED)
+    {
+        r->eax = res;
+        return;
+    }
 
     memset(user_out, 0, sizeof(*user_out));
     user_out->drive_id        = k_drive;
     user_out->statfs_supported= (res == FS_OK) ? 1 : 0;
-    for (int i = 0; i < 255; i++){ user_out->mount_point[i] = k_mp[i]; if (!k_mp[i]) break; }
+    for (int i = 0; i < 255; i++)
+    {
+        user_out->mount_point[i] = k_mp[i];
+        if (!k_mp[i]) break;
+    }
     user_out->mount_point[255] = '\0';
-    for (int i = 0; i < 15; i++){ user_out->fs_name[i] = k_fsname[i]; if (!k_fsname[i]) break; }
+    for (int i = 0; i < 15; i++)
+    {
+        user_out->fs_name[i] = k_fsname[i];
+        if (!k_fsname[i]) break;
+    }
     user_out->fs_name[15] = '\0';
 
-    if (res == FS_OK){
+    if (res == FS_OK)
+    {
         user_out->block_size   = k_st.block_size;
         user_out->total_blocks = k_st.total_blocks;
         user_out->free_blocks  = k_st.free_blocks;
@@ -1308,7 +1646,8 @@ void systemcall_get_mount_info(struct regs *r){
 }
 
 
-void syscalls_table_init(void){
+void syscalls_table_init(void)
+{
     syscalls_table[SYS_FILL_SCREEN].func = &systemcall_fill_screen;
     syscalls_table[SYS_EXIT].func = &systemcall_exit;
     syscalls_table[SYS_YIELD].func = &systemcall_yield;

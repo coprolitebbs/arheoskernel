@@ -24,7 +24,8 @@ void tss_init(void);
 void update_tss_esp0(uint32_t esp0);
 void gdt_init(void);
 
-struct gdt_entry{
+struct gdt_entry
+{
     uint16_t limit_low;
     uint16_t base_low;
     uint8_t  base_middle;
@@ -33,12 +34,14 @@ struct gdt_entry{
     uint8_t  base_high;
 } __attribute__((packed));
 
-struct gdt_ptr{
+struct gdt_ptr
+{
     uint16_t limit;
     uint32_t base;
 } __attribute__((packed));
 
-struct tss_entry{
+struct tss_entry
+{
     uint32_t link;
     uint32_t esp0;
     uint32_t ss0;

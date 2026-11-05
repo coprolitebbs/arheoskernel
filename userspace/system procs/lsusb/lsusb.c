@@ -18,9 +18,9 @@
 #include "../../include/ustd.h"
 #include "../../include/udevices.h"
 
-/* Формат вывода — плотный, без огромных отступов, чтобы
-   читалось и на 80-колоночном VGA, и в pipe: */
-static void print_hex4(uint32_t v){
+//Формат вывода — плотный, без огромных отступов, чтобы читалось и на 80-колоночном VGA, и в pipe
+static void print_hex4(uint32_t v)
+{
     const char *hx = "0123456789abcdef";
     char b[5];
     b[0] = hx[(v >> 12) & 0xF];
@@ -31,31 +31,40 @@ static void print_hex4(uint32_t v){
     printf("%s", b);
 }
 
-int main(int argc, char *argv[]){
-    (void)argc; (void)argv;
+int main(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
 
     int n = u_usb_count();
-    if (n < 0){
+    if (n < 0)
+    {
         printf("lsusb: kernel returned error\n");
         return 1;
     }
-    if (n == 0){
+    if (n == 0)
+    {
         printf("lsusb: no USB devices registered\n");
         return 0;
     }
 
-    for (int i = 0; i < n; i++){
+    for (int i = 0; i < n; i++)
+    {
         u_usb_dev_t d;
-        if (u_usb_get_dev(i, &d) != 0){
+        if (u_usb_get_dev(i, &d) != 0)
+        {
             printf("lsusb: idx %d unavailable\n", i);
             continue;
         }
 
         printf("Bus 000 Device %03d: ID ", i + 1);
-        print_hex4(d.vid); printf(":"); print_hex4(d.pid);
+        print_hex4(d.vid);
+        printf(":");
+        print_hex4(d.pid);
 
         if (d.manufacturer[0]) printf(" %s", d.manufacturer);
-        else {
+        else
+        {
             const char *v = u_usb_vendor_name(d.vid);
             if (v) printf(" %s", v);
         }

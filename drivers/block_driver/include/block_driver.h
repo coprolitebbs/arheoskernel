@@ -27,19 +27,21 @@
 #define SECTOR_SIZE        512
 #define PARENT_NONE        0xFFFFFFFFu
 
-typedef struct {
+typedef struct
+{
     char name[16];
     uint32_t sector_count;
     uint32_t flags;
     bool used;
-    // транспортнаЯ диспетчеризациЯ
+    //Р’РЅРµС€РЅРёРµ С„СѓРЅРєС†РёРё, РїРµСЂРµРґР°СЋС‚СЃСЏ РёР· API РґСЂСѓРіРёС… РґСЂР°Р№РІРµСЂРѕРІ
     int (*read_fn)(void *priv, uint64_t lba, uint32_t count, void *buf);
     int (*write_fn)(void *priv, uint64_t lba, uint32_t count, const void *buf);
     void *priv;
 } block_dev_entry_t;
 
 
-typedef struct {
+typedef struct
+{
     uint16_t base;
     uint8_t slave;
 } ata_priv_t;

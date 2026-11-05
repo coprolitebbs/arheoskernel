@@ -18,22 +18,8 @@
 #ifndef KLOAD_SCREEN_H
 #define KLOAD_SCREEN_H
 
-/*
- * ARHeOS boot splash screen.
- *
- * Lifecycle:
- *   kernel_load_animation_start();       // once, before init_tasking()
- *   kernel_load_animation_next_step();   // repeatedly during boot
- *   kernel_load_animation_stop();        // before launching user progs
- *
- * The animation is fully looping: there is no "0%" or "100%" state,
- * just a comet travelling through the bar forever until you stop it.
- */
 
-
-/* ======================================================================== */
-/*  Retro SGI / SunOS palette (lighter steel-grey variant)                   */
-/* ======================================================================== */
+//Ретро палитра в стиле  SGI / SunOS
 
 #define C_BG_TOP      0x00283850u   //Steel blue top of the gradient
 #define C_BG_BOTTOM   0x00142030u   //Dark slate bottom of the gradient
@@ -57,7 +43,6 @@
 
 
 //Настройки анимации
-
 #define SPINNER_COUNT     4
 #define BAR_SEGMENTS      30
 #define COMET_HEAD_LEN    1

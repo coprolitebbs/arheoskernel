@@ -21,13 +21,13 @@
 #define low_word(address) (short)((address) & 0xFFFF)
 #define high_word(address) (short)(((address) >> 16) & 0xFFFF)
 
-//#define MAX_MB 128  // отображаем первые 128 МБ
+//#define MAX_MB 128  //отображаем первые 128 МБ
 #define STACK_ADDRESS 0x90000
 
-#include <stdint.h>      // для uint32_t и других целочисленных типов
-#include "draw.h"        // графические функции (draw_char, draw_string, fill_screen)
-#include "isr.h"         // обработка прерываний (struct regs, idt_init, pic_init, isr_handler)
-#include "syscalls.h"    // системные вызовы (SYS_* константы, sys_draw_char)
+#include <stdint.h>      //для uint32_t и других целочисленных типов
+#include "draw.h"        //графические функции (draw_char, draw_string, fill_screen)
+#include "isr.h"         //обработка прерываний (struct regs, idt_init, pic_init, isr_handler)
+#include "syscalls.h"    //системные вызовы (SYS_* константы, sys_draw_char)
 
 #include "use_drivers.h"
 

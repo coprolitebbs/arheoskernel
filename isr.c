@@ -16,8 +16,8 @@
  */
 
 #include "include-kernel/isr.h"
-#include "include-kernel/syscalls.h"   //для SYS_* констант
-#include "include-kernel/draw.h"       //для вызова draw_char из системного вызова
+#include "include-kernel/syscalls.h"
+#include "include-kernel/draw.h"
 #include "include-kernel/task.h"
 #include "include-kernel/lib.h"
 #include "include-kernel/ports_io.h"
@@ -92,7 +92,8 @@ extern void irq15(void);
 extern void syscall_handler_asm(void); //int 0x80
 
 //Вспомогательная функция для заполнения IDT
-static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags){
+static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags)
+{
     idt[num].base_low  = base & 0xFFFF;
     idt[num].base_high = (base >> 16) & 0xFFFF;
     idt[num].sel       = sel;
@@ -101,65 +102,67 @@ static void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags
 }
 
 //Инициализация IDT
-void idt_init(void){
-    for (int i = 0; i < 256; i++){
+void idt_init(void)
+{
+    for (int i = 0; i < 256; i++)
+    {
         idt_set_gate(i, 0, 0, 0);
     }
 
     //Исключения (0–31)
     idt_set_gate(0,  (uint32_t)isr0,  0x08, 0x8E);
     idt_set_gate(1,  (uint32_t)isr1,  0x08, 0x8E);
-	idt_set_gate(2,  (uint32_t)isr2,  0x08, 0x8E);
-	idt_set_gate(3,  (uint32_t)isr3,  0x08, 0x8E);
-	idt_set_gate(4,  (uint32_t)isr4,  0x08, 0x8E);
-	idt_set_gate(5,  (uint32_t)isr5,  0x08, 0x8E);
-	idt_set_gate(6,  (uint32_t)isr6,  0x08, 0x8E);
-	idt_set_gate(7,  (uint32_t)isr7,  0x08, 0x8E);
-	idt_set_gate(8,  (uint32_t)isr8,  0x08, 0x8E);
-	idt_set_gate(9,  (uint32_t)isr9,  0x08, 0x8E);
-	idt_set_gate(10, (uint32_t)isr10,  0x08, 0x8E);
-	idt_set_gate(11, (uint32_t)isr11,  0x08, 0x8E);
-	idt_set_gate(12, (uint32_t)isr12,  0x08, 0x8E);
-	idt_set_gate(13, (uint32_t)isr13,  0x08, 0x8E);
-	idt_set_gate(14, (uint32_t)isr14,  0x08, 0x8E);
-	idt_set_gate(15, (uint32_t)isr15,  0x08, 0x8E);
-	idt_set_gate(16, (uint32_t)isr16,  0x08, 0x8E);
-	idt_set_gate(17, (uint32_t)isr17,  0x08, 0x8E);
-	idt_set_gate(18, (uint32_t)isr18,  0x08, 0x8E);
-	idt_set_gate(19, (uint32_t)isr19,  0x08, 0x8E);
-	idt_set_gate(20, (uint32_t)isr20,  0x08, 0x8E);
-	idt_set_gate(21, (uint32_t)isr21,  0x08, 0x8E);
-	idt_set_gate(22, (uint32_t)isr22,  0x08, 0x8E);
-	idt_set_gate(23, (uint32_t)isr23,  0x08, 0x8E);
-	idt_set_gate(24, (uint32_t)isr24,  0x08, 0x8E);
-	idt_set_gate(25, (uint32_t)isr25,  0x08, 0x8E);
-	idt_set_gate(26, (uint32_t)isr26,  0x08, 0x8E);
-	idt_set_gate(27, (uint32_t)isr27,  0x08, 0x8E);
-	idt_set_gate(28, (uint32_t)isr28,  0x08, 0x8E);
-	idt_set_gate(29, (uint32_t)isr29,  0x08, 0x8E);
-	idt_set_gate(30, (uint32_t)isr30,  0x08, 0x8E);
-	idt_set_gate(31, (uint32_t)isr31,  0x08, 0x8E);
+    idt_set_gate(2,  (uint32_t)isr2,  0x08, 0x8E);
+    idt_set_gate(3,  (uint32_t)isr3,  0x08, 0x8E);
+    idt_set_gate(4,  (uint32_t)isr4,  0x08, 0x8E);
+    idt_set_gate(5,  (uint32_t)isr5,  0x08, 0x8E);
+    idt_set_gate(6,  (uint32_t)isr6,  0x08, 0x8E);
+    idt_set_gate(7,  (uint32_t)isr7,  0x08, 0x8E);
+    idt_set_gate(8,  (uint32_t)isr8,  0x08, 0x8E);
+    idt_set_gate(9,  (uint32_t)isr9,  0x08, 0x8E);
+    idt_set_gate(10, (uint32_t)isr10,  0x08, 0x8E);
+    idt_set_gate(11, (uint32_t)isr11,  0x08, 0x8E);
+    idt_set_gate(12, (uint32_t)isr12,  0x08, 0x8E);
+    idt_set_gate(13, (uint32_t)isr13,  0x08, 0x8E);
+    idt_set_gate(14, (uint32_t)isr14,  0x08, 0x8E);
+    idt_set_gate(15, (uint32_t)isr15,  0x08, 0x8E);
+    idt_set_gate(16, (uint32_t)isr16,  0x08, 0x8E);
+    idt_set_gate(17, (uint32_t)isr17,  0x08, 0x8E);
+    idt_set_gate(18, (uint32_t)isr18,  0x08, 0x8E);
+    idt_set_gate(19, (uint32_t)isr19,  0x08, 0x8E);
+    idt_set_gate(20, (uint32_t)isr20,  0x08, 0x8E);
+    idt_set_gate(21, (uint32_t)isr21,  0x08, 0x8E);
+    idt_set_gate(22, (uint32_t)isr22,  0x08, 0x8E);
+    idt_set_gate(23, (uint32_t)isr23,  0x08, 0x8E);
+    idt_set_gate(24, (uint32_t)isr24,  0x08, 0x8E);
+    idt_set_gate(25, (uint32_t)isr25,  0x08, 0x8E);
+    idt_set_gate(26, (uint32_t)isr26,  0x08, 0x8E);
+    idt_set_gate(27, (uint32_t)isr27,  0x08, 0x8E);
+    idt_set_gate(28, (uint32_t)isr28,  0x08, 0x8E);
+    idt_set_gate(29, (uint32_t)isr29,  0x08, 0x8E);
+    idt_set_gate(30, (uint32_t)isr30,  0x08, 0x8E);
+    idt_set_gate(31, (uint32_t)isr31,  0x08, 0x8E);
 
     //Аппаратные прерывания (32–47)
-    idt_set_gate(32, (uint32_t)irq0, 0x08, 0x8E);  // таймер
-	idt_set_gate(33, (uint32_t)irq1, 0x08, 0x8E);  // клавиатура
-	idt_set_gate(34, (uint32_t)irq2, 0x08, 0x8E);
-	idt_set_gate(35, (uint32_t)irq3, 0x08, 0x8E);
-	idt_set_gate(36, (uint32_t)irq4, 0x08, 0x8E);
-	idt_set_gate(37, (uint32_t)irq5, 0x08, 0x8E);
-	idt_set_gate(38, (uint32_t)irq6, 0x08, 0x8E);
-	idt_set_gate(39, (uint32_t)irq7, 0x08, 0x8E);
-	idt_set_gate(40, (uint32_t)irq8, 0x08, 0x8E);
-	idt_set_gate(41, (uint32_t)irq9, 0x08, 0x8E);
-	idt_set_gate(42, (uint32_t)irq10, 0x08, 0x8E);
-	idt_set_gate(43, (uint32_t)irq11, 0x08, 0x8E);
-	idt_set_gate(44, (uint32_t)irq12, 0x08, 0x8E);
-	idt_set_gate(45, (uint32_t)irq13, 0x08, 0x8E);
-	idt_set_gate(46, (uint32_t)irq14, 0x08, 0x8E);
-	idt_set_gate(47, (uint32_t)irq15, 0x08, 0x8E);
+    idt_set_gate(32, (uint32_t)irq0, 0x08, 0x8E);  //таймер
+    idt_set_gate(33, (uint32_t)irq1, 0x08, 0x8E);  //клава
+    idt_set_gate(34, (uint32_t)irq2, 0x08, 0x8E);
+    idt_set_gate(35, (uint32_t)irq3, 0x08, 0x8E);
+    idt_set_gate(36, (uint32_t)irq4, 0x08, 0x8E);
+    idt_set_gate(37, (uint32_t)irq5, 0x08, 0x8E);
+    idt_set_gate(38, (uint32_t)irq6, 0x08, 0x8E);
+    idt_set_gate(39, (uint32_t)irq7, 0x08, 0x8E);
+    idt_set_gate(40, (uint32_t)irq8, 0x08, 0x8E);
+    idt_set_gate(41, (uint32_t)irq9, 0x08, 0x8E);
+    idt_set_gate(42, (uint32_t)irq10, 0x08, 0x8E);
+    idt_set_gate(43, (uint32_t)irq11, 0x08, 0x8E);
+    idt_set_gate(44, (uint32_t)irq12, 0x08, 0x8E);
+    idt_set_gate(45, (uint32_t)irq13, 0x08, 0x8E);
+    idt_set_gate(46, (uint32_t)irq14, 0x08, 0x8E);
+    idt_set_gate(47, (uint32_t)irq15, 0x08, 0x8E);
 
     //Системный вызов (int 0x80)
-    idt_set_gate(0x80, (uint32_t)syscall_handler_asm, 0x08, 0xEE); // ловушка
+    idt_set_gate(0x80, (uint32_t)syscall_handler_asm, 0x08, 0xEE); //ловушка
 
     //Загружаем IDT
     idtp.limit = sizeof(idt) - 1;
@@ -169,7 +172,8 @@ void idt_init(void){
 
 
 //Перенастройка PIC
-void pic_init(void) {
+void pic_init(void)
+{
     outb(0x20, 0x11);
     outb(0xA0, 0x11);
     outb(0x21, 0x20);
@@ -179,15 +183,17 @@ void pic_init(void) {
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
     //outb(0x21, 0xFE);  // разрешить только IRQ0
-	outb(0x21, 0xB8); // разрешить IRQ0 и IRQ1 и IRQ6
+    outb(0x21, 0xB8); // разрешить IRQ0 и IRQ1 и IRQ6
     outb(0xA1, 0xFF);
 }
 
 
 
 //GENRAL PROTECTION FAULT
-void isr_halt13(struct regs *r){
-    panic_field_t fields[6] = {
+void isr_halt13(struct regs *r)
+{
+    panic_field_t fields[6] =
+    {
         { "ERR",   r->err_code          },
         { "EIP",   r->eip               },
         { "CS",    r->cs                },
@@ -199,10 +205,14 @@ void isr_halt13(struct regs *r){
     draw_kernel_panic("GENERAL PROTECTION FAULT", fields, 6);
 
     com_puts("[KERNEL] General Protection Fault! Halted.\n");
-    for(;;) { __asm__ __volatile__("cli; hlt"); }
+    for(;;)
+    {
+        __asm__ __volatile__("cli; hlt");
+    }
 }
 
-void isr_double_fault(struct regs *r){
+void isr_double_fault(struct regs *r)
+{
     (void)r;
     //com_puts("[KERNEL] DOUBLE FAULT! Halted.\n");
     __asm__ __volatile__("cli");
@@ -210,20 +220,22 @@ void isr_double_fault(struct regs *r){
 }
 
 //PAGE FAULT
-void isr_pagefault(struct regs *r){
+void isr_pagefault(struct regs *r)
+{
     uint32_t cr2, cr3;
     __asm__ __volatile__("mov %%cr2,%0":"=r"(cr2));
     __asm__ __volatile__("mov %%cr3,%0":"=r"(cr3));
 
-    /* Переключаемся на kernel_directory: там LFB точно замаплен
-       (vmm_map_pages добавлял его туда). Панику рисуем из
-       гарантированно-валидного адресного пространства. */
+    //Переключаемся на kernel_directory: там LFB точно замаплен (vmm_map_pages добавлял его туда)
+    //Панику рисуем из гарантированно-валидного адресного пространства
     uint32_t kd_phys = (uint32_t)kernel_directory & 0xFFFFF000;
-    if (kd_phys != 0 && (cr3 & 0xFFFFF000) != kd_phys){
+    if (kd_phys != 0 && (cr3 & 0xFFFFF000) != kd_phys)
+    {
         __asm__ __volatile__("mov %0, %%cr3" : : "r"(kd_phys) : "memory");
     }
 
-    panic_field_t fields[8] = {
+    panic_field_t fields[8] =
+    {
         { "CR2",   cr2                                                    },
         { "ERR",   r->err_code                                            },
         { "EIP",   r->eip                                                 },
@@ -237,13 +249,17 @@ void isr_pagefault(struct regs *r){
     draw_kernel_panic("PAGE FAULT", fields, 8);
 
     com_puts("[KERNEL] PAGE FAULT! Halted.\n");
-    for(;;) { __asm__ __volatile__("cli; hlt"); }
+    for(;;)
+    {
+        __asm__ __volatile__("cli; hlt");
+    }
 }
 
 
 
 
-void irq33_handler(struct regs *r){
+void irq33_handler(struct regs *r)
+{
     //Аппаратно вычитываем скан-код клавиши из порта контроллера i8042
     uint8_t scancode = inb(0x60);
     //Посылаем сигнал EOI (End of Interrupt) контроллеру прерываний PIC,
@@ -255,10 +271,12 @@ void irq33_handler(struct regs *r){
     kbd_hotkey_process(scancode);
     //Передаем скан-код в драйвер клавы
     //Это наполнит кольцевой буфер kbd_event_buf, и sekhmet_read_line(), или кому там еще нужно, увидит нажатие
-    if (kbd_driver_api && kbd_driver_api->irq_callback){
+    if (kbd_driver_api && kbd_driver_api->irq_callback)
+    {
         kbd_driver_api->irq_callback(scancode);
     }
-    if (current_tty && current_tty->foreground_pid != 0) {
+    if (current_tty && current_tty->foreground_pid != 0)
+    {
         //Если терминал захвачен активным шеллом/процессором Ring 3 — выходим
         //Оставим только обработку переключения TTY по комбинациям клавиш
         return;
@@ -274,22 +292,26 @@ void irq33_handler(struct regs *r){
     if (current_tty->line_ready) return;
 
     //Вспомогательные лямбды восстановления символов под курсором ядра
-    void restore_char_at_cursor(uint32_t buffer_idx){
+    void restore_char_at_cursor(uint32_t buffer_idx)
+    {
         uint32_t cx, cy;
         kconsole_get_render_coords(buffer_idx, &cx, &cy);
-        uint32_t cell_x = cx / current_tty->cell_w; uint32_t cell_y = cy / current_tty->cell_h;
+        uint32_t cell_x = cx / current_tty->cell_w;
+        uint32_t cell_y = cy / current_tty->cell_h;
         uint32_t orig_char = ' ';
-        if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols){
+        if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
+        {
             orig_char = current_tty->matrix[cell_y][cell_x].codepoint;
         }
         if (fb && fb->clear_tile) fb->clear_tile(cx, cy, console_bgcolor);
         else
             fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_bgcolor);
-            //fb->draw_char(cx, cy, current_tty->cursor_code, console_bgcolor);
+        //fb->draw_char(cx, cy, current_tty->cursor_code, console_bgcolor);
         if (orig_char != ' ' && orig_char != '\0') fb->draw_codepoint(cx, cy, orig_char, console_fgcolor);
     }
 
-    void force_draw_new_cursor(void){
+    void force_draw_new_cursor(void)
+    {
         uint32_t new_cx, new_cy;
         kconsole_get_render_coords(current_tty->line_cursor_pos, &new_cx, &new_cy);
         //fb->draw_char(new_cx, new_cy, current_tty->cursor_code, console_fgcolor);
@@ -298,8 +320,10 @@ void irq33_handler(struct regs *r){
         current_tty->last_blink_tick = tick_count;
     }
 
-    if (scancode == 0x4B){ //Стрелочка <-
-        if (current_tty->line_cursor_pos > 0){
+    if (scancode == 0x4B)  //Стрелочка <-
+    {
+        if (current_tty->line_cursor_pos > 0)
+        {
             restore_char_at_cursor(current_tty->line_cursor_pos);
             current_tty->line_cursor_pos--;
             kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
@@ -307,8 +331,10 @@ void irq33_handler(struct regs *r){
         }
         return;
     }
-    if (scancode == 0x4D){ //Стрелочка ->
-        if (current_tty->line_cursor_pos < current_tty->copied_bytes){
+    if (scancode == 0x4D)  //Стрелочка ->
+    {
+        if (current_tty->line_cursor_pos < current_tty->copied_bytes)
+        {
             restore_char_at_cursor(current_tty->line_cursor_pos);
             current_tty->line_cursor_pos++;
             kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
@@ -317,23 +343,37 @@ void irq33_handler(struct regs *r){
         return;
     }
 
-    if (scancode < 128){
-        if (scancode == 0x3A) { caps_lock_active = !caps_lock_active; return; }
-        if (scancode == 0x2A || scancode == 0x36) { shift_pressed = true; return; }
+    if (scancode < 128)
+    {
+        if (scancode == 0x3A)
+        {
+            caps_lock_active = !caps_lock_active;
+            return;
+        }
+        if (scancode == 0x2A || scancode == 0x36)
+        {
+            shift_pressed = true;
+            return;
+        }
 
         const locale_t *loc = locale_get_active();
         uint32_t cp = locale_resolve_key(loc, scancode, shift_pressed);
-        if (cp != 0){
+        if (cp != 0)
+        {
             //char ascii = (char)cp866_from_codepoint(cp);
             restore_char_at_cursor(current_tty->line_cursor_pos);
-            if (cp == '\n'){
+            if (cp == '\n')
+            {
                 kernel_stdout_write_char('\n', console_fgcolor);
                 current_tty->line_ready = true;
             }
         }
 
-    } else {
-        if (scancode == 0x2A || scancode == 0x36 || scancode == 0xAA || scancode == 0xB6){
+    }
+    else
+    {
+        if (scancode == 0x2A || scancode == 0x36 || scancode == 0xAA || scancode == 0xB6)
+        {
             if (scancode == 0xAA || scancode == 0xB6) shift_pressed = false;
         }
     }
@@ -342,7 +382,8 @@ void irq33_handler(struct regs *r){
 
 
 
-void irq6_handler(struct regs *r){
+void irq6_handler(struct regs *r)
+{
     (void)r;
     //Фиксируем, что прерывание от дисковода успешно прилетело
     floppy_irq_fired = 1;
@@ -351,39 +392,48 @@ void irq6_handler(struct regs *r){
 }
 
 
-void isr_handler(struct regs *r){
-    if (r->int_no == 8){
+void isr_handler(struct regs *r)
+{
+    if (r->int_no == 8)
+    {
         isr_double_fault(r);
         for(;;);
     }
 
     //Исключения (0–31) — критическая ошибка
-    if (r->int_no < 32){
-		if (r->int_no == 14){
-			//PAGE FAULT
-			isr_pagefault(r);
-			for(;;);
+    if (r->int_no < 32)
+    {
+        if (r->int_no == 14)
+        {
+            //PAGE FAULT
+            isr_pagefault(r);
+            for(;;);
 
-		}
-		if (r->int_no == 13){
-			isr_halt13(r);
-		}
-	}
+        }
+        if (r->int_no == 13)
+        {
+            isr_halt13(r);
+        }
+    }
 
-	if (r->int_no == 33){
-		irq33_handler(r);
+    if (r->int_no == 33)
+    {
+        irq33_handler(r);
         return;
-	}
+    }
 
-	if (r->int_no == 38){
+    if (r->int_no == 38)
+    {
         irq6_handler(r); //Вызываем обработчик (он выставит floppy_irq_fired = 1 и пошлет EOI)
         return;// r;
     }
 
     //Аппаратные прерывания (32–47)
-    if (r->int_no >= 32 && r->int_no < 48){
+    if (r->int_no >= 32 && r->int_no < 48)
+    {
         //Обработка конкретных IRQ
-        if (r->int_no == 32){
+        if (r->int_no == 32)
+        {
             outb(0x20, 0x20);
 
             //Увеличиваем системные тики
@@ -392,7 +442,8 @@ void isr_handler(struct regs *r){
             //Обновляем мигание курсора TTY
             kconsole_update_cursor();
 
-            if ((tick_count & 5) == 0){
+            if ((tick_count & 5) == 0)
+            {
                 kernel_load_animation_next_step();
             }
 
@@ -400,9 +451,12 @@ void isr_handler(struct regs *r){
             //Вызываем планировщик
             schedule(r);
             return;   //после schedule() управление не вернётся
-        } else {
+        }
+        else
+        {
             //Для остальных IRQ — просто EOI
-            if (r->int_no >= 40){
+            if (r->int_no >= 40)
+            {
                 outb(0xA0, 0x20);
             }
             outb(0x20, 0x20);
@@ -410,7 +464,8 @@ void isr_handler(struct regs *r){
         return;
     }
     //Системный вызов (int 0x80)
-    if (r->int_no == 0x80){
+    if (r->int_no == 0x80)
+    {
         syscall_handler(r);
         return;
     }
@@ -418,7 +473,8 @@ void isr_handler(struct regs *r){
 
 }
 
-void pit_init(void){
+void pit_init(void)
+{
     uint32_t divisor = 1193180 / 100;
 
     outb(0x43,0x36);
@@ -428,7 +484,8 @@ void pit_init(void){
 }
 
 
-void sys_yield(void){
+void sys_yield(void)
+{
     schedule(NULL);
 }
 

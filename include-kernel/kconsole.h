@@ -40,8 +40,9 @@ extern uint32_t text_cursor_y;
 extern uint32_t console_bgcolor;
 extern uint32_t console_fgcolor;
 
-// Состояния конечного автомата ANSI парсера
-typedef enum {
+//Состояния конечного автомата ANSI парсера
+typedef enum
+{
     ANSI_STATE_NORMAL = 0,
     ANSI_STATE_ESC,      //Поймали символ Escape (0x1B)
     ANSI_STATE_CSI       //Поймали управляющий символ '['
@@ -53,23 +54,26 @@ typedef enum {
 #define DEFAULT_FG_COLOR 0x00FFFFFF //Белый
 #define DEFAULT_BG_COLOR 0x00000000 //Черный
 
-typedef struct{
+typedef struct
+{
     uint32_t codepoint;   //Unicode codepoint, 0 = пусто
     uint32_t color;
-    uint32_t bg;        // 0xFFFFFFFF = прозрачно, иначе — заливка
+    uint32_t bg;        //0xFFFFFFFF = прозрачно, иначе — заливка
 } console_cell_t;
 
 
-#define CLIPBOARD_MAX_BYTES (1024u * 1024u)    /* 1 MB cap */
+#define CLIPBOARD_MAX_BYTES (1024u * 1024u)    //1 MB cap
 
-typedef struct {
+typedef struct
+{
     uint8_t  *data;
     uint32_t  size;
     uint32_t  cap;
 } tty_clipboard_t;
 
 //Структура параметров и состояния виртуального терминала TTY
-typedef struct tty {
+typedef struct tty
+{
     int id;                                     //Идентификатор терминала (0, 1, 2...)
     char line_buffer[LINE_BUFFER_SIZE];         //Локальный буфер ввода строки ядра
     volatile uint32_t copied_bytes;            //Сколько байт накоплено в line_buffer

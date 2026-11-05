@@ -23,10 +23,11 @@
 #include "../../../include-kernel/lib.h"
 #include <stdint.h>
 
-// ============ CPUID ============
+//============ CPUID ============
 
 static void cpuid(uint32_t leaf, uint32_t subleaf,
-                  uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
+                  uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d)
+{
     __asm__ __volatile__(
         "cpuid"
         : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
@@ -34,7 +35,8 @@ static void cpuid(uint32_t leaf, uint32_t subleaf,
     );
 }
 
-static void detect_cpu(char *vendor, char *brand) {
+static void detect_cpu(char *vendor, char *brand)
+{
     uint32_t a, b, c, d;
 
     cpuid(0, 0, &a, &b, &c, &d);
@@ -67,26 +69,43 @@ static void detect_cpu(char *vendor, char *brand) {
 
     int start = 0;
     while (brand[start] == ' ') start++;
-    if (start > 0) {
+    if (start > 0)
+    {
         int i = 0;
-        while (brand[start + i]) { brand[i] = brand[start + i]; i++; }
+        while (brand[start + i])
+        {
+            brand[i] = brand[start + i];
+            i++;
+        }
         brand[i] = '\0';
     }
 }
 
-// ============ Числа ============
+//============ Числа ============
 
-static void u32_to_dec(uint32_t v, char *out) {
-    if (v == 0) { out[0] = '0'; out[1] = '\0'; return; }
-    char tmp[12]; int n = 0;
-    while (v > 0) { tmp[n++] = '0' + (v % 10); v /= 10; }
+static void u32_to_dec(uint32_t v, char *out)
+{
+    if (v == 0)
+    {
+        out[0] = '0';
+        out[1] = '\0';
+        return;
+    }
+    char tmp[12];
+    int n = 0;
+    while (v > 0)
+    {
+        tmp[n++] = '0' + (v % 10);
+        v /= 10;
+    }
     for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
     out[n] = '\0';
 }
 
-// Собирает "NN%" — знак '%' кладём прямо в буфер, не через формат,
-// иначе ustd.c-овский printf съест его как спецификатор.
-static void build_pct_string(uint32_t pct, char *out) {
+//Собирает "NN%" — знак '%' кладём прямо в буфер, не через формат,
+//иначе ustd.c-овский printf съест его как спецификатор
+static void build_pct_string(uint32_t pct, char *out)
+{
     u32_to_dec(pct, out);
     int i = 0;
     while (out[i]) i++;
@@ -94,10 +113,11 @@ static void build_pct_string(uint32_t pct, char *out) {
     out[i] = '\0';
 }
 
-// ============ Art ============
+//============ Art ============
 
-// Пирамида — теперь белая
-static void draw_pyramid(void) {
+//Пирамида
+static void draw_pyramid(void)
+{
     printf("\x1B[37m");
     printf("\x1B[3;5H      /\\     ");
     printf("\x1B[4;5H     /  \\    ");
@@ -109,8 +129,9 @@ static void draw_pyramid(void) {
     printf("\x1B[0m");
 }
 
-// Анкх — cyan
-static void draw_ankh(void) {
+//Анкх — лиловый
+static void draw_ankh(void)
+{
     printf("\x1B[36m");
     printf("\x1B[11;8H ___  ");
     printf("\x1B[12;8H/   \\ ");
@@ -122,26 +143,29 @@ static void draw_ankh(void) {
     printf("\x1B[0m");
 }
 
-// Палитра ANSI — 8 блоков через background-цвета.
-// Блок 40 (чёрный) на чёрном фоне не виден — это ожидаемо,
-// зато остальные 7 отлично показывают, что консоль жива.
-static void draw_palette(void) {
-    for (int i = 0; i < 8; i++) {
+//Палитра ANSI — 8 блоков через background-цвета
+//Блок 40 (чёрный) на чёрном фоне не виден — это ожидаемо, зато остальные 7 отлично показывают, что консоль жива
+static void draw_palette(void)
+{
+    for (int i = 0; i < 8; i++)
+    {
         printf("\x1B[%dm  \x1B[0m", 40 + i);
     }
 }
 
-// ============ Main ============
+//============ Main ============
 
-int main(int argc, char *argv[]) {
-    (void)argc; (void)argv;
+int main(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
 
     uint32_t cols = 80, rows = 25;
     u_get_console_geometry(&cols, &rows, NULL, NULL);
     if (cols == 0) cols = 80;
     if (rows == 0) rows = 25;
 
-    // ---- Данные ----
+    //Данные
     am_mem_info_t mem;
     get_mem_info(&mem);
 
@@ -158,20 +182,20 @@ int main(int argc, char *argv[]) {
     const char *cpu_name = (cpu_brand[0]) ? cpu_brand : cpu_vendor;
     if (cpu_name[0] == '\0') cpu_name = "unknown";
 
-    // Uptime
+    //Uptime
     uint32_t secs_total = ticks / 100;
     uint32_t secs  = secs_total % 60;
     uint32_t mins  = (secs_total / 60) % 60;
     uint32_t hours = secs_total / 3600;
 
-    // Память — как в free: used / total MiB + процент загрузки
+    //Память — как в free: used / total MiB + процент загрузки
     uint32_t total_kb  = (mem.total_pages * 4096) / 1024;
     uint32_t used_kb   = (mem.used_pages  * 4096) / 1024;
     uint32_t total_mib = total_kb / 1024;
     uint32_t used_mib  = used_kb  / 1024;
     uint32_t load_pct  = total_kb ? (used_kb * 100) / total_kb : 0;
 
-    // ---- Форматирование ----
+    //Форматирование
     char buf_h[12], buf_m[12], buf_s[12];
     char buf_total[12], buf_used[12];
     char buf_w[12], buf_hres[12];
@@ -194,8 +218,9 @@ int main(int argc, char *argv[]) {
 
     clear_screen();
 
-    // ---- Компактный режим ----
-    if (cols < 50 || rows < 20) {
+    //Компактный режим
+    if (cols < 50 || rows < 20)
+    {
         printf("\x1B[37m");
         printf("  ARHeOS - System Information\n");
         printf("  ==========================\n");
@@ -218,7 +243,7 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    // ---- Широкий режим ----
+    //Широкий режим
     printf("\x1B[37m");
     printf("\x1B[2;23Hpharaoh@arheos");
     printf("\x1B[3;23H==================");
@@ -239,11 +264,11 @@ int main(int argc, char *argv[]) {
     printf("\x1B[13;23H\x1B[37mColors:\x1B[0m      ");
     draw_palette();
 
-    // Искусство
+    //Искусство
     draw_pyramid();
     draw_ankh();
 
-    // Курсор в последнюю строку
+    //Курсор в последнюю строку
     uint32_t cursor_row = (rows > 1) ? (rows - 1) : 1;
     printf("\x1B[%d;1H", cursor_row);
 

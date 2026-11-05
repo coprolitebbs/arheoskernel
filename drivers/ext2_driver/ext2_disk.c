@@ -22,9 +22,6 @@
 #include "../../include-kernel/ports_io.h"
 #include "include/ext2_driver.h"
 
-
-
-
 //Освобождает один физический блок в битовой карте его группы
 //Возвращает 1 если блок был занят и освобождён, 0 если он уже был свободен,
 //отрицательный FS_* при ошибке.
@@ -203,9 +200,6 @@ int ext2_truncate_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *ino
 
 
 
-
-
-
 int ext2_disk_read_sectors(uint32_t lba, uint32_t count, void *buf)
 {
     uint16_t *ptr = (uint16_t *)buf;
@@ -261,6 +255,10 @@ int ext2_disk_read_sectors(uint32_t lba, uint32_t count, void *buf)
     return FS_OK;
 }
 
+
+
+
+
 int ext2_disk_read_sectors_via(ext2_volume_t *vol, uint32_t lba, uint32_t count, void *buf)
 {
     if (!vol) return FS_IO_ERROR;
@@ -278,6 +276,8 @@ int ext2_disk_read_sectors_via(ext2_volume_t *vol, uint32_t lba, uint32_t count,
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
     return r;
 }
+
+
 
 
 int ext2_read_block(ext2_volume_t *vol, uint32_t block, void *buf)
@@ -302,6 +302,9 @@ int ext2_read_block(ext2_volume_t *vol, uint32_t block, void *buf)
     if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
     return res;
 }
+
+
+
 
 
 int ext2_read_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *out_inode)

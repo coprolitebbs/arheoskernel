@@ -18,12 +18,14 @@
 #include "../../include/ustd.h"
 #include "../../include/umemory.h"
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
     (void)argc;
     (void)argv;
 
     am_mem_info_t mem;
-    if (get_mem_info(&mem) != 0) {
+    if (get_mem_info(&mem) != 0)
+    {
         printf("Функции получения параметров ОЗУ не поддерживаются.\n");
         return -1;
     }
@@ -42,15 +44,15 @@ int main(int argc, char *argv[]) {
     printf("Регион памяти     Всего    Использовано     Свободно\n");
     printf("--------------------------------------------------\n");
 
-    // Выводим физическое ОЗУ (PMM)
+    //Выводим физическое ОЗУ (PMM)
     printf("Физическая ОЗУ:    %d Кб    %d Кб    %d Кб  (%d МБ всего)\n",
            total_kb, used_kb, free_kb, total_kb / 1024);
 
-    // Выводим кучу ядра Ring 0 (kmalloc)
+    //Выводим кучу ядра Ring 0 (kmalloc)
     printf("Куча ядра:     %d Кб    %d Кб    %d Кб\n",
            heap_total_kb, heap_used_kb, heap_free_kb);
 
-    // Дополнительный расчет процента загрузки оперативной памяти
+    //Дополнительный расчет процента загрузки оперативной памяти
     uint32_t pct = (used_kb * 100) / total_kb;
     printf("--------------------------------------------------\n");
     printf("Процент загрузки ОЗУ: %d%%\n\n", pct);

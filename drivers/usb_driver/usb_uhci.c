@@ -16,7 +16,7 @@
  */
 
 /*
- * usb_uhci.c - UHCI Host Controller: PCI probe, reset, frame list,
+ * usb_uhci.c - UHCI хост-контроллер: PCI probe, reset, frame list,
  * port reset, control/bulk transfer.
  *
  * Один HC (uhci0). QH/TD/Frame List — статические (.bss драйвера,
@@ -33,7 +33,7 @@
 //---------------- UHCI DMA-структуры (динамическая аллокация) ----------------
 //Все структуры, которые читает/пишет HC (Frame List, QH, TD), должны быть физически
 //непрерывными и identity-mapped. Аллоцируются через usb_dma_alloc() -> kernel_usb_dma_alloc() ->
-//pmm_alloc_pages().
+//pmm_alloc_pages()
 //dma_alloc_ptr устанавливается ядром в use_drivers.c ПОСЛЕ driver_main(),
 //поэтому allocation делается в device_usb_start() (см. usb_driver.c)
 
@@ -63,7 +63,7 @@ static int dma_bulk_tds_ok = 0;
 
 uint8_t uhci_dev_is_ls[128]= {0};
 
-//Глобальный массив всех найденных UHCI-контроллеров.
+//Глобальный массив всех найденных UHCI-контроллеров
 //На ICH6 их три: 0:1d.0 (#1), 0:1d.1 (#2), 0:1d.2 (#3).
 //Устройства могут быть на любом из них — нужно сканировать все.
 uhci_hc_t uhci_hcs[UHCI_MAX_CONTROLLERS];
@@ -289,65 +289,8 @@ void pci_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off, uint32_t v
 
 
 //---------------- Probe ----------------
-/*
-int uhci_probe(uhci_hc_t *hc)
-{
-    if (!hc) return -1;
-    memset(hc, 0, sizeof(*hc));
 
-    for (uint16_t bus = 0; bus < 256; bus++)
-    {
-        for (uint8_t dev = 0; dev < 32; dev++)
-        {
-            for (uint8_t func = 0; func < 8; func++)
-            {
-                uint32_t id = pci_read32((uint8_t)bus, dev, func, 0x00);
-                if ((id & 0xFFFF) == 0xFFFF) continue;
-
-                uint32_t class = pci_read32((uint8_t)bus, dev, func, 0x08);
-                uint8_t base_cls = (class >> 24) & 0xFF;
-                uint8_t sub_cls  = (class >> 16) & 0xFF;
-                uint8_t prog_if  = (class >>  8) & 0xFF;
-
-                if (base_cls == PCI_CLASS_SERIAL_BUS &&
-                        sub_cls  == PCI_SUBCLASS_USB &&
-                        prog_if  == PCI_PROGIF_UHCI)
-                {
-
-                    uint32_t bar4 = pci_read32((uint8_t)bus, dev, func, 0x20);
-                    if (!(bar4 & 0x01)) continue;
-                    uint16_t io_base = bar4 & 0xFFFC;
-                    if (io_base == 0) continue;
-
-                    uint32_t cmd = pci_read32((uint8_t)bus, dev, func, 0x04);
-                    cmd |= 0x05;
-                    pci_write32((uint8_t)bus, dev, func, 0x04, cmd);
-
-                    //Отключить BIOS USB Legacy Support / SMI generation на ICH3/ICH4
-                    //Пока SMI включён, любое обращение к USB-регистрам может уходить в BIOS
-                    //через SMI — с непредсказуемой задержкой и порчей состояния
-                    //Делаем ДО return 0, иначе для UHCI код не выполнится
-                    uint32_t vendor_dev = pci_read32((uint8_t)bus, dev, func, 0x00);
-                    if ((vendor_dev & 0xFFFF) == 0x8086)    //Intel
-                    {
-                        //USBLEGSUP: bit0 = SMI enable (снять), bit8 = PIRQ enable (можно оставить)
-                        //Пишем 0x2000 — SMI=0, PIRQ=1, все R/WC очищены
-                        pci_write32((uint8_t)bus, dev, func, 0xC0, 0x2000);
-                    }
-
-                    hc->io_base  = io_base;
-                    hc->pci_bus  = (uint8_t)bus;
-                    hc->pci_dev  = dev;
-                    hc->pci_func = func;
-                    return 0;
-                }
-            }
-        }
-    }
-    return -1;
-}*/
-
-//Найти ВСЕ UHCI-контроллеры в PCI. Заполняет uhci_hcs[], возвращает количество.
+//Найти ВСЕ UHCI-контроллеры в PCI. Заполняет uhci_hcs[], возвращает количество
 int uhci_probe_all(void)
 {
     uhci_hc_count = 0;
@@ -369,8 +312,8 @@ int uhci_probe_all(void)
                 uint8_t prog_if  = (class >>  8) & 0xFF;
 
                 if (base_cls != PCI_CLASS_SERIAL_BUS ||
-                    sub_cls  != PCI_SUBCLASS_USB ||
-                    prog_if  != PCI_PROGIF_UHCI) continue;
+                        sub_cls  != PCI_SUBCLASS_USB ||
+                        prog_if  != PCI_PROGIF_UHCI) continue;
 
                 uint32_t bar4 = pci_read32((uint8_t)bus, dev, func, 0x20);
                 if (!(bar4 & 0x01)) continue;
@@ -415,9 +358,9 @@ int uhci_init(uhci_hc_t *hc)
 {
     if (!hc) return -1;
 
-    //Legacy mode BIOS: если CF=0, BIOS оставил HC в режиме, где firmware делит управление с OS
+    //Legacy mode BIOS: если CF=0, BIOS оставил HC в режиме, где firmware делит управление с ОС
     //Принудительно переводим в полный OS-контроль
-        //Global reset: сбрасывает HC и все порты в исходное состояние.
+    //Global reset: сбрасывает HC и все порты в исходное состояние.
     //На ICH3 после BIOS порты могут быть в SUSPEND/SDE/legacy — global reset
     //это очищает. Делаем ДО HCRESET, чтобы HC точно был в чистом состоянии.
     outw(hc->io_base + UHCI_USBCMD, USBCMD_GRESET | USBCMD_CF);
@@ -438,11 +381,13 @@ int uhci_init(uhci_hc_t *hc)
     //может быть установлен постоянно, аппаратно отключая порт.
     //Игнорируем его — пишем 1 для очистки change-бита (если это R/WC)
     //и принудительно включаем порт позже через reset.
-    for (int p = 0; p < 2; p++){
+    for (int p = 0; p < 2; p++)
+    {
         uint16_t preg = (p == 0) ? UHCI_PORTSC1 : UHCI_PORTSC2;
         uint16_t ps = inw(hc->io_base + preg);
-        if (ps & 0x0080){                 /* OverCurrent Indicator / Change */
-            outw(hc->io_base + preg, ps);  /* write-1-to-clear все change-биты */
+        if (ps & 0x0080)                  //OverCurrent Indicator / Change
+        {
+            outw(hc->io_base + preg, ps);  //write-1-to-clear все change-биты
         }
     }
 
@@ -458,13 +403,13 @@ int uhci_init(uhci_hc_t *hc)
     outw(hc->io_base + UHCI_SOFMOD, 64);   //64 байта на кадр
 
     //Запуск HC: CF=1 (полный OS-контроль, без legacy режима) + RS=1.
-    //CF обязателен! Без него на ICH3/ICH4 HC остаётся в legacy BIOS
+    //CF обязателен. Без него на ICH3/ICH4 HC остаётся в legacy BIOS
     //режиме, порты не сканируются, CCS не выставляется. QEMU этого
-    //не проверяет (там HC всегда "configured"), а реальное железо — да.
+    //не проверяет (там HC всегда "configured"), а реальное железо — да
     uint16_t cmd = inw(hc->io_base + UHCI_USBCMD);
     outw(hc->io_base + UHCI_USBCMD, cmd | USBCMD_CF | USBCMD_RS);
 
-        //Дождаться, что HC снял HCH и реально запустился
+    //Дождаться, что HC снял HCH и реально запустился
     for (uint32_t i = 0; i < 100000; i++)
     {
         uint16_t sts = inw(hc->io_base + UHCI_USBSTS);
@@ -511,22 +456,26 @@ int uhci_reset_port(uhci_hc_t *hc, int port)
     }
 
     uint16_t s = inw(hc->io_base + reg);
-    if (s & PORTSC_DS) return -3;        /* debug port — не трогаем */
+    if (s & PORTSC_DS) return -3;        //debug port — не трогаем
 
-    /* Если CCS=0, но установлен overcurrent (бит 7) — это, скорее всего,
-       ложное срабатывание на старом ICH. Пробуем сбросить порт всё равно:
-       после reset overcurrent-состояние может уйти. */
-    if (!(s & PORTSC_CCS)){
-        if (s & 0x0080){
-            /* Очистить change-бит overcurrent, записав 1 */
+    //Если CCS=0, но установлен overcurrent (бит 7) — это, скорее всего,
+    //ложное срабатывание на старом ICH. Пробуем сбросить порт всё равно:
+    //после reset overcurrent-состояние может уйти
+    if (!(s & PORTSC_CCS))
+    {
+        if (s & 0x0080)
+        {
+            //Очистить change-бит overcurrent, записав 1
             outw(hc->io_base + reg, s);
             for (volatile int i = 0; i < 10000; i++) inw(hc->io_base + reg);
             s = inw(hc->io_base + reg);
-            /* Если CCS всё ещё 0 — устройство действительно не подключено
-               (или overcurrent реальный). Продолжаем reset на всякий случай:
-               reset может «выбить» залипшее overcurrent-состояние. */
-        } else {
-            return -1;                   /* нет устройства и нет overcurrent */
+            //Если CCS всё ещё 0 — устройство действительно не подключено
+            //(или overcurrent реальный). Продолжаем reset на всякий случай:
+            //reset может выбить залипшее overcurrent-состояние
+        }
+        else
+        {
+            return -1; //нет устройства и нет overcurrent
         }
     }
 
@@ -664,7 +613,7 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr,
     for (int i = 0; i < 1024; i++)
         *(uint32_t*)&frame_list_ptr[i*4] = (qh_phys_val & ~0x0Fu) | TD_LINK_Q;
 
-    //--- Ожидание ---
+    //Ожидание
     uint32_t timeout = 50000000;   //safety-net по итерациям
     uint32_t nak_retries = 0;
     uint32_t start_tick = uhci_get_ticks();
@@ -757,11 +706,12 @@ int uhci_control_transfer(uhci_hc_t *hc, uint8_t dev_addr,
     //(актуально для IN-передач)
     uhci_rmb();
 
-        //Диагностика неудачи control-transfer: покажем код, финальный статус TD
+    //Диагностика неудачи control-transfer: покажем код, финальный статус TD
     //и PORTSC — по ним видно, STALL это, timeout, или порт выключился.
-    if (result < 0 && api_ptr && api_ptr->load_screen_add_string) {
+    if (result < 0 && api_ptr && api_ptr->load_screen_add_string)
+    {
         api_ptr->load_screen_add_string("ctrl xfer: r=%x st=%x ls=%d addr=%d",
-            (uint32_t)result, tds[sidx].status, (int)(ls_bit ? 1 : 0), dev_addr);
+                                        (uint32_t)result, tds[sidx].status, (int)(ls_bit ? 1 : 0), dev_addr);
     }
 
     for (int i = 0; i < 1024; i++)
@@ -874,7 +824,7 @@ int uhci_bulk_transfer(uhci_hc_t *hc, uint8_t dev_addr, uint8_t ep_addr,
             if (nak_seen)
             {
                 //Retry: toggle-механизм USB гарантирует, что уже ACK'нутые пакеты не будут приняты
-                // повторно (discard+ACK)
+                //повторно (discard+ACK)
                 if (++nak_retries > 1000)
                 {
                     result = -5;

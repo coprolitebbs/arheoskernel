@@ -22,14 +22,16 @@
 
 //Один глиф. Бимонарный образ лежит как height строк по ceil(width/8) байт,
 //MSB — левый пиксель. Для моноширинных шрифтов 8x8 это ровно 8 байт
-typedef struct {
+typedef struct
+{
     uint32_t       codepoint;   //U+0041, U+0416, U+2588, ...
     uint8_t        width;       //пикселей, обычно 8
     uint8_t        height;      //пикселей, обычно 8 или 16
     const uint8_t *rows;        //height строк данных
 } font_glyph_t;
 
-typedef struct {
+typedef struct
+{
     const char *name;           //"vga-8x8", "terminus-8x16"
 
     uint8_t     cell_width;     //ширина моноширинной ячейки

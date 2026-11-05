@@ -30,8 +30,9 @@ static const locale_t *g_active;
 static locale_t g_locale_pool[LOCALE_POOL_MAX];
 static int      g_locale_pool_used;
 
-static const locale_keymap_t g_default_keymap = {
-        .normal = {
+static const locale_keymap_t g_default_keymap =
+{
+    .normal = {
         [0x01]=27,       //ESC
         [0x02]='1',[0x03]='2',[0x04]='3',[0x05]='4',[0x06]='5',[0x07]='6',
         [0x08]='7',[0x09]='8',[0x0A]='9',[0x0B]='0',[0x0C]='-',[0x0D]='=',
@@ -62,18 +63,28 @@ static const locale_keymap_t g_default_keymap = {
 };
 
 
-static int str_eq(const char *a, const char *b){
-    while (*a && *a == *b){ a++; b++; }
+static int str_eq(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+    {
+        a++;
+        b++;
+    }
     return *a == *b;
 }
 
 
-static locale_keymap_t *locale_keymap_load_file(const char *path){
+static locale_keymap_t *locale_keymap_load_file(const char *path)
+{
     cfg_file_t *cfg = cfg_open(path, FS_OPEN_READ, true);
     if (!cfg) return NULL;
 
     locale_keymap_t *kmap = (locale_keymap_t *)kmalloc(sizeof(locale_keymap_t));
-    if (!kmap){ cfg_close(cfg); return NULL; }
+    if (!kmap)
+    {
+        cfg_close(cfg);
+        return NULL;
+    }
     memset(kmap, 0, sizeof(locale_keymap_t));
 
     static const char hexd[] = "0123456789ABCDEF";
@@ -81,7 +92,8 @@ static locale_keymap_t *locale_keymap_load_file(const char *path){
     key[0] = '0';
     key[1] = 'x';
 
-    for (int sc = 0; sc < 128; sc++){
+    for (int sc = 0; sc < 128; sc++)
+    {
         key[2] = hexd[(sc >> 4) & 0xF];
         key[3] = hexd[ sc       & 0xF];
         key[4] = '\0';
@@ -95,8 +107,9 @@ static locale_keymap_t *locale_keymap_load_file(const char *path){
 }
 
 
-// ---- Построение пути /config/locales/<code>.cfg без snprintf ----
-static void build_locale_path(const char *code, char *out, int out_size){
+//Построение пути /config/locales/<code>.cfg без snprintf
+static void build_locale_path(const char *code, char *out, int out_size)
+{
     const char *prefix = "/config/locales/";
     int i = 0;
     while (*prefix && i < out_size - 1) out[i++] = *prefix++;
@@ -107,7 +120,8 @@ static void build_locale_path(const char *code, char *out, int out_size){
 }
 
 
-void locale_registry_init(void){
+void locale_registry_init(void)
+{
     for (int i = 0; i < LOCALE_REGISTRY_MAX; i++) g_locales[i] = 0;
     g_locale_count = 0;
     g_active = 0;
@@ -116,7 +130,8 @@ void locale_registry_init(void){
 
 
 
-int locale_register(const locale_t *loc){
+int locale_register(const locale_t *loc)
+{
     if (!loc || !loc->code || !loc->font) return -1;
     if (g_locale_count >= LOCALE_REGISTRY_MAX) return -1;
     for (int i = 0; i < g_locale_count; i++)
@@ -126,37 +141,46 @@ int locale_register(const locale_t *loc){
     return g_locale_count++;
 }
 
-const locale_t *locale_by_code(const char *code){
+const locale_t *locale_by_code(const char *code)
+{
     if (!code) return 0;
     for (int i = 0; i < g_locale_count; i++)
         if (str_eq(g_locales[i]->code, code)) return g_locales[i];
     return 0;
 }
 
-const locale_t *locale_get_active(void){ return g_active; }
+const locale_t *locale_get_active(void)
+{
+    return g_active;
+}
 
 
-int locale_set_active(const char *code){
+int locale_set_active(const char *code)
+{
     const locale_t *l = locale_by_code(code);
     if (!l) return -1;
     g_active = l;
     return 0;
 }
 
-locale_t *locale_alloc(const char *code, const char *display_name, const font_t *font){
+locale_t *locale_alloc(const char *code, const char *display_name, const font_t *font)
+{
     if (!code || !font) return 0;
-    // Пытаемся загрузить keymap из /config/locales/<code>.cfg.
-    // Если файла нет — kmap = NULL, работать будет через дефолт.
+    //Пытаемся загрузить keymap из /config/locales/<code>.cfg.
+    //Если файла нет — kmap = NULL, работать будет через дефолт.
     char path[128];
     build_locale_path(code, path, sizeof(path));
     locale_keymap_t *kmap = locale_keymap_load_file(path);
 
-    // Перерегистрация существующей локали — обновляем поля.
-    for (int i = 0; i < g_locale_pool_used; i++){
-        if (str_eq(g_locale_pool[i].code, code)){
+    //Перерегистрация существующей локали — обновляем поля.
+    for (int i = 0; i < g_locale_pool_used; i++)
+    {
+        if (str_eq(g_locale_pool[i].code, code))
+        {
             g_locale_pool[i].display_name = display_name;
             g_locale_pool[i].font         = font;
-            if (kmap){
+            if (kmap)
+            {
                 if (g_locale_pool[i].keymap) kfree(g_locale_pool[i].keymap);
                 g_locale_pool[i].keymap = kmap;
             }
@@ -164,7 +188,8 @@ locale_t *locale_alloc(const char *code, const char *display_name, const font_t 
         }
     }
 
-    if (g_locale_pool_used >= LOCALE_POOL_MAX){
+    if (g_locale_pool_used >= LOCALE_POOL_MAX)
+    {
         if (kmap) kfree(kmap);
         return 0;
     }
@@ -173,30 +198,33 @@ locale_t *locale_alloc(const char *code, const char *display_name, const font_t 
     l->code         = code;
     l->display_name = display_name;
     l->font         = font;
-    l->keymap       = kmap;   // может быть NULL — это нормально
+    l->keymap       = kmap;   //может быть NULL — это нормально
     locale_register(l);
     return l;
 }
 
 
-const locale_t *locale_get_by_index(uint8_t idx){
+const locale_t *locale_get_by_index(uint8_t idx)
+{
     if (idx >= g_locale_pool_used) return 0;
     return &g_locale_pool[idx];
 }
 
 
 
-uint32_t locale_resolve_key(const locale_t *loc, uint8_t scancode, bool shift){
+uint32_t locale_resolve_key(const locale_t *loc, uint8_t scancode, bool shift)
+{
     if (scancode >= 128) return 0;
 
-    if (loc && loc->keymap){
+    if (loc && loc->keymap)
+    {
         uint32_t cp = shift ? loc->keymap->shift[scancode]
-                            : loc->keymap->normal[scancode];
+                      : loc->keymap->normal[scancode];
         if (cp != 0) return cp;
     }
     //Фоллбек: чистая US-раскладка
     return shift ? g_default_keymap.shift[scancode]
-                 : g_default_keymap.normal[scancode];
+           : g_default_keymap.normal[scancode];
 }
 
 

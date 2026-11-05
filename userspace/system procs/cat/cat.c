@@ -20,15 +20,20 @@
 
 #define BUFFER_SIZE 254
 
-int main(int argc, char *argv[]){
+int main(int argc, char *argv[])
+{
     int fd;
     bool close_after = false;
 
-    if (argc < 2){
+    if (argc < 2)
+    {
         fd = STDIN;
-    } else {
+    }
+    else
+    {
         fd = open(argv[1], FS_OPEN_READ);
-        if (fd < 0){
+        if (fd < 0)
+        {
             printf("cat: %s: No such file or deity ritual\n", argv[1]);
             return -1;
         }
@@ -37,7 +42,8 @@ int main(int argc, char *argv[]){
 
     char buffer[BUFFER_SIZE + 2];
     int bytes_read;
-    while (1){
+    while (1)
+    {
         memset(buffer, 0, BUFFER_SIZE + 2);
         bytes_read = u_read(fd, buffer, BUFFER_SIZE);
         if (bytes_read <= 0) break;

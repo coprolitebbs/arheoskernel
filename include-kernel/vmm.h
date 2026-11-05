@@ -31,14 +31,16 @@
 #define PAGE_PCD     0x10   //Page Cache Disable (bit 4)
 
 
-typedef struct vm_page{
+typedef struct vm_page
+{
     uint32_t virt;
     uint32_t phys;
     uint32_t flags;
     struct vm_page *next;
 } vm_page_t;
 
-typedef struct kmem_block{
+typedef struct kmem_block
+{
     uint32_t size;
     struct kmem_block *next;
 } kmem_block_t;
@@ -81,16 +83,16 @@ void vmm_init(/*uint32_t vbe_phys, uint32_t vbe_size*/);
 
 void vmm_map_pages(uint32_t vbe_phys, uint32_t vbe_size);
 
-/* Явно пометить PDE как kernel-critical (LFB/MMIO): копируется в user-PD
-   даже из диапазона 256..511. Вызывается из vmm_map_pages() автоматически
-   для LFB; для других MMIO-регионов — вручную после vmm_map_page(). */
+//Явно пометить PDE как kernel-critical (LFB/MMIO): копируется в user-PD
+//даже из диапазона 256..511. Вызывается из vmm_map_pages() автоматически
+//для LFB; для других MMIO-регионов — вручную после vmm_map_page()
 void vmm_mark_pde_critical(uint32_t pd_index);
 
 //Выделить страницу в виртуальном адресном пространстве ядра
-void* vmm_alloc_kernel_page(void);
+//void* vmm_alloc_kernel_page(void);
 
 //Освободить страницу в виртуальном адресном пространстве ядра
-void vmm_free_kernel_page(void *addr);
+//void vmm_free_kernel_page(void *addr);
 
 page_directory_t* vmm_create_user_space(void);
 

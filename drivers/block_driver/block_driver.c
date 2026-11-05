@@ -42,11 +42,11 @@ void ata_soft_reset(uint16_t base)
 {
     //Control-регистр канала: 0x3F6 (primary) или 0x376 (secondary)
     uint16_t ctrl = (base == 0x1F0) ? 0x3F6 : 0x376;
-    outb(ctrl, 0x04);                    // SRST=1
+    outb(ctrl, 0x04);                    //SRST=1
     for (int i = 0; i < 8; i++) inb(ctrl);  // ≥ 2×400 ns
-    outb(ctrl, 0x00);                    // SRST=0
+    outb(ctrl, 0x00);                    //SRST=0
     uint32_t t = 500000;
-    while ((inb(base + 7) & 0x80) && --t);  // ждать BSY=0
+    while ((inb(base + 7) & 0x80) && --t);  //ждать BSY=0
 }
 
 
@@ -72,7 +72,7 @@ int ata_identify(uint16_t base, uint8_t slave, uint16_t *out_identify)
     outb(base + 4, 0);
     outb(base + 5, 0);
 
-    outb(base + 7, 0xEC); // IDENTIFY DEVICE
+    outb(base + 7, 0xEC); //IDENTIFY DEVICE
 
     for (int i = 0; i < 4; i++) inb(base + 7);
 
@@ -80,8 +80,8 @@ int ata_identify(uint16_t base, uint8_t slave, uint16_t *out_identify)
     if (status == 0x00 || status == 0xFF)
     {
         //api_ptr->debug1 = base; api_ptr->debug2 = slave;
-        //api_ptr->debug3 = 0x100 + status;    // 0x100 = "no drive"
-        return FS_IO_ERROR; // no drive
+        //api_ptr->debug3 = 0x100 + status;    //0x100 = "no drive"
+        return FS_IO_ERROR; //no drive
     }
 
     uint32_t timeout = 500000;
@@ -89,7 +89,7 @@ int ata_identify(uint16_t base, uint8_t slave, uint16_t *out_identify)
     if (timeout == 0)
     {
         //api_ptr->debug1 = base; api_ptr->debug2 = slave;
-        //api_ptr->debug3 = 0x200;             // "BSY stuck"
+        //api_ptr->debug3 = 0x200;             //"BSY stuck"
         return FS_IO_ERROR;
     }
 

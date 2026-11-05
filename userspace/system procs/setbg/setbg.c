@@ -20,8 +20,10 @@
 #include "../../include/uimage.h"
 #include "../../../include-kernel/lib.h"
 
-int main(int argc, char *argv[]){
-    if (argc < 2){
+int main(int argc, char *argv[])
+{
+    if (argc < 2)
+    {
         printf("setbg: missing file operand\n");
         printf("Usage: setbg [-t (tile mode)] [-s (stretch mode)] [file.tga]\n");
         return -1;
@@ -30,17 +32,24 @@ int main(int argc, char *argv[]){
     uint32_t mode = 0;
     const char *filepath = NULL;
 
-    for (int i = 1; i < argc; i++){
-        if (strcmp(argv[i], "-t") == 0){
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-t") == 0)
+        {
             mode = 1; // TILE
-        } else if (strcmp(argv[i], "-s") == 0){
+        }
+        else if (strcmp(argv[i], "-s") == 0)
+        {
             mode = 2; // STRETCH
-        } else {
+        }
+        else
+        {
             filepath = argv[i];
         }
     }
 
-    if (!filepath){
+    if (!filepath)
+    {
         printf("setbg: no target TGA image specified\n");
         return -1;
     }
@@ -50,18 +59,24 @@ int main(int argc, char *argv[]){
     get_fb_info(&scr_pitch, &scr_bpp, &scr_width, &scr_height);
 
     //Страховочный фолбек
-    if (scr_width == 0 || scr_height == 0 || scr_bpp == 0) {
+    if (scr_width == 0 || scr_height == 0 || scr_bpp == 0)
+    {
         scr_width = 1024;
         scr_height = 768;
         scr_bpp = 32;
         scr_pitch = 1024 * 4;
     }
 
-    if (mode == 2) {
+    if (mode == 2)
+    {
         printf("Mode: Stretch to screen size.\n");
-    } else if (mode == 1) {
+    }
+    else if (mode == 1)
+    {
         printf("Mode: Tiled pattern.\n");
-    } else {
+    }
+    else
+    {
         printf("Mode: Centered 1:1.\n");
     }
 
@@ -69,7 +84,8 @@ int main(int argc, char *argv[]){
 
     //Загружаем TGA с передачей выбранного численного режима упаковки
     uint8_t *wp_buffer = load_tga_to_buffer(filepath, scr_width, scr_height, scr_bpp, scr_pitch, mode,nullptr);
-    if (!wp_buffer){
+    if (!wp_buffer)
+    {
         printf("setbg: encoding crash or missing TGA file: %s\n", filepath);
         return -1;
     }
@@ -84,7 +100,8 @@ int main(int argc, char *argv[]){
     //Сразу же очищаем Userspace-память процесса
     free(wp_buffer);
 
-    if (res != 0){
+    if (res != 0)
+    {
         printf("setbg: critical driver rejection\n");
         return -1;
     }

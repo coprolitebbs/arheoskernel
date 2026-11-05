@@ -22,7 +22,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-typedef struct {
+typedef struct
+{
     int fd;
     bool buffer_used;
     void *file_buffer_ptr;

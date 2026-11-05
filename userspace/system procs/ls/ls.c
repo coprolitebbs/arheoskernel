@@ -18,9 +18,11 @@
 #include "../../include/ustd.h"
 #include "../../../include-kernel/lib.h"
 
-// Алгоритм разбора Unix Timestamp в человеческую дату для консоли ARHeos
-static void print_datetime(uint32_t timestamp){
-    if (timestamp == 0){
+//Алгоритм разбора Unix Timestamp в человеческую дату для консоли ARHeos
+static void print_datetime(uint32_t timestamp)
+{
+    if (timestamp == 0)
+    {
         printf("00-00-0000 00:00  ");
         return;
     }
@@ -37,26 +39,32 @@ static void print_datetime(uint32_t timestamp){
 
     //Расчет года (начиная с эпохи 1970)
     uint32_t year = 1970;
-    while (1){
+    while (1)
+    {
         bool is_leap = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
         uint32_t days_in_year = is_leap ? 366 : 365;
 
-        if (days >= days_in_year){
+        if (days >= days_in_year)
+        {
             days -= days_in_year;
             year++;
-        } else {
+        }
+        else
+        {
             break;
         }
     }
 
     //Расчет месяца и числа внутри найденного года
     uint8_t month_lengths[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    if (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)){
+    if (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))
+    {
         month_lengths[1] = 29;
     }
 
     uint32_t month = 0;
-    while (days >= month_lengths[month]){
+    while (days >= month_lengths[month])
+    {
         days -= month_lengths[month];
         month++;
     }
@@ -65,51 +73,69 @@ static void print_datetime(uint32_t timestamp){
     month = month + 1;
 
     printf("%d%d-%d%d-%d %d%d:%d%d  ",
-        day / 10, day % 10,
-        month / 10, month % 10,
-        year,
-        hours / 10, hours % 10,
-        minutes / 10, minutes % 10
-    );
+           day / 10, day % 10,
+           month / 10, month % 10,
+           year,
+           hours / 10, hours % 10,
+           minutes / 10, minutes % 10
+          );
 }
 
-static void print_flags(uint32_t attr, uint32_t type){
+static void print_flags(uint32_t attr, uint32_t type)
+{
     (void)type;   //параметр больше не нужен
-    if (attr & FS_ATTR_DIRECTORY){
+    if (attr & FS_ATTR_DIRECTORY)
+    {
         printf("d");
-    } else if (attr & FS_ATTR_SYSTEM){
+    }
+    else if (attr & FS_ATTR_SYSTEM)
+    {
         printf("s");
-    } else {
+    }
+    else
+    {
         printf("-");
     }
 
-    if (attr & FS_ATTR_READONLY){
+    if (attr & FS_ATTR_READONLY)
+    {
         printf("r- ");
-    } else {
+    }
+    else
+    {
         printf("rw ");
     }
 
-    if (attr & FS_ATTR_HIDDEN){
+    if (attr & FS_ATTR_HIDDEN)
+    {
         printf("h ");
-    } else {
+    }
+    else
+    {
         printf("- ");
     }
 }
 
-int main(int argc, char *argv[]){
+int main(int argc, char *argv[])
+{
     const char *target_dir = "";
     bool long_format = false;
 
-    for (int i = 1; i < argc; i++){
-        if (strcmp(argv[i], "-l") == 0){
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-l") == 0)
+        {
             long_format = true;
-        } else {
+        }
+        else
+        {
             target_dir = argv[i];
         }
     }
 
     int dir_fd = open(target_dir, 1);
-    if (dir_fd < 0){
+    if (dir_fd < 0)
+    {
         printf("ls: cannot open directory '%s'\n", target_dir[0] == '\0' ? "./" : target_dir);
         return -1;
     }
@@ -117,12 +143,15 @@ int main(int argc, char *argv[]){
     u_dirent_t entry;
     int files_count = 0;
 
-    while (u_readdir(dir_fd, &entry) == 0){
-        if (entry.name[0] == '\0') {
+    while (u_readdir(dir_fd, &entry) == 0)
+    {
+        if (entry.name[0] == '\0')
+        {
             continue;
         }
 
-        if (long_format){
+        if (long_format)
+        {
             u_stat_t st;
             st.size = 0;
             st.attributes = entry.attributes;
@@ -143,19 +172,22 @@ int main(int argc, char *argv[]){
 
             //Печатаем имя файла
             bool is_dir = (entry.attributes & FS_ATTR_DIRECTORY) ||
-                  (entry.type == FS_ATTR_DIRECTORY) ||
-                  (st.attributes & FS_ATTR_DIRECTORY);
+                          (entry.type == FS_ATTR_DIRECTORY) ||
+                          (st.attributes & FS_ATTR_DIRECTORY);
 
             printf("%s", entry.name);
             if (is_dir) printf("/");
             printf("\n");
-        } else {
+        }
+        else
+        {
             printf("%s  ", entry.name);
         }
         files_count++;
     }
 
-    if (files_count > 0 && !long_format){
+    if (files_count > 0 && !long_format)
+    {
         printf("\n");
     }
 

@@ -22,10 +22,10 @@
 #include "fat12_internal.h"
 
 //Floppy Disk Controller (Intel 82077AA / NEC 765 Compatible) Ports
-#define FDC_DOR                 0x3F2   /* Digital Output Register (Write Only) */
-#define FDC_MSR                 0x3F4   /* Main Status Register (Read Only) */
-#define FDC_FIFO                0x3F5   /* Data FIFO / Command Register (R/W) */
-#define FDC_CCR                 0x3F7   /* Configuration Control Register (Write Only) */
+#define FDC_DOR                 0x3F2   //Digital Output Register (Write Only)
+#define FDC_MSR                 0x3F4   //Main Status Register (Read Only)
+#define FDC_FIFO                0x3F5   //Data FIFO / Command Register (R/W)
+#define FDC_CCR                 0x3F7   //Configuration Control Register (Write Only)
 #define FDC_CTRL                0x3F7
 
 //Digital Output Register (DOR) Bits

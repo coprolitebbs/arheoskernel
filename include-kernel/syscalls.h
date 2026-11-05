@@ -37,7 +37,8 @@
 #include "use_drivers.h"
 
 //Структура векторов системных вызовов
-typedef struct {
+typedef struct
+{
     //uint16_t number;
     void (*func)(struct regs *r);
 } syscall_vectors_table_t;
@@ -46,11 +47,13 @@ typedef struct {
 extern syscall_vectors_table_t syscalls_table[MAX_SYSCALLS];
 
 //Вспомогательные макросы для вызова из ядра (если нужно)
-static inline void sys_draw_char(unsigned int x, unsigned int y, char c){
-	asm volatile("int $0x80"::"a"(SYS_DRAW_CHAR),"b"(x),"c"(y),"d"(c):"memory");
+static inline void sys_draw_char(unsigned int x, unsigned int y, char c)
+{
+    asm volatile("int $0x80"::"a"(SYS_DRAW_CHAR),"b"(x),"c"(y),"d"(c):"memory");
 }
 
-static inline void sys_fill_screen(unsigned char r, unsigned char g, unsigned char b){
+static inline void sys_fill_screen(unsigned char r, unsigned char g, unsigned char b)
+{
     asm volatile("int $0x80"::"a"(SYS_FILL_SCREEN),"b"(r),"c"(g),"d"(b):"memory");
 }
 
