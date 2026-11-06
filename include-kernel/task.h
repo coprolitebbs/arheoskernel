@@ -29,6 +29,22 @@
 
 #define MAX_PROCESS_FDS 16
 
+//Kernel stack задачи: KERNEL_STACK_PAGES страниц. Одна страница (4KB) не вмещает
+//глубокие syscall-цепочки (spawn = VFS+ext2+ELF-загрузчик, при -O0 кадры большие),
+//даже теперь, когда spawn держит kernel_schedule_lock. Переполнение уходит ВНИЗ
+//в чужую ЖИВУЮ страницу (кто там лежит — решает PMM-ротация: identity-PT, PT/PD
+//другого процесса, метаданные кучи) -> "случайные" Page Fault на ровном месте
+//с CR2 в непредсказуемом месте. 16KB дают запас в ~4 раза.
+#define KERNEL_STACK_PAGES 4
+
+//User stack: единая точка правды для create_user_stack() и лимитов кучи Ring 3
+//(systemcall_alloc_page / systemcall_sbrk / systemcall_free_page). Раньше лимиты
+//были захардкожены 0x7FFF0000/0x7FFFF000 под 16 страниц стека; при 64 страницах
+//куча могла налезть на нижние страницы стека.
+#define USER_STACK_VA_TOP    0x80000000u
+#define USER_STACK_PAGES     64u
+#define USER_STACK_VA_FLOOR  (USER_STACK_VA_TOP - USER_STACK_PAGES * PAGE_SIZE)
+
 //Состояния
 #define TASK_RUNNING  0
 #define TASK_READY    1

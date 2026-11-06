@@ -134,7 +134,8 @@ void systemcall_get_fb_info(struct regs *r)
 
 void systemcall_alloc_page(struct regs *r)
 {
-    if (current_task->heap_next >= 0x7FFF0000)
+    //Верхняя граница кучи Ring 3 = нижняя граница user stack (task.h)
+    if (current_task->heap_next >= USER_STACK_VA_FLOOR)
     {
         r->eax = 0;
         return;
@@ -155,11 +156,11 @@ void systemcall_alloc_page(struct regs *r)
     //memset((void*)phys, 0, PAGE_SIZE);
     //Мапим страницу
     vmm_map_page(current_task->page_dir, virt, phys, flags);
-    memset((void*)virt, 0, PAGE_SIZE);
     if (vmm_get_phys_addr(current_task->page_dir, virt) == 0)
     {
-        /* маппинг провалился — не memset'им в никуда, откатываемся */
+        //маппинг провалился — не пишем memset по незамапленному VA
         pmm_free_page((void*)phys);
+        kernel_schedule_lock = 0;
         r->eax = 0;
         return;
     }
@@ -181,14 +182,15 @@ void systemcall_alloc_page(struct regs *r)
     kernel_schedule_lock = 0;
 
     current_task->heap_next += PAGE_SIZE;
-    r->eax = virt; //Отдаем виртуальный адрес кучи в ghjwtcc Ring 3
+    r->eax = virt; //Отдаем виртуальный адрес кучи в процесс Ring 3
 }
 
 //ebx = виртуальный адрес освобождаемой страницы (virt)
 void systemcall_free_page(struct regs *r)
 {
     uint32_t virt = r->ebx;
-    if ((virt & 0xFFF) != 0 || virt < 0x50000000 || virt >= 0x7FFFF000)
+    //Куча Ring 3 заканчивается там же, где начинается user stack (task.h)
+    if ((virt & 0xFFF) != 0 || virt < 0x50000000 || virt >= USER_STACK_VA_FLOOR)
     {
         r->eax = -1;
         return;
@@ -215,7 +217,7 @@ void systemcall_free_page(struct regs *r)
         r->eax = -1;
         return;
     }
-    // Unmap FIRST, then return phys to PMM
+    //Размапим первую страницу, вернем phys в PMM
     vmm_unmap_page(current_task->page_dir, virt);
     pmm_free_page((void*)(phys & 0xFFFFF000));
     kernel_schedule_lock = 0;
@@ -792,21 +794,25 @@ void systemcall_spawn_process(struct regs *r)
         return;
     }
 
+    //Блокируем вытеснение на время спавна:
+    //1) task_spawn_elf/builtin переключают CR3 на каталог новой задачи и обратно
+    //   Если посреди этого окна придёт таймер, schedule() уйдёт с CR3=new-PD,
+    //   а вернётся в продолжение спавна с CR3=родителя — и оставшаяся часть спавна
+    //   (memcpy сегментов ELF в user-VA нового процесса, argv push на его стек)
+    //   молча запишет в чужую память
+    //2) spawn — самый глубокий syscall, вложенный IRQ0+schedule()+cleanup_tasks()
+    //   на том же kernel stack лишний раз съедают его запас
+    //Приоритет сохраняем: если спавн запущен из контекста, где блокировка уже
+    //была выставлена, наружу выйдет с тем же значением.
+    uint8_t saved_sched_lock = kernel_schedule_lock;
+    kernel_schedule_lock = 1;
+
     char k_path[128];
     char k_cmdline[256];
     memset(k_path, 0, 128);
     memset(k_cmdline, 0, 256);
 
     for (int i = 0; i < 127 && user_path[i] != '\0'; i++) k_path[i] = user_path[i];
-
-    /*
-    int probe_fd = vfs_open(k_path, FS_OPEN_READ);
-    if (probe_fd < 0){ r->eax = -1; return; }
-
-    uint8_t magic[4] = {0, 0, 0, 0};
-    int probe_bytes = vfs_read(probe_fd, magic, 4);
-    vfs_close(probe_fd);
-    */
 
     if (user_cmdline)
     {
@@ -862,6 +868,7 @@ void systemcall_spawn_process(struct regs *r)
     task_t *new_task = task_spawn_from_file(k_path, 0x40000000, k_cmdline[0] != '\0' ? k_cmdline : NULL);
     if (!new_task)
     {
+        kernel_schedule_lock = saved_sched_lock;
         r->eax = -1;
         return;
     }
@@ -903,6 +910,7 @@ void systemcall_spawn_process(struct regs *r)
         }
     }
 
+    kernel_schedule_lock = saved_sched_lock;
     r->eax = new_task->pid;
 }
 
@@ -1017,8 +1025,8 @@ void systemcall_sbrk(struct regs *r)
     }
     //Вычисляем, сколько страниц ОЗУ нужно выделить под этот запрос
     uint32_t pages_needed = (increment + PAGE_SIZE - 1) / PAGE_SIZE;
-    //Защитный барьер кучи Ring 3 (ограничиваем 16 МБ до границы стека)
-    if (current_task->heap_next + (pages_needed * PAGE_SIZE) >= 0x7FFFF000)
+    //Защитный барьер кучи Ring 3: не подниматься выше нижней границы user stack (task.h)
+    if (current_task->heap_next + (pages_needed * PAGE_SIZE) >= USER_STACK_VA_FLOOR)
     {
         r->eax = 0;
         return;
@@ -1037,8 +1045,13 @@ void systemcall_sbrk(struct regs *r)
         {
             phys = (uint32_t)pmm_alloc_page();
             if (!phys) break;
-            uint32_t kstack_page = current_task->kernel_stack_phys;
-            if (phys >= 0x00100000 && phys < 0xC0000000 && phys != kstack_page)
+            //Не отдаем под user-страницу ни одну из KERNEL_STACK_PAGES страниц
+            //kernel stack текущей задачи (стек теперь 4 страницы, не одна)
+            uint32_t kstack_base = current_task->kernel_stack_phys;
+            if (phys >= 0x00100000 && phys < 0xC0000000 &&
+                !(kstack_base != 0 &&
+                  phys >= kstack_base &&
+                  phys < kstack_base + KERNEL_STACK_PAGES * PAGE_SIZE))
             {
                 break;
             }

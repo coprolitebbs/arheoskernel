@@ -235,7 +235,7 @@ int ext2_disk_read_sectors(uint32_t lba, uint32_t count, void *buf)
         // Проверяем на таймаут или бит ошибки ERR (бит 0)
         if (timeout == 0 || (status & 0x01))
         {
-            if (inb(0x1F7) & 0x08)                   // DRQ залип
+            if (inb(0x1F7) & 0x08)                   //DRQ залип
             {
                 __asm__ __volatile__("cld");
                 for (int i = 0; i < 256; i++) inw(0x1F0);
@@ -263,7 +263,7 @@ int ext2_disk_read_sectors_via(ext2_volume_t *vol, uint32_t lba, uint32_t count,
 {
     if (!vol) return FS_IO_ERROR;
     int r;
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    uint8_t ksl_we0 = KSL_ACQUIRE(api_ptr->schedule_lock_ptr);
     if (api_ptr->block_device_driver_enabled && api_ptr->block)
     {
         //uint32_t ppp = vol->drive;
@@ -273,7 +273,7 @@ int ext2_disk_read_sectors_via(ext2_volume_t *vol, uint32_t lba, uint32_t count,
     {
         r = ext2_disk_read_sectors(lba, count, buf);
     }
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+    KSL_RELEASE(api_ptr->schedule_lock_ptr, ksl_we0);
     return r;
 }
 
@@ -287,7 +287,7 @@ int ext2_read_block(ext2_volume_t *vol, uint32_t block, void *buf)
     uint32_t lba = vol->partition_start_lba + (block * vol->sectors_per_block);
 
     int res;
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    uint8_t ksl_we1 = KSL_ACQUIRE(api_ptr->schedule_lock_ptr);
 
     if (api_ptr->block_device_driver_enabled && api_ptr->block)
     {
@@ -299,7 +299,7 @@ int ext2_read_block(ext2_volume_t *vol, uint32_t block, void *buf)
         res = ext2_disk_read_sectors(lba, vol->sectors_per_block, buf);
     }
 
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+    KSL_RELEASE(api_ptr->schedule_lock_ptr, ksl_we1);
     return res;
 }
 
@@ -325,8 +325,8 @@ int ext2_read_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *out_ino
 
     uint32_t inode_table_start_lba = vol->partition_start_lba + (inode_table_start_block * vol->sectors_per_block);
 
-    uint32_t sector_offset = index >> 2; // index / 4
-    uint32_t offset_in_sector = (index & 3) << 7;  // (index % 4) * 128
+    uint32_t sector_offset = index >> 2; //index / 4
+    uint32_t offset_in_sector = (index & 3) << 7;  //(index % 4) * 128
 
     uint32_t target_lba = (uint32_t)inode_table_start_lba + (uint32_t)sector_offset;
 
@@ -336,7 +336,7 @@ int ext2_read_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *out_ino
     if (!sector_buf) return FS_IO_ERROR;
 
     int r = FS_IO_ERROR;
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    uint8_t ksl_we2 = KSL_ACQUIRE(api_ptr->schedule_lock_ptr);
     //vol->drive = 0;
     if (api_ptr->block_device_driver_enabled && api_ptr->block)
     {
@@ -347,7 +347,7 @@ int ext2_read_inode(ext2_volume_t *vol, uint32_t inode_no, ext2_inode_t *out_ino
     {
         r = ext2_disk_read_sectors(target_lba, 1, sector_buf);
     }
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+    KSL_RELEASE(api_ptr->schedule_lock_ptr, ksl_we2);
 
     if (r != FS_OK)
     {
@@ -421,7 +421,7 @@ int ext2_disk_write_sectors_via(ext2_volume_t *vol, uint32_t lba, uint32_t count
 {
     if (!vol) return FS_IO_ERROR;
     int r;
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    uint8_t ksl_we3 = KSL_ACQUIRE(api_ptr->schedule_lock_ptr);
     if (api_ptr && api_ptr->block_device_driver_enabled && api_ptr->block)
     {
         r = api_ptr->block->write(vol->drive, (uint64_t)lba, count, buf);
@@ -430,7 +430,7 @@ int ext2_disk_write_sectors_via(ext2_volume_t *vol, uint32_t lba, uint32_t count
     {
         r = ext2_disk_write_sectors(lba, count, buf);
     }
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+    KSL_RELEASE(api_ptr->schedule_lock_ptr, ksl_we3);
     return r;
 }
 
@@ -443,7 +443,7 @@ int ext2_write_block(ext2_volume_t *vol, uint32_t block, const void *buf)
     uint32_t lba = vol->partition_start_lba + (block * vol->sectors_per_block);
 
     int res;
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    uint8_t ksl_we4 = KSL_ACQUIRE(api_ptr->schedule_lock_ptr);
 
     if (api_ptr->block_device_driver_enabled && api_ptr->block)
     {
@@ -454,7 +454,7 @@ int ext2_write_block(ext2_volume_t *vol, uint32_t block, const void *buf)
         res = ext2_disk_write_sectors(lba, vol->sectors_per_block, buf);
     }
 
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+    KSL_RELEASE(api_ptr->schedule_lock_ptr, ksl_we4);
     return res;
 }
 
@@ -484,7 +484,7 @@ int ext2_write_inode(ext2_volume_t *vol, uint32_t inode_no, const ext2_inode_t *
     uint8_t sector_buf[512] __attribute__((aligned(4)));
 
     int r = FS_IO_ERROR;
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    uint8_t ksl_we5 = KSL_ACQUIRE(api_ptr->schedule_lock_ptr);
     if (api_ptr->block_device_driver_enabled && api_ptr->block)
     {
         //блок-драйвер знает про транспорт
@@ -494,12 +494,12 @@ int ext2_write_inode(ext2_volume_t *vol, uint32_t inode_no, const ext2_inode_t *
     {
         r = ext2_disk_read_sectors(target_lba, 1, sector_buf);
     }
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+    KSL_RELEASE(api_ptr->schedule_lock_ptr, ksl_we5);
     if (r != FS_OK) return r;
 
     memcpy(sector_buf + offset_in_sector, in_inode, sizeof(ext2_inode_t));
 
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+    uint8_t ksl_we6 = KSL_ACQUIRE(api_ptr->schedule_lock_ptr);
     if (api_ptr->block_device_driver_enabled && api_ptr->block)
     {
         r = api_ptr->block->write(vol->drive, (uint64_t)target_lba, 1, sector_buf);
@@ -508,7 +508,7 @@ int ext2_write_inode(ext2_volume_t *vol, uint32_t inode_no, const ext2_inode_t *
     {
         r = ext2_disk_write_sectors(target_lba, 1, sector_buf);
     }
-    if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+    KSL_RELEASE(api_ptr->schedule_lock_ptr, ksl_we6);
     return r;
 }
 

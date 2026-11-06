@@ -1254,6 +1254,7 @@ void s_start_loading_phase(uint32_t min_val, uint32_t max_val)
     printf("\n\n");
     u_get_console_pos(&loading_screen_start_pos,&loading_screen_y);
     //printf("\n");
+    loading_screen_start_pos = 1;
     loading_screen_end_pos = cols - 2;
     loading_screen_pos = 1;
     printf("\033[%d;%dH[\033[%d;%dH]",loading_screen_y,loading_screen_start_pos,loading_screen_y,loading_screen_end_pos+1);

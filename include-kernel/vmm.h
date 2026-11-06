@@ -52,10 +52,10 @@ typedef uint32_t page_directory_t[1024];
 
 extern page_directory_t *kernel_directory;
 
-/* Заполнить один kernel-PDE в user-PD. Идемпотентна. */
+//Заполнить один kernel-PDE в user-PD
 void vmm_sync_pde_into_user_pd(page_directory_t *user_pd, uint32_t pd_index);
 
-/* Заполнить ВСЕ kernel-PDE в user-PD. Идемпотентна. */
+//Заполнить ВСЕ kernel-PDE в user-PD
 void vmm_sync_kernel_pdes(page_directory_t *user_pd);
 
 //Создать новое адресное пространство (каталог страниц)
@@ -87,12 +87,6 @@ void vmm_map_pages(uint32_t vbe_phys, uint32_t vbe_size);
 //даже из диапазона 256..511. Вызывается из vmm_map_pages() автоматически
 //для LFB; для других MMIO-регионов — вручную после vmm_map_page()
 void vmm_mark_pde_critical(uint32_t pd_index);
-
-//Выделить страницу в виртуальном адресном пространстве ядра
-//void* vmm_alloc_kernel_page(void);
-
-//Освободить страницу в виртуальном адресном пространстве ядра
-//void vmm_free_kernel_page(void *addr);
 
 page_directory_t* vmm_create_user_space(void);
 

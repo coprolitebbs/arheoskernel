@@ -39,6 +39,29 @@
 
 static spinlock_t sched_spinlock = {0};
 
+//Барьер вытеснения для CR3-окон спавна (task_spawn_elf / task_spawn_builtin)
+//Внутри окна CR3 указывает на каталог новой задачи
+//Если в этот момент придёт IRQ0 и schedule() переключит контекст, то после возврата
+//в продолжение спавна планировщик выставит CR3 = каталог родителя, и остаток окна
+//(memcpy сегментов ELF, запись argv на user-стек по VA 0x80000000−…) продолжит писать
+//в чужое адресное пространство: молча портить стек родителя или ловить PAGE FAULT
+//ERR=0x2, если текущий контекст — kernel-поток с kernel_directory (там PDE 511
+//с user-стеком отсутствует вовсе, CR2 попадает в самый верх user-стека,
+//например 0x7FFFFFF4/0x7FFFFFFD). Поэтому окно делается атомарным по прерываниям:
+//IF=0 на время окна, IRQ0 копится в PIC и доставляется сразу после восстановления
+//флагов. Save/restore вместо cli/sti — чтобы не потерять вложенное cli вызывающего
+static inline uint32_t task_irq_barrier_begin(void)
+{
+    uint32_t efl;
+    __asm__ __volatile__("pushfl; popl %0" : "=r"(efl) :: "memory");
+    __asm__ __volatile__("cli" :: : "memory");
+    return efl;
+}
+static inline void task_irq_barrier_end(uint32_t efl)
+{
+    __asm__ __volatile__("pushl %0; popfl" :: "r"(efl) : "memory");
+}
+
 int x_of = 8;
 int shedule_count = 0;
 volatile uint32_t idle_counter = 0;
@@ -112,6 +135,7 @@ void schedule(struct regs *r)
 {
     task_t *old_task = current_task;
     uint32_t old_state = old_task ? old_task->state : 0;
+    uint32_t old_pid   = old_task ? old_task->pid   : 0;
     task_t  *old_next  = (old_task && old_task->pid != 0) ? old_task->next : NULL;
 
     //Сохраняем контекст регистров текущей выполняемой задачи
@@ -138,7 +162,12 @@ void schedule(struct regs *r)
     task_t *next_task = NULL;
     if (ready_queue)
     {
-        task_t *start = (old_task && old_task->state != TASK_TERMINATED && old_task->pid != 0) ? old_task->next : ready_queue;
+        //Используем сохраненные копии old_state/old_pid, а не повторное чтение
+        //old_task->state
+        //если задача завершилась, cleanup_tasks() уже освободил  ее task_t (kfree) —
+        //повторное чтение полей из освобожденного блока кучи могло вернуть мусор
+        //(блок уже переиспользован kmalloc'ом) и уводило обход кольца по битому указателю next
+        task_t *start = (old_task && old_state != TASK_TERMINATED && old_pid != 0) ? old_task->next : ready_queue;
         task_t *t = start;
 
         do
@@ -182,7 +211,7 @@ void schedule(struct regs *r)
         : "memory"
     );
 
-    //Передаем в switch_task ЧИСТУЮ, изолированную локальную переменную target_esp,
+    //Передаем в switch_task чистую, изолированную локальную переменную target_esp,
     //исключая ложное чтение мусора из чужих структур и Page Fault / GPF
     switch_task(target_esp);
 
@@ -266,16 +295,18 @@ task_t* create_task(uint32_t entry)
     {
         task->fds[i] = -1;
     }
-    //Выделяем физическую страницу под kernel stack
-    task->kernel_stack_phys = (uint32_t)pmm_alloc_page();
+    //Выделяем KERNEL_STACK_PAGES страниц под kernel stack (16KB).
+    //Одна страница не вмещает глубокие syscall-цепочки (spawn) с вложенными IRQ:
+    //переполнение тихо затирает живую страницу ниже (см. task.h).
+    task->kernel_stack_phys = (uint32_t)pmm_alloc_pages(KERNEL_STACK_PAGES);
     if(!task->kernel_stack_phys)
     {
         draw_string(10, 120, "NO KERNEL STACK");
         for(;;);
     }
-    memset( (void*)task->kernel_stack_phys,0,PAGE_SIZE);
-    //Стек растёт вниз, поэтому kernel_stack указывает на конец страницы
-    task->kernel_stack = task->kernel_stack_phys + PAGE_SIZE;
+    memset( (void*)task->kernel_stack_phys,0,KERNEL_STACK_PAGES*PAGE_SIZE);
+    //Стек растёт вниз, поэтому kernel_stack указывает на конец последней страницы
+    task->kernel_stack = task->kernel_stack_phys + KERNEL_STACK_PAGES*PAGE_SIZE;
     task->pid = next_pid++;
     task->state = TASK_READY;
     task->parameter = 0;
@@ -375,10 +406,10 @@ void cleanup_tasks(void)
                 cur->fds[fd] = -1;
             }
 
-            //Освобождаем kernel stack
+            //Освобождаем kernel stack (KERNEL_STACK_PAGES страниц)
             if(cur->kernel_stack_phys)
             {
-                pmm_free_page( (void*)cur->kernel_stack_phys );
+                pmm_free_pages( (void*)cur->kernel_stack_phys, KERNEL_STACK_PAGES );
                 cur->kernel_stack_phys = 0;
                 cur->kernel_stack = 0;
             }
@@ -414,11 +445,8 @@ void cleanup_tasks(void)
             uint32_t sync_tlb_cr3;
             __asm__ __volatile__(
                 "mov %%cr3, %0\n\t"
-                "mov %0, %%cr3"
-                : "=r"(sync_tlb_cr3)
-                :
-                : "memory"
-            );
+                "mov %0, %%cr3" : "=r"(sync_tlb_cr3)
+                : : "memory");
 
             kfree(cur);
             cur = next;
@@ -433,10 +461,11 @@ void cleanup_tasks(void)
 
 static uint32_t create_user_stack(task_t *task)
 {
-    const uint32_t STACK_PAGES = 16;
-    uint32_t virt = 0x80000000 - STACK_PAGES * PAGE_SIZE;
+    //USER_STACK_PAGES/USER_STACK_VA_TOP заданы в task.h — тот же источник правды,
+    //что и лимиты кучи Ring 3 в systemcall_alloc_page/sbrk/free_page
+    uint32_t virt = USER_STACK_VA_TOP - USER_STACK_PAGES * PAGE_SIZE;
 
-    for (uint32_t i = 0; i < STACK_PAGES; i++)
+    for (uint32_t i = 0; i < USER_STACK_PAGES; i++)
     {
         uint32_t phys = (uint32_t)pmm_alloc_page();
         if (!phys)
@@ -448,7 +477,7 @@ static uint32_t create_user_stack(task_t *task)
         vmm_map_page(task->page_dir, virt + i * PAGE_SIZE, phys, flags);
         vm_page_add(task, virt + i * PAGE_SIZE, phys, flags);
     }
-    return 0x80000000;
+    return USER_STACK_VA_TOP;
 }
 
 
@@ -580,14 +609,14 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
         if (current_task->fds[0] > 2) task->fds[0] = current_task->fds[0];
     }
 
-    task->kernel_stack_phys = (uint32_t)pmm_alloc_page();
+    task->kernel_stack_phys = (uint32_t)pmm_alloc_pages(KERNEL_STACK_PAGES);
     if (!task->kernel_stack_phys)
     {
         kfree(task);
         return NULL;
     }
-    memset((void*)task->kernel_stack_phys, 0, PAGE_SIZE);
-    task->kernel_stack = task->kernel_stack_phys + PAGE_SIZE;
+    memset((void*)task->kernel_stack_phys, 0, KERNEL_STACK_PAGES*PAGE_SIZE);
+    task->kernel_stack = task->kernel_stack_phys + KERNEL_STACK_PAGES*PAGE_SIZE;
 
     task->pid = next_pid++;
     task->state = TASK_READY;
@@ -601,7 +630,7 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
     task->page_dir_phys = pd_phys;
     if (!task->page_dir)
     {
-        pmm_free_page((void*)task->kernel_stack_phys);
+        pmm_free_pages((void*)task->kernel_stack_phys, KERNEL_STACK_PAGES);
         kfree(task);
         return NULL;
     }
@@ -618,11 +647,15 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
         __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
         vm_pages_free_all(task);
         vmm_destroy_address_space(task->page_dir);
-        pmm_free_page((void*)task->kernel_stack_phys);
+        pmm_free_pages((void*)task->kernel_stack_phys, KERNEL_STACK_PAGES);
         kfree(task);
         return NULL;
     }
     memset(args_tokens, 0, 16 * 64);
+
+    //FIX: окно CR3 атомарно по прерываниям — IRQ0 не может уйти в schedule()
+    //посреди записи argv в адресное пространство ребёнка
+    uint32_t ksl_efl = task_irq_barrier_begin();
 
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(task->page_dir_phys));
 
@@ -692,6 +725,7 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
     task->user_stack = ustack_top;
 
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
+    task_irq_barrier_end(ksl_efl);
 
     //Освобождаем изолированный буфер ядра, он больше не нужен, так как данные уже на стеке Ring 3
     kfree(args_tokens);
@@ -756,14 +790,14 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
     task->fds[2] = 2;
     for (int i = 3; i < MAX_PROCESS_FDS; i++) task->fds[i] = -1;
 
-    task->kernel_stack_phys = (uint32_t)pmm_alloc_page();
+    task->kernel_stack_phys = (uint32_t)pmm_alloc_pages(KERNEL_STACK_PAGES);
     if (!task->kernel_stack_phys)
     {
         kfree(task);
         return NULL;
     }
-    memset((void*)task->kernel_stack_phys, 0, PAGE_SIZE);
-    task->kernel_stack = task->kernel_stack_phys + PAGE_SIZE;
+    memset((void*)task->kernel_stack_phys, 0, KERNEL_STACK_PAGES*PAGE_SIZE);
+    task->kernel_stack = task->kernel_stack_phys + KERNEL_STACK_PAGES*PAGE_SIZE;
 
     task->pid = next_pid++;
     task->state = TASK_READY;
@@ -775,7 +809,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
     task->page_dir_phys = pd_phys;
     if (!task->page_dir)
     {
-        pmm_free_page((void*)task->kernel_stack_phys);
+        pmm_free_pages((void*)task->kernel_stack_phys, KERNEL_STACK_PAGES);
         kfree(task);
         return NULL;
     }
@@ -802,7 +836,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
                 pmm_free_page((void*)task->user_stack_phys);*/
                 vm_pages_free_all(task);                       /* вернёт user leaf pages */
                 vmm_destroy_address_space(task->page_dir);     /* вернёт PD + PT */
-                pmm_free_page((void*)task->kernel_stack_phys);
+                pmm_free_pages((void*)task->kernel_stack_phys, KERNEL_STACK_PAGES);
                 kfree(task);
                 return NULL;   // refuse to corrupt kernel identity
             }
@@ -840,7 +874,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
                     {
                         vm_pages_free_all(task);
                         vmm_destroy_address_space(task->page_dir);
-                        pmm_free_page((void*)task->kernel_stack_phys);
+                        pmm_free_pages((void*)task->kernel_stack_phys, KERNEL_STACK_PAGES);
                         kfree(task);
                         return NULL;
                     }
@@ -854,6 +888,8 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
 
             uint32_t old_cr3;
             __asm__ __volatile__("mov %%cr3, %0" : "=r"(old_cr3));
+            //окно CR3 (копирование сегмента ELF в новое адресное пространство) атомарно по прерываниям
+            uint32_t ksl_efl = task_irq_barrier_begin();
             __asm__ __volatile__("mov %0, %%cr3" : : "r"(task->page_dir_phys));
 
             if (filesize > 0)
@@ -866,6 +902,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
             }
 
             __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
+            task_irq_barrier_end(ksl_efl);
         }
     }
 
@@ -883,6 +920,8 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
 
                 uint32_t old_cr3;
                 __asm__ __volatile__("mov %%cr3, %0" : "=r"(old_cr3));
+                //окно CR3 (патч релокаций в адресном пространстве ребёнка) атомарно по прерываниям
+                uint32_t ksl_efl = task_irq_barrier_begin();
                 __asm__ __volatile__("mov %0, %%cr3" : : "r"(task->page_dir_phys));
 
                 for (int r = 0; r < num_relocs; r++)
@@ -901,6 +940,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
                 }
 
                 __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
+                task_irq_barrier_end(ksl_efl);
             }
         }
     }
@@ -916,12 +956,14 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
         __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
         vm_pages_free_all(task);
         vmm_destroy_address_space(task->page_dir);
-        pmm_free_page((void*)task->kernel_stack_phys);
+        pmm_free_pages((void*)task->kernel_stack_phys, KERNEL_STACK_PAGES);
         kfree(task);
         return NULL;
     }
     memset(args_tokens, 0, 16 * 64);
 
+    //окно CR3 (запись argv/env на user-стек ребёнка) атомарно по прерываниям
+    uint32_t ksl_efl = task_irq_barrier_begin();
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(task->page_dir_phys));
 
     uint32_t ustack_top = task->user_stack;
@@ -988,6 +1030,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
 
     task->user_stack = ustack_top;
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
+    task_irq_barrier_end(ksl_efl);
     kfree(args_tokens);
 
     if (current_task && current_task->pid != 0) strcpy(task->cwd, current_task->cwd);
@@ -1113,16 +1156,16 @@ task_t* create_kernel_thread(uint32_t entry_virt)
     if (!task) return NULL;
     memset(task, 0, sizeof(task_t));
 
-    //Выделяем личную физическую страницу под стек этого потока ядра
-    task->kernel_stack_phys = (uint32_t)pmm_alloc_page();
+    //Выделяем KERNEL_STACK_PAGES страниц под стек этого потока ядра
+    task->kernel_stack_phys = (uint32_t)pmm_alloc_pages(KERNEL_STACK_PAGES);
 
     if (!task->kernel_stack_phys)
     {
         kfree(task);
         return NULL;
     }
-    memset((void*)task->kernel_stack_phys, 0, PAGE_SIZE);
-    task->kernel_stack = task->kernel_stack_phys + PAGE_SIZE; //Стек растет вниз
+    memset((void*)task->kernel_stack_phys, 0, KERNEL_STACK_PAGES*PAGE_SIZE);
+    task->kernel_stack = task->kernel_stack_phys + KERNEL_STACK_PAGES*PAGE_SIZE; //Стек растет вниз
 
     task->pid = next_pid++;
     task->state = TASK_READY;
@@ -1369,6 +1412,7 @@ void kernel_init_thread(void)
     //task_spawn_from_file("/usbin/allocram.bin", 0x40000000, "512");
 
     task_spawn_from_file("/bin/sekhmet.elf", 0x40000000, NULL);
+
     //vmm_stress_test_cross_pde();
     //current_task = ready_queue;
 

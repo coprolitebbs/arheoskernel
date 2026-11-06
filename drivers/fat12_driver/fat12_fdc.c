@@ -25,22 +25,30 @@
 #include "../../include-kernel/ports_io.h"
 #include "../include_drivers/drv_format.h"
 
+static uint8_t fdc_ksl_we = 0;
 static void fdc_lock_sched(void)
 {
-    if (api_ptr && api_ptr->schedule_lock_ptr)
+    if (api_ptr && api_ptr->schedule_lock_ptr && *(volatile uint8_t *)api_ptr->schedule_lock_ptr == 0)
+    {
         *(volatile uint8_t *)api_ptr->schedule_lock_ptr = 1;
+        fdc_ksl_we = 1;
+    }
 }
 static void fdc_unlock_sched(void)
 {
-    if (api_ptr && api_ptr->schedule_lock_ptr)
+    if (api_ptr && api_ptr->schedule_lock_ptr && fdc_ksl_we)
+    {
         *(volatile uint8_t *)api_ptr->schedule_lock_ptr = 0;
+        fdc_ksl_we = 0;
+    }
 }
 
 static void fdc_unlock_scheduler(void)
 {
-    if (api_ptr && api_ptr->schedule_lock_ptr)
+    if (api_ptr && api_ptr->schedule_lock_ptr && fdc_ksl_we)
     {
         *(volatile uint8_t *)api_ptr->schedule_lock_ptr = 0;
+        fdc_ksl_we = 0;
     }
 }
 

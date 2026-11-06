@@ -248,7 +248,15 @@ void isr_pagefault(struct regs *r)
 
     draw_kernel_panic("PAGE FAULT", fields, 8);
 
+    //Дублируем поля паники в COM
     com_puts("[KERNEL] PAGE FAULT! Halted.\n");
+    com_puts("  CR2=");    com_puthex(cr2);
+    com_puts(" ERR=");     com_puthex(r->err_code);
+    com_puts(" EIP=");     com_puthex(r->eip);
+    com_puts(" CS=");      com_puthex(r->cs);
+    com_puts(" CR3=");     com_puthex(cr3);
+    com_puts(" TaskCR3="); com_puthex(current_task ? current_task->page_dir_phys : 0);
+    com_puts("\n");
     for(;;)
     {
         __asm__ __volatile__("cli; hlt");

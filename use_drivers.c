@@ -173,18 +173,18 @@ void drivers_init(void){
         usb_driver_api->malloc_ptr = kmalloc;
         usb_driver_api->free_ptr   = kfree;
         usb_driver_api->yield_ptr = sys_yield;
-        usb_driver_api->debug7 = 0;
-        usb_driver_api->debug8 = 0;
-        usb_driver_api->debug9 = 0;
+        //usb_driver_api->debug7 = 0;
+        //usb_driver_api->debug8 = 0;
+        //usb_driver_api->debug9 = 0;
         usb_driver_api->load_screen_add_string = load_screen_add_string;
         usb_driver_api->dma_alloc_ptr = kernel_usb_dma_alloc;
         usb_driver_api->dma_free_ptr = kernel_usb_dma_free;
         usb_driver_api->get_ticks = kernel_get_ticks;
 
-        //Маркер сборки: должен появиться в логе ДО строк "EHCI ...".
+        //Маркер сборки: должен появиться в логе до строк "EHCI ...".
         //Если его нет — в сборку попал старый use_drivers.c (без wbinvd
         //в kernel_usb_dma_alloc), и на реальном железе DMA-память портится.
-        load_screen_add_string("USBDMA: alloc=uncached+wbinvd (kernel build 3)");
+        //load_screen_add_string("USBDMA: alloc=uncached+wbinvd (kernel build 3)");
 
         //load_screen_add_string("clearing registry");
         usb_registry_clear();
@@ -202,21 +202,14 @@ void drivers_init(void){
 
         load_screen_add_string("USB dev: VID=%x PID=%x class=%x",usb_driver_api->vid, usb_driver_api->pid,usb_driver_api->dev_class);
         load_screen_add_string("USB: %d device(s) enumerated",usb_driver_api->device_count);
-        load_screen_add_string("USB p0 step=%d res=%x vp=%x dc=%x",
+        /*load_screen_add_string("USB p0 step=%d res=%x vp=%x dc=%x",
             (int)usb_driver_api->debug1, usb_driver_api->debug2,
             usb_driver_api->debug5, usb_driver_api->debug6);
         load_screen_add_string("USB p1 step=%d res=%x vp=%x dc=%x",
             (int)usb_driver_api->debug3, usb_driver_api->debug4,
             usb_driver_api->debug7, usb_driver_api->debug8);
-        //load_screen_add_string("USB last error: %x",usb_driver_api->last_error);
-        //if (usb_driver_api->block_id != 0xFFFFFFFFu && usb_driver_api->device_count > 0)
-            //load_screen_add_string("USB registered as block id=%d", usb_driver_api->block_id);
-        //if (usb_driver_api->device_count > 1)
-            //load_screen_add_string("USB: %d devices total", usb_driver_api->device_count);
-        //if (usb_driver_api->last_error)
-            //load_screen_add_string("USB last error: %x", usb_driver_api->last_error);
-        //load_screen_add_string("EHCI P%d PORTSC:%x PSPD:%d",usb_driver_api->debug7,usb_driver_api->debug8,usb_driver_api->debug9);
-        //for(;;);
+        */
+
     } else {
         load_screen_add_string("USB driver load error");
         //for(;;);

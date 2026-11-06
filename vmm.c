@@ -64,8 +64,10 @@ void vmm_destroy_address_space(page_directory_t *dir)
         if (!(pde & PAGE_PRESENT)) continue;
         if (pde & 0x80) continue;                   //4MB page — PT нет
 
-        //Совпадает с ядром → шарится, не наш
-        if ((*kernel_directory)[t] == pde) continue;
+        //сравниваем физический адрес PT, а не весь PDE. PDE user-задачи может
+        //отличаться от kernel-PDE флагами (например, апгрейд PAGE_USER в
+        //vmm_map_page), но указывать на тот же kernel-PT
+        if (((*kernel_directory)[t] & 0xFFFFF000) == (pde & 0xFFFFF000)) continue;
 
         uint32_t pt_phys = pde & 0xFFFFF000;
         if (pt_phys != 0)
@@ -128,7 +130,7 @@ void vmm_sync_pde_into_user_pd(page_directory_t *user_pd, uint32_t pd_index)
     (*user_pd)[pd_index] = pde & ~PAGE_USER;
 }
 
-//Заполнить ВСЕ kernel-PDE в user-PD. Используется при создании user-PD и при финальной синхронизации перед enqueue задачи
+//Заполнить все kernel-PDE в user-PD. Используется при создании user-PD и при финальной синхронизации перед enqueue задачи
 void vmm_sync_kernel_pdes(page_directory_t *user_pd)
 {
     if (!user_pd || user_pd == kernel_directory) return;
@@ -247,6 +249,17 @@ void vmm_unmap_page(page_directory_t *dir, uint32_t virt)
     //page_table_t *table = (page_table_t*)(entry & 0xFFFFF000);
     uint32_t table_phys = entry & 0xFFFFF000;
     if (table_phys < 0x100000 || table_phys >= 0xC0000000) return;  //порченый PDE
+
+    //запрещаем unmap через PT, разделяемый с kernel_directory (для user-PD).
+    //PT identity-областей и kernel heap шарится по значению PDE во все user-PD;
+    //обнуление PTE в таком PT стирает mapping глобально для ядра и всех задач.
+    //Защита от vm_pages-записей с мусорным virt (после порчи heap_next/структур).
+    if (dir != kernel_directory && kernel_directory &&
+            ((*kernel_directory)[pd_index] & 0xFFFFF000) == table_phys)
+    {
+        return;
+    }
+
     page_table_t *table = (page_table_t*)table_phys;
 
     (*table)[pt_index] = 0;
@@ -297,7 +310,7 @@ void vmm_init(void)
     uint32_t total_mb = pmm_get_total_memory() / (1024 * 1024);
     //draw_hex_dword(total_mb, 120, 420);for(;;);
     uint32_t pd_count = (total_mb + 3) / 4;   // 4 МБ на один PDE
-    if (pd_count > 896) pd_count = 896;       // оставляем место под kernel heap/FB
+    if (pd_count > 896) pd_count = 896;       //оставляем место под kernel heap/FB
     //uint32_t cover_to = pd_count * 0x400000;
     //uint32_t pmm_top = min_addr + (uint32_t)total_pages * PAGE_SIZE;
     //if (cover_to < pmm_top) {
@@ -349,19 +362,6 @@ void vmm_map_pages(uint32_t vbe_phys, uint32_t vbe_size)
         }
     }
 }
-
-
-/*
-//Выделить страницу в виртуальном адресном пространстве ядра (пока простая заглушка)
-void* vmm_alloc_kernel_page(void) {
-    // TODO: реализовать выделение виртуальной страницы
-    return NULL;
-}
-
-void vmm_free_kernel_page(void *addr) {
-    // TODO: реализовать освобождение
-}
-*/
 
 page_directory_t* vmm_create_user_space(void)
 {

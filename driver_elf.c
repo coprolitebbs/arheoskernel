@@ -224,7 +224,7 @@ static void *load_driver_elf_common(uint8_t *elf_image, uint32_t file_size,
             Elf32_Sym *sym = &syms[sym_idx];
 
             //Диагностика на случай, если забыли -fno-common
-            if (sym->st_shndx == 0xFFF2)  // SHN_COMMON
+            if (sym->st_shndx == 0xFFF2)  //SHN_COMMON
             {
                 com_puts("[LD] WARN: COMMON symbol (нужен -fno-common): ");
                 com_puts(strings + sym->st_name);
@@ -236,8 +236,7 @@ static void *load_driver_elf_common(uint8_t *elf_image, uint32_t file_size,
                                    text_off, rodata_off, data_off, bss_off);
             if (sym_sec_off == 0xFFFFFFFF) continue;
 
-            //offset внутри секции = st_value - sh_addr
-            //(0 для -r; vaddr для --emit-relocs)
+            //offset внутри секции = st_value - sh_addr (0 для -r; vaddr для --emit-relocs)
             uint32_t sym_sh_addr = sections[sym->st_shndx].addr;
             uint32_t sym_offset_in_section;
             if (sym_sh_addr != 0 && sym->st_value >= sym_sh_addr)

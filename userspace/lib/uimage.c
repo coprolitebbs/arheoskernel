@@ -391,7 +391,9 @@ static int ui_png_inflate_stream(ui_png_bitrd_t *brp,
         if (final < 0 || type < 0) { err = -1; break; }   //данные кончились
 
         if (type == 0) {
-            //сохранённый блок (stored)
+            //сохранённый блок (stored, RFC 1951, 3.2.4):
+            //после выравнивания LEN/NLEN читаются побайтно, затем
+            //LEN байт копируются в выход как есть
             int lenv, nlen, drop;
 
             drop = br.bitcnt & 7; //выравнивание на байт
@@ -403,6 +405,12 @@ static int ui_png_inflate_stream(ui_png_bitrd_t *brp,
             if (lenv < 0 || nlen < 0) { err = -1; break; }
             if ((((uint32_t)lenv ^ (uint32_t)nlen) & 0xFFFFu) != 0xFFFFu) { err = -2; break; }
 
+            if ((uint32_t)lenv > (uint32_t)(outsize - outpos)) { err = -5; break; }
+            if ((uint32_t)lenv > (uint32_t)(br.size - br.pos)) { err = -9; break; }
+
+            while (lenv--) out[outpos++] = br.data[br.pos++];
+        }
+        else if (type == 1 || type == 2) {
             //блок Хаффмана (фиксированный или динамический)
             if (type == 1) {
                 //фиксированные коды (RFC 1951, 3.2.6)
@@ -412,9 +420,9 @@ static int ui_png_inflate_stream(ui_png_bitrd_t *brp,
                 for (;       i < 256; i++) fl[i] = 9;
                 for (;       i < 280; i++) fl[i] = 7;
                 for (;       i < 288; i++) fl[i] = 8;
-                if (ui_png_huff_build(&ui_png_lit, fl, 288) < 0) { err = -2; break; }
+                if (ui_png_huff_build(&ui_png_lit, fl, 288) < 0) { err = -6; break; }
                 for (i = 0; i < 30; i++) fl[i] = 5;
-                if (ui_png_huff_build(&ui_png_dist, fl, 30) < 0) { err = -2; break; }
+                if (ui_png_huff_build(&ui_png_dist, fl, 30) < 0) { err = -6; break; }
             } else {
                 //динамические коды (RFC 1951, 3.2.7)
                 int nlen, ndist, ncode, i, n;
@@ -674,7 +682,7 @@ static uint8_t *ui_png_decode(const uint8_t *data, uint32_t size,
 
     uint32_t pos, w = 0, h = 0, depth = 0, ctype = 0, interlace = 0;
     uint32_t channels = 0, bitpx = 0, fbpp = 0;
-    int  seen_ihdr = 0, seen_idat = 0, idat_done = 0;
+    int  seen_ihdr = 0, seen_idat = 0;
     uint32_t idat_total = 0, idat_pos0 = 0;
 
     //метаданные прозрачности
@@ -784,7 +792,8 @@ static uint8_t *ui_png_decode(const uint8_t *data, uint32_t size,
         }
         else if (memcmp(t, "IDAT", 4) == 0) {
             if (!seen_ihdr)  { ui_png_fail("PNG: IDAT до IHDR"); return NULL; }
-            if (idat_done)   { ui_png_fail("PNG: IDAT не подряд"); return NULL; }
+            //IDAT считаем все, даже если между ними вклинились
+            //вспомогательные чанки — так же терпимо делает libpng
             if (idat_total == 0) idat_pos0 = pos;
             if (ui_png_crc32(t, clen + 4) != ui_png_be32(d + clen)) {
                 ui_png_fail("PNG: CRC IDAT"); return NULL;
@@ -800,7 +809,6 @@ static uint8_t *ui_png_decode(const uint8_t *data, uint32_t size,
         }
         else {
             //прочие (вспомогательные) чанки пропускаем
-            if (seen_idat) idat_done = 1;
         }
 
         pos += 12 + clen;
@@ -842,9 +850,12 @@ static uint8_t *ui_png_decode(const uint8_t *data, uint32_t size,
         pos = idat_pos0;
         while (pos + 12 <= size) {
             uint32_t clen = ui_png_be32(data + pos);
-            if (memcmp(data + pos + 4, "IDAT", 4) != 0) break;
-            memcpy(zdata + zp, data + pos + 8, clen);
-            zp += clen;
+            if (memcmp(data + pos + 4, "IEND", 4) == 0) break;
+            if (memcmp(data + pos + 4, "IDAT", 4) == 0) {
+                if (clen > size - pos - 12 || zp + clen > idat_total) break;
+                memcpy(zdata + zp, data + pos + 8, clen);
+                zp += clen;
+            }
             pos += 12 + clen;
         }
     }
@@ -1061,6 +1072,21 @@ uint8_t* load_png_to_buffer(const char *path, uint32_t target_w, uint32_t target
     uint8_t *fdata = (uint8_t *)malloc(cap);
     if (!fdata) { close(fd); return NULL; }
 
+    u_stat_t st;
+    int res = stat(path, &st);
+    //Если res != 0 (ядро вернуло ошибку, файла нет на диске), выходим
+    if (res != 0)
+    {
+        return false;
+    }
+    //Проверяем поле attributes согласно флагам из ustd.h
+    //Если это папка (FS_ATTR_DIRECTORY), то для fileexists это false
+    if ((st.attributes & FS_ATTR_DIRECTORY) == FS_ATTR_DIRECTORY)
+    {
+        return false;
+    }
+
+    loading_struct->start_loading_phase(0,st.size);
     for (;;) {
         if (len + 32768 > cap) {
             uint32_t ncap = cap * 2;
@@ -1074,17 +1100,18 @@ uint8_t* load_png_to_buffer(const char *path, uint32_t target_w, uint32_t target
         int r = u_read(fd, fdata + len, 32768);
         if (r <= 0) break;
         len += (uint32_t)r;
+        loading_struct->loading_page_step(len);
         if (len > UI_PNG_MAX_FILE) { free(fdata); close(fd); return NULL; }
     }
     close(fd);
+    loading_struct->stop_loading_phase();
 
     if (len < 8) { free(fdata); return NULL; }
 
     uint32_t src_w = 0, src_h = 0;
     uint8_t *src_pixels = ui_png_decode(fdata, len, &src_w, &src_h, loading_struct);
     free(fdata);
-    if (!src_pixels) return NULL;
-
+    if (!src_pixels) {return NULL;}
     //конверсия в целевой формат — как в load_tga_to_buffer()
     uint32_t dest_size_bytes = target_h * target_pitch;
     uint8_t *dest_canvas = (uint8_t *)malloc(dest_size_bytes);

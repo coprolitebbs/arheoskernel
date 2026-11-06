@@ -135,9 +135,9 @@ int fat12_read_sectors(fat12_fs_t *vol, uint32_t lba, uint32_t count, void *buff
     if (vol->use_block_api && api_ptr->block)
     {
         int r;
-        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+        uint8_t ksl_we0 = KSL_ACQUIRE(api_ptr->schedule_lock_ptr);
         r = api_ptr->block->read(vol->drive, (uint64_t)lba, count, buffer);
-        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+        KSL_RELEASE(api_ptr->schedule_lock_ptr, ksl_we0);
         return r;
     }
 
@@ -168,9 +168,9 @@ int fat12_write_sectors(fat12_fs_t *vol, uint32_t lba, uint32_t count, const voi
     if (vol->use_block_api && api_ptr->block)
     {
         int r;
-        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+        uint8_t ksl_we1 = KSL_ACQUIRE(api_ptr->schedule_lock_ptr);
         r = api_ptr->block->write(vol->drive, (uint64_t)lba, count, buffer);
-        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+        KSL_RELEASE(api_ptr->schedule_lock_ptr, ksl_we1);
         return r;
     }
 

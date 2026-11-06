@@ -258,6 +258,7 @@ int ehci_probe_all(void)
                     api_ptr->load_screen_add_string(
                         "EHCI probe %x:%x.%x VID=%x BAR=%x size=%x PTD=%x",
                         bus, dev, func, (id & 0xFFFF), mmio, bar_size, ptd);
+                //for (volatile int i = 0; i < 4000; i++) __asm__ __volatile__("pause"); //дать железу устояться
 
                 ehci_hc_t *ehc = &ehci_hcs[ehci_hc_count++];
                 memset(ehc, 0, sizeof(*ehc));
@@ -470,6 +471,7 @@ static void ehci_bios_handoff(ehci_hc_t *ehc, uint8_t bus, uint8_t dev, uint8_t 
                     api_ptr->load_screen_add_string("EHCI handoff forced (BIOS bug)");
                 } else {
                     api_ptr->load_screen_add_string("EHCI handoff ok");
+                    //for (volatile int i = 0; i < 7000; i++) inw(0x80); //дать железу устояться
                 }
                 //Linux: если контроллером владел BIOS — CF=0, порты
                 //временно уходят на companion до нашего CF=1
@@ -518,8 +520,12 @@ int ehci_init(ehci_hc_t *ehc)
                                     mmio_read(ehc, EHCI_USBCMD),
                                     mmio_read(ehc, EHCI_USBSTS),
                                     mmio_read(ehc, EHCI_CONFIGFLAG));
+    //for (volatile int i = 0; i < 4000; i++) inw(0x80); //дать железу устояться
+    //mmio_read(ehc, EHCI_USBCMD);
+    //mmio_read(ehc, EHCI_USBSTS);
+    //mmio_read(ehc, EHCI_CONFIGFLAG);
 
-    //1. BIOS→OS handoff ДО halt/reset (как в Linux: quirks → потом reset)
+    //1. BIOS -> OS handoff ДО halt/reset (как в Linux: quirks -> потом reset)
     ehci_bios_handoff(ehc, ehc->pci_bus, ehc->pci_dev, ehc->pci_func);
 
     //2. Остановить HC перед сбросом (Linux ehci_halt)
@@ -592,12 +598,21 @@ int ehci_init(ehci_hc_t *ehc)
                                         (int)p, ps,
                                         (int)((ps >> PSC_PSPD_SHIFT) & 3),
                                         (ps & PSC_PO) ? 1 : 0);
+        //__asm__ __volatile__("mfence" ::: "memory");
+        //int vm = (int)((ps >> PSC_PSPD_SHIFT) & 3);
+        //uint32_t vm2 = (ps & PSC_PO) ? 1 : 0;
+
+        //for (volatile int i = 0; i < 4000; i++) inw(0x80); //дать железу устояться
     }
 
     api_ptr->load_screen_add_string("EHCI started: CMD=%x STS=%x CFG=%x",
                                     mmio_read(ehc, EHCI_USBCMD),
                                     mmio_read(ehc, EHCI_USBSTS),
                                     mmio_read(ehc, EHCI_CONFIGFLAG));
+    //for (volatile int i = 0; i < 20000; i++) inw(0x80); //дать железу еще устояться
+    /*uint32_t m1 = mmio_read(ehc, EHCI_USBCMD);
+    m1 = mmio_read(ehc, EHCI_USBSTS);
+    m1 = mmio_read(ehc, EHCI_CONFIGFLAG);*/
 
     ehc->initialized = 1;
     return 0;
@@ -628,6 +643,7 @@ int ehci_port_reset(ehci_hc_t *ehc, int port)
         api_ptr->load_screen_add_string("ehci_pr p%d in=%x pspd=%d",
                                         port, ps0,
                                         (int)((ps0 >> PSC_PSPD_SHIFT) & 3));
+    //int vd2 = (int)((ps0 >> PSC_PSPD_SHIFT) & 3);
 
     if (!(ps0 & PSC_CCS)) return -1;
 
@@ -660,6 +676,7 @@ int ehci_port_reset(ehci_hc_t *ehc, int port)
                 api_ptr->load_screen_add_string("ehci_pr p%d ok=%x pspd=%d",
                                                 port, ps,
                                                 (int)((ps >> PSC_PSPD_SHIFT) & 3));
+            int vd = (int)((ps >> PSC_PSPD_SHIFT) & 3);
             return 0;
         }
     }
@@ -835,13 +852,13 @@ ehci_retry:
     __asm__ __volatile__("mfence" ::: "memory");
     ehci_async_advance(ehc);   //HC перечитает кольцо и увидит QH
 
-    if (api_ptr && api_ptr->load_screen_add_string){
+    /*if (api_ptr && api_ptr->load_screen_add_string){
         api_ptr->load_screen_add_string("ehci link: ah=%x qh=%x qh0=%x sts=%x",
                                         async_head_ptr->horiz,
                                         qh_phys,
                                         tds[0].token,
                                         mmio_read(ehc, EHCI_USBSTS));
-    }
+    }*/
 
     int result;
     uint32_t t0 = api_ptr->get_ticks();
@@ -908,13 +925,15 @@ ehci_retry:
 
     //Убираем за собой: QH в idle, qTD деактивировать
     //Сначала зафиксируем реальное состояние, до очистки
-    if (result < 0 && api_ptr && api_ptr->load_screen_add_string){
-        api_ptr->load_screen_add_string("ehci_ctrl(pre) r=%d spd=%d qh=%x q0=%x qd=%x qs=%x",
+    if (result < 0){
+        if(api_ptr && api_ptr->load_screen_add_string)
+            api_ptr->load_screen_add_string("ehci_ctrl(pre) r=%d spd=%d qh=%x q0=%x qd=%x qs=%x",
                                         result, (int)spd,
                                         qh->token,
                                         tds[0].token,
                                         (data_idx >= 0) ? tds[data_idx].token : 0,
                                         tds[status_idx].token);
+
         //Состояние HC: жив ли async-план (ASS=bit15, HCHalted=bit12,
         //HostSysErr=bit4), докуда дошёл HC внутри QH (cur/next), чем для
         //него выглядит наш QH (ep_char) и куда пишутся данные (dbuf)
@@ -965,8 +984,9 @@ ehci_retry:
 
     //ehci_async_resume(ehc);
 
-    if (result < 0 && api_ptr && api_ptr->load_screen_add_string){
-        api_ptr->load_screen_add_string("ehci_ctrl r=%d st=%x d=%x",
+    if (result < 0){
+        if(api_ptr && api_ptr->load_screen_add_string)
+            api_ptr->load_screen_add_string("ehci_ctrl r=%d st=%x d=%x",
                                         result,
                                         tds[status_idx].token,
                                         (data_idx >= 0) ? tds[data_idx].token : 0);

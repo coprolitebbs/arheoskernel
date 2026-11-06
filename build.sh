@@ -472,6 +472,7 @@ e2cp userspace/filesystem/config/sekhmet/config.cfg tmp_ext2.img:/config/sekhmet
 e2cp userspace/filesystem/config/sekhmet/sekhmet.hlp tmp_ext2.img:/config/sekhmet/sekhmet.hlp
 e2cp userspace/filesystem/config/img/sekhmet.png tmp_ext2.img:/config/img/sekhmet.png
 e2cp userspace/filesystem/config/img/ewall.png tmp_ext2.img:/config/img/ewall.png
+#e2cp userspace/filesystem/config/img/ewall.tga tmp_ext2.img:/config/img/ewall.tga
 e2cp userspace/filesystem/config/locales/en.cfg tmp_ext2.img:/config/locales/en.cfg
 e2cp userspace/filesystem/config/locales/ru.cfg tmp_ext2.img:/config/locales/ru.cfg
 
@@ -501,7 +502,7 @@ echo -e "${GREEN}Все образы собраны в output/${NC}"
 # ---- Запуск QEMU с дискетой или hdd ----
 #qemu-system-i386 -drive file=output/fat12_720.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 #qemu-system-i386 -drive file=output/fat12_1440.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
-qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+#qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 
 #USB FLOPPY drive

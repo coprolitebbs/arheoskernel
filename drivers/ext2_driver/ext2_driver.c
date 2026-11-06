@@ -89,7 +89,7 @@ int ext2_mount(uint32_t drive)
 
         //Читаем 2 сектора суперблока независимой функцией ATA диска
         int r;
-        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 1;
+        uint8_t ksl_we0 = KSL_ACQUIRE(api_ptr->schedule_lock_ptr);
         if (api_ptr->block_device_driver_enabled && api_ptr->block)
         {
             r = api_ptr->block->read(vol->drive, (uint64_t)target_lba, 2, sb_buf);
@@ -98,7 +98,7 @@ int ext2_mount(uint32_t drive)
         {
             r = ext2_disk_read_sectors(target_lba, 2, sb_buf);
         }
-        if (api_ptr->schedule_lock_ptr) *api_ptr->schedule_lock_ptr = 0;
+        KSL_RELEASE(api_ptr->schedule_lock_ptr, ksl_we0);
         if (r != FS_OK) continue;
 
         ext2_superblock_t *test_sb = (ext2_superblock_t *)sb_buf;
@@ -129,8 +129,8 @@ int ext2_mount(uint32_t drive)
             uint32_t magic_obs = sb_buf[56] | ((uint32_t)sb_buf[57] << 8);
             api_ptr->__ext2_dbg_hit_lba =
                 0xAA000000u
-                | ((uint32_t)(r & 0xFF) << 16)        // код возврата block->read
-                | (magic_obs & 0xFFFF);               // что увидели на месте magic
+                | ((uint32_t)(r & 0xFF) << 16)        //код возврата block->read
+                | (magic_obs & 0xFFFF);               //что увидели на месте magic
         }
 
     }
@@ -140,17 +140,17 @@ int ext2_mount(uint32_t drive)
     if (!found_fs)
     {
 
-        return FS_CORRUPTED; // Файловая система EXT2 не найдена на диске
+        return FS_CORRUPTED; //Файловая система EXT2 не найдена на диске
     }
 
-    // Фиксируем динамически вычисленный старт раздела
+    //Фиксируем динамически вычисленный старт раздела
     vol->partition_start_lba = detected_start_lba;
 
-    // Вычисляем размер логического блока ФС
+    //Вычисляем размер логического блока ФС
     vol->block_size = 1024 << vol->sb.s_log_block_size;
     vol->sectors_per_block = vol->block_size / 512;
 
-    // Извлекаем размер структуры инода
+    //Извлекаем размер структуры инода
     if (vol->sb.s_rev_level == 0)
     {
         vol->inode_size = 128;
@@ -923,7 +923,7 @@ int ext2_stat(void *vol_ptr, const char *path, fs_stat_t *st)
     //Проверяем биты типа файла в i_mode
     if ((inode.i_mode & 0xF000) == 0x4000)
     {
-        st->attributes |= FS_ATTR_DIRECTORY; /* Папка (S_IFDIR) */
+        st->attributes |= FS_ATTR_DIRECTORY; //Папка (S_IFDIR)
     }
 
     //Проверяем флаги прав на чтение (DOS-аналог Read-Only — это отсутствие прав на запись владельцу)
@@ -1047,7 +1047,7 @@ int ext2_read(int fd, void *buffer, uint32_t size)
         //Чтение блока данных
         if (phys_block == 0)
         {
-            memset(dst + bytes_read, 0, to_copy); // Разреженный кусок файла
+            memset(dst + bytes_read, 0, to_copy); //Разреженный кусок файла
         }
         else
         {
@@ -1521,7 +1521,7 @@ int ext2_unlink(void *vol_ptr, const char *path)
         ext2_write_block(vol, parent_block, bitmap_buf);
     }
 
-    // Возвращаем занятую страницу битовой карты куче ядра перед финализацией секторов
+    //Возвращаем занятую страницу битовой карты куче ядра перед финализацией секторов
     api_ptr->free_ptr(bitmap_buf);
 
     uint32_t bgdt_block = (vol->block_size == 1024) ? 2 : 1;

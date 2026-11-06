@@ -485,6 +485,7 @@ void usb_scan_pci_controllers(void)
                     api_ptr->load_screen_add_string(
                         "USB %s: %x:%x.%x prog_if=%x BAR0=%x BAR4=%x",
                         type, bus, dev, func, prog_if, bar0, bar4);
+
                     //Диагностика портов UHCI: покажет, на каком именно
                     //UHCI-контроллере висит устройство. На ICH6 три UHCI,
                     //и флешка может быть на #2 или #3, а не на #1.

@@ -133,8 +133,7 @@ static void usb_setup_device(usb_hc_t *hcw, int port_for_record,
         int bid = api_ptr->block->register_device(
             name, slot->sector_count, BLK_REMOVABLE,
             usb_msc_read_wrap, usb_msc_write_wrap, (void*)slot);
-        api_ptr->load_screen_add_string("USB msc addr=%d reg %s -> %d",
-                                        dev_addr, name, bid);
+        //api_ptr->load_screen_add_string("USB msc addr=%d reg %s -> %d",dev_addr, name, bid);
         if (bid >= 0){
             slot->block_id = (uint32_t)bid;
             if (api_ptr->device_count > 0)
@@ -152,11 +151,13 @@ static void usb_enum_device_at(usb_port_path_t *path, const char *tag, int depth
     usb_device_desc_t desc; uint8_t dev_addr = 0;
     memset(&desc, 0, sizeof(desc));
     int r = usb_enumerate(path, 1 + api_ptr->device_count, &desc, &dev_addr);
-    api_ptr->load_screen_add_string(
+
+    /*api_ptr->load_screen_add_string(
         "%s rp%d hub%d.%d enum r=%d vid=%x pid=%x cls=%x mps=%d",
         tag, path->root_port, path->hub_addr, path->hub_port,
         r, desc.idVendor, desc.idProduct, desc.bDeviceClass,
-        desc.bMaxPacketSize0);
+        desc.bMaxPacketSize0);*/
+
     if (r != 0) return;
 
     usb_setup_device(&path->hc, path->root_port, &desc, dev_addr);
@@ -165,11 +166,10 @@ static void usb_enum_device_at(usb_port_path_t *path, const char *tag, int depth
         //Хаб: он уже в реестре; разворачиваем его нижние порты.
         uint8_t nports = 0;
         if (usb_hub_probe(&path->hc, dev_addr, &nports) != 0){
-            api_ptr->load_screen_add_string("%s hub %d: no hub desc", tag, dev_addr);
+            //api_ptr->load_screen_add_string("%s hub %d: no hub desc", tag, dev_addr);
             return;
         }
-        api_ptr->load_screen_add_string("%s hub addr=%d ports=%d",
-                                        tag, dev_addr, nports);
+        //api_ptr->load_screen_add_string("%s hub addr=%d ports=%d",tag, dev_addr, nports);
         for (uint8_t hp = 1; hp <= nports; hp++){
             usb_port_path_t cp;
             cp.hc        = path->hc;
@@ -180,8 +180,7 @@ static void usb_enum_device_at(usb_port_path_t *path, const char *tag, int depth
             usb_enum_device_at(&cp, tag, depth + 1);
         }
     } else if (desc.bDeviceClass == 0x09){
-        api_ptr->load_screen_add_string("%s: nested hub at addr=%d skipped",
-                                        tag, dev_addr);
+        //api_ptr->load_screen_add_string("%s: nested hub at addr=%d skipped",tag, dev_addr);
     }
 }
 
@@ -205,21 +204,21 @@ int device_usb_start(void)
     //инициализацию MSC. UHCI-устройства (внутренние LS/FS) опрашиваются
     //после и своим расписанием уже ничего не ломают.
     int ehci_count = ehci_probe_all();
-    api_ptr->load_screen_add_string("EHCI found %d controller(s)", ehci_count);
+    //api_ptr->load_screen_add_string("EHCI found %d controller(s)", ehci_count);
     for (int eci = 0; eci < ehci_count; eci++){
         ehci_hc_t *ehc = &ehci_hcs[eci];
 
         int ir = ehci_init(ehc);
-        api_ptr->load_screen_add_string("EHCI %d init=%d mmio=%x op=%x n_ports=%d",
+        /*api_ptr->load_screen_add_string("EHCI %d init=%d mmio=%x op=%x n_ports=%d",
                                         eci, ir, ehc->mmio_base,
-                                        ehc->op_base, (int)ehc->n_ports);
+                                        ehc->op_base, (int)ehc->n_ports);*/
         if (ir != 0) continue;
 
         usb_hc_t hc_wrap = { USB_HC_EHCI, ehc };
         for (int port = 1; port <= (int)ehc->n_ports; port++){
             uint32_t ps = usb_hc_port_status(&hc_wrap, port);
-            api_ptr->load_screen_add_string("EHCI %d p%d PORTSC=%x pspd=%d",
-                                            eci, port, ps, (int)((ps >> 26) & 3));
+            /*api_ptr->load_screen_add_string("EHCI %d p%d PORTSC=%x pspd=%d",
+                                            eci, port, ps, (int)((ps >> 26) & 3));*/
             usb_port_path_t root_path;
             root_path.hc = hc_wrap;
             root_path.root_port = (uint8_t)port;
