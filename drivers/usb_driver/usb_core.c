@@ -372,17 +372,37 @@ int usb_enumerate(usb_port_path_t *path, uint8_t want_addr,
         if (rp != 0) return rp;
 
         //UHCI: LSDA бит 8 (QEMU/ICH) или line-status bits 4-5 (D- высокий — LS)
-        //EHCI: bits 26-27 (PSPD: 0=FS, 1=LS, 2=HS, 3=undef).
         uint32_t ps = usb_hc_port_status(&path->hc, path->root_port);
         if (path->hc.type == USB_HC_UHCI){
             is_ls = ((ps & 0x0100u) || ((ps & 0x30) == 0x10)) ? 1 : 0;
             speed = is_ls ? 1 : 0;   // UHCI: FS или LS
         } else {
-            uint32_t pspd = (ps >> 26) & 0x3;
-            if (pspd == 1)      speed = 1;   // LS
-            else if (pspd == 2) speed = 2;   // HS
-            else                speed = 0;   // FS (в т.ч. pspd=3 → FS)
-            is_ls = (speed == 1) ? 1 : 0;
+            //EHCI: скорость — ТОЛЬКО по биту Port Enable (PE, бит 2).
+            //PE=1 <=> устройство high-speed (FS/LS EHCI отдаёт companion'у:
+            //ehci_port_reset в этом случае вернул бы -3, и мы сюда не дошли).
+            //Поля PSPD (bits 27:26) НЕ читать: QEMU их выставляет (=2 для HS),
+            //а реальный кремний (ICH6/CF-18) держит PSPD=0 даже для включённого
+            //HS-порта. Из-за чтения PSPD устройство классифицировалось как FS,
+            //QH собирался с EPS=FS/C=1/mps=8 без split-транзакций, и каждый
+            //SETUP получал XactErr (CERR 3->0, HALT) — enum r=-12 при живом
+            //устройстве и рабочем контроллере (см. лог CF-18: ok=1105, pspd=0).
+            //По EHCI spec и как в Linux (ehci-hub.c скорость нигде не читается):
+            //включённый порт EHCI — всегда HS.
+            speed = (ps & 0x4u) ? 2 : 0;
+            is_ls = 0;
+        }
+
+        //Recovery после сброса порта (USB 2.0 §7.1.7.5: >=10 мс до первой
+        //транзакции). QEMU прощает отсутствие паузы, реальное устройство
+        //после chirp/reset ещё не готово отвечать — первый SETUP без паузы
+        //ловит XactErr. 2 тика = 20 мс (1 тик = 10 мс), safety-net — на случай
+        //если тики ещё не тикают.
+        {
+            uint32_t t0r = (api_ptr && api_ptr->get_ticks) ? api_ptr->get_ticks() : 0;
+            uint32_t safety = 1000000;
+            while (((api_ptr->get_ticks() - t0r) < 2) && (safety-- > 0)) {
+                __asm__ __volatile__("pause");
+            }
         }
     } else {
         int hr = usb_hub_port_reset(&path->hc, path->hub_addr, path->hub_port, &speed);

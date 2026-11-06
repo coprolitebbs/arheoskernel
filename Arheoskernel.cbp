@@ -275,6 +275,28 @@
 		<Unit filename="userspace/lib/ustd.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="userspace/system procs/arcom/Makefile" />
+		<Unit filename="userspace/system procs/arcom/arheos/fm_arheos.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/arcom/arheos/main_arheos.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/arcom/fm_core.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/arcom/fm_ui.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/arcom/include/fm_core.h" />
+		<Unit filename="userspace/system procs/arcom/include/fm_platform.h" />
+		<Unit filename="userspace/system procs/arcom/include/fm_types.h" />
+		<Unit filename="userspace/system procs/arcom/posix/fm_posix.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/arcom/posix/main_posix.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="userspace/system procs/arfetch/arfetch.c">
 			<Option compilerVar="CC" />
 		</Unit>

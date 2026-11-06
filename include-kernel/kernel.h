@@ -28,8 +28,9 @@
 #include "draw.h"        //графические функции (draw_char, draw_string, fill_screen)
 #include "isr.h"         //обработка прерываний (struct regs, idt_init, pic_init, isr_handler)
 #include "syscalls.h"    //системные вызовы (SYS_* константы, sys_draw_char)
-
 #include "use_drivers.h"
+
+
 
 //Точка входа ядра (определена в kernel.c)
 void _start(void);

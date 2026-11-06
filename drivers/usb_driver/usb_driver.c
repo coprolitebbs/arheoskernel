@@ -16,7 +16,7 @@
  */
 
 /*
- * usb_driver.c - точка входа ELF-драйвера USB
+ * usb_driver.c - точка входа ELF-драйвера USB.
  *
  * Многопортовый enumeration: контроллер UHCI опрашивает оба корневых
  * порта, каждому найденному устройству выдаётся уникальный USB-адрес,
@@ -86,7 +86,7 @@ static int g_msc_name_counter = 0;
 
 //Записать устройство в реестр + инициализировать как MSC (если это mass
 //storage) и зарегистрировать в блок-слое. Вызывается и для корневых портов,
-//и для устройств за хабом
+//и для устройств за хабом.
 static void usb_setup_device(usb_hc_t *hcw, int port_for_record,
                              usb_device_desc_t *desc, uint8_t dev_addr)
 {
@@ -119,8 +119,8 @@ static void usb_setup_device(usb_hc_t *hcw, int port_for_record,
     slot->dev_addr = dev_addr;
     slot->iface    = local_msc;
     slot->iface.ep0_max_pkt = ep0;
-    //Копируем usb_hc_t в структуру слота, чтобы read/write_wrap
-    //потом имели валидный указатель. hcw часто на стеке — умрёт
+    // *** Копируем usb_hc_t в структуру слота, чтобы read/write_wrap
+    //     потом имели валидный указатель. hcw часто на стеке — умрёт. ***
     slot->hc_wrap.type = hcw->type;
     slot->hc_wrap.hc   = hcw->hc;
     slot->hc           = &slot->hc_wrap;
@@ -162,7 +162,7 @@ static void usb_enum_device_at(usb_port_path_t *path, const char *tag, int depth
     usb_setup_device(&path->hc, path->root_port, &desc, dev_addr);
 
     if (desc.bDeviceClass == 0x09 && depth < 5){
-        //Хаб: он уже в реестре; разворачиваем его нижние порты
+        //Хаб: он уже в реестре; разворачиваем его нижние порты.
         uint8_t nports = 0;
         if (usb_hub_probe(&path->hc, dev_addr, &nports) != 0){
             api_ptr->load_screen_add_string("%s hub %d: no hub desc", tag, dev_addr);
@@ -198,25 +198,12 @@ int device_usb_start(void)
 
     usb_scan_pci_controllers();
 
-    //UHCI: companion-контроллеры, FS/LS-устройства
-    int uhci_count = uhci_probe_all();
-    for (int hci = 0; hci < uhci_count; hci++){
-        uhci_hc_t *uhc = &uhci_hcs[hci];
-        if (uhci_init(uhc) != 0) continue;
-
-        usb_hc_t hc_wrap = { USB_HC_UHCI, uhc };
-        for (int port = 0; port < 2; port++){
-            usb_port_path_t root_path;
-            root_path.hc = hc_wrap;
-            root_path.root_port = (uint8_t)port;
-            root_path.hub_addr  = 0;
-            root_path.hub_port  = 0;
-            if (!usb_path_port_connected(&root_path)) continue;
-            usb_enum_device_at(&root_path, "UHCI", 0);
-        }
-    }
-
-    //EHCI: HS-устройства
+    //--- EHCI: HS-устройства — ПЕРВЫМИ ---
+    //Порядок важен на реальном железе (CF-18): EHCI-порт в это время владеет
+    //шиной, и никакой фоновый трафик UHCI-companion (его «фантомные»
+    //LS-устройства на общих портах) не может вмешаться в перечисление и
+    //инициализацию MSC. UHCI-устройства (внутренние LS/FS) опрашиваются
+    //после и своим расписанием уже ничего не ломают.
     int ehci_count = ehci_probe_all();
     api_ptr->load_screen_add_string("EHCI found %d controller(s)", ehci_count);
     for (int eci = 0; eci < ehci_count; eci++){
@@ -240,6 +227,24 @@ int device_usb_start(void)
             root_path.hub_port  = 0;
             if (!usb_path_port_connected(&root_path)) continue;
             usb_enum_device_at(&root_path, "EHCI", 0);
+        }
+    }
+
+    //--- UHCI: companion-контроллеры, FS/LS-устройства ---
+    int uhci_count = uhci_probe_all();
+    for (int hci = 0; hci < uhci_count; hci++){
+        uhci_hc_t *uhc = &uhci_hcs[hci];
+        if (uhci_init(uhc) != 0) continue;
+
+        usb_hc_t hc_wrap = { USB_HC_UHCI, uhc };
+        for (int port = 0; port < 2; port++){
+            usb_port_path_t root_path;
+            root_path.hc = hc_wrap;
+            root_path.root_port = (uint8_t)port;
+            root_path.hub_addr  = 0;
+            root_path.hub_port  = 0;
+            if (!usb_path_port_connected(&root_path)) continue;
+            usb_enum_device_at(&root_path, "UHCI", 0);
         }
     }
 

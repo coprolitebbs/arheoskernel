@@ -254,6 +254,13 @@ $CC $USER_CCFLAGS_ELF -c "userspace/system procs/lsusb/lsusb.c" -o bin/u_lsusb.o
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/arfetch/arfetch.c" -o bin/u_arfetch.o
 #df
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/df/df.c" -o bin/u_df.o
+#arcom
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/fm_ui.c" -o bin/u_arcom_ui.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/fm_core.c" -o bin/u_arcom_core.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/arheos/fm_arheos.c" -o bin/u_arcom_ah.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/arheos/main_arheos.c" -o bin/u_arcom_am.o
+
+
 
 # Линк flat-бинарника без ELF-заголовков
 # Базовый адрес -Ttext 0x40000000 совпадает с картой памяти процессов.
@@ -286,6 +293,7 @@ $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_thoth.o bin/u_tho
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lsusb.o -o bin/lsusb.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_uimage_elf.o bin/u_arfetch.o -o bin/arfetch.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_lib_elf.o bin/u_df.o -o bin/df.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_arcom_ui.o bin/u_arcom_core.o bin/u_arcom_ah.o bin/u_arcom_am.o -o bin/arcom.elf
 
 #clear
 #rm -f bin/*.o
@@ -343,6 +351,7 @@ create_fat_image() {
     mcopy -i "$IMG" bin/lsusb.elf ::/BIN/
     mcopy -i "$IMG" bin/arfetch.elf ::/BIN/
     mcopy -i "$IMG" bin/df.elf ::/BIN/
+    mcopy -i "$IMG" bin/arcom.elf ::/BIN/
 
     mmd -i "$IMG" ::/CONFIG
     mmd -i "$IMG" ::/CONFIG/BOOT
@@ -450,6 +459,7 @@ e2cp bin/thoth.elf tmp_ext2.img:/bin/thoth.elf
 e2cp bin/lsusb.elf tmp_ext2.img:/bin/lsusb.elf
 e2cp bin/arfetch.elf tmp_ext2.img:/bin/arfetch.elf
 e2cp bin/df.elf tmp_ext2.img:/bin/df.elf
+e2cp bin/arcom.elf tmp_ext2.img:/bin/arcom.elf
 
 e2mkdir tmp_ext2.img:/config
 e2mkdir tmp_ext2.img:/config/boot
@@ -460,8 +470,8 @@ e2mkdir tmp_ext2.img:/config/locales
 e2cp userspace/filesystem/config/boot/boot.cfg tmp_ext2.img:/config/boot/boot.cfg
 e2cp userspace/filesystem/config/sekhmet/config.cfg tmp_ext2.img:/config/sekhmet/config.cfg
 e2cp userspace/filesystem/config/sekhmet/sekhmet.hlp tmp_ext2.img:/config/sekhmet/sekhmet.hlp
-e2cp userspace/filesystem/config/img/sekhmet.tga tmp_ext2.img:/config/img/sekhmet.tga
-e2cp userspace/filesystem/config/img/ewall.tga tmp_ext2.img:/config/img/ewall.tga
+e2cp userspace/filesystem/config/img/sekhmet.png tmp_ext2.img:/config/img/sekhmet.png
+e2cp userspace/filesystem/config/img/ewall.png tmp_ext2.img:/config/img/ewall.png
 e2cp userspace/filesystem/config/locales/en.cfg tmp_ext2.img:/config/locales/en.cfg
 e2cp userspace/filesystem/config/locales/ru.cfg tmp_ext2.img:/config/locales/ru.cfg
 
@@ -491,7 +501,7 @@ echo -e "${GREEN}Все образы собраны в output/${NC}"
 # ---- Запуск QEMU с дискетой или hdd ----
 #qemu-system-i386 -drive file=output/fat12_720.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 #qemu-system-i386 -drive file=output/fat12_1440.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
-#qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 
 #USB FLOPPY drive

@@ -20,6 +20,17 @@
 #include "include-kernel/comdebug.h"
 #include "include-kernel/pmm.h"
 
+//Глобальные переменные, заполняются один раз
+static uint32_t *SMI_CMD;
+static uint8_t   ACPI_ENABLE;
+static uint32_t *PM1a_CNT;
+static uint32_t *PM1b_CNT;
+static uint16_t  SLP_TYPa;
+static uint16_t  SLP_TYPb;
+static uint16_t  SLP_EN  = 1 << 13;
+static uint16_t  SCI_EN  = 1;
+static int acpi_ready = 0;  //1, если всё найдено и можно выключаться
+
 
 //Внутренние функции
 uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset)
@@ -35,6 +46,92 @@ uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t 
     __asm__ volatile ("outl %%eax, %%dx":: "a"(address), "d"((uint16_t)0x0CF8));
     __asm__ volatile ("inl %%dx, %%eax":"=a"(value):"d"((uint16_t)0x0CFC));
     return value;
+}
+
+
+
+//Проверка сигнатуры и контрольной суммы RSDP
+static unsigned int *acpiCheckRSDPtr(unsigned int *ptr) {
+    char *sig = "RSD PTR ";
+    struct RSDPtr *rsdp = (struct RSDPtr *)ptr;
+    uint8_t *bptr;
+    uint8_t check = 0;
+    int i;
+
+    if (memcmp(sig, rsdp, 8) == 0) {
+        // Проверка контрольной суммы первых 20 байт
+        bptr = (uint8_t *)ptr;
+        for (i = 0; i < (int)sizeof(struct RSDPtr); i++) {
+            check += *bptr;
+            bptr++;
+        }
+        if (check == 0) {
+            return (unsigned int *)rsdp->RsdtAddress;
+        }
+    }
+    return 0;
+}
+
+//Поиск RSDP: сначала в области EBDA, потом в 0xE0000–0xFFFFF
+static unsigned int *acpiGetRSDPtr(void) {
+    unsigned int *addr;
+    unsigned int *rsdp;
+
+    // 1) Область EBDA (сегмент лежит по адресу 0x40E)
+    uint16_t ebda_seg = *((uint16_t *)0x40E);
+    uint32_t ebda = (uint32_t)ebda_seg * 0x10;
+    if (ebda < 0x400 || ebda > 0xA0000) ebda = 0x9FC00; //fallback
+
+    for (addr = (unsigned int *)ebda;
+         (uint32_t)addr < ebda + 1024;
+         addr += 0x10 / sizeof(addr)) {
+        rsdp = acpiCheckRSDPtr(addr);
+        if (rsdp) return rsdp;
+    }
+
+    //2) Область BIOS ROM 0xE0000–0xFFFFF
+    for (addr = (unsigned int *)0x000E0000;
+         (uint32_t)addr < 0x00100000;
+         addr += 0x10 / sizeof(addr)) {
+        rsdp = acpiCheckRSDPtr(addr);
+        if (rsdp) return rsdp;
+    }
+
+    return 0;
+}
+
+//Проверка заголовка таблицы ACPI (сигнатура + контрольная сумма)
+static int acpiCheckHeader(unsigned int *ptr, char *sig) {
+    if (memcmp(ptr, sig, 4) == 0) {
+        char *checkPtr = (char *)ptr;
+        int len = *(ptr + 1);  //Length
+        char check = 0;
+        while (0 < len--) {
+            check += *checkPtr;
+            checkPtr++;
+        }
+        if (check == 0) return 0;
+    }
+    return -1;
+}
+
+//Включение ACPI (если BIOS этого не сделал)
+static int acpiEnable(void) {
+    //Проверяем SCI_EN (бит 0 в PM1a_CNT)
+    if ((inw((uint32_t)(uintptr_t)PM1a_CNT) & SCI_EN) == 0) {
+        if (SMI_CMD != 0 && ACPI_ENABLE != 0) {
+            outb((uint32_t)SMI_CMD, ACPI_ENABLE);
+
+            //Ждём до 3 секунд, пока SCI_EN не станет 1
+            for (int i = 0; i < 300; i++) {
+                if ((inw((uint32_t)(uintptr_t)PM1a_CNT) & SCI_EN) == 1) break;
+                for (volatile int j = 0; j < 100000; j++);
+            }
+            if ((inw((uint32_t)(uintptr_t)PM1a_CNT) & SCI_EN) == 1) return 0;
+        }
+        return -1;
+    }
+    return 0;
 }
 
 
@@ -137,4 +234,79 @@ void find_and_prepare_s3_trio64(void)
     com_puts("[KERNEL] find s3_trio64_lfb addr: ");
     com_puthex(fb_phys_addr);
     com_puts("\n");
+}
+
+//Вызывается один раз при инициализации ядра (после vmm_init, до включения задач)
+void acpi_init(void) {
+    unsigned int *rsdp = acpiGetRSDPtr();
+    if (!rsdp) return;                       //ACPI недоступен
+
+    if (acpiCheckHeader(rsdp, "RSDT") != 0) return;
+
+    //RSDT: заголовок 36 байт, далее массив 32-битных физических адресов
+    int entries = *(rsdp + 1);               //Length всей RSDT
+    entries = (entries - 36) / 4;
+    unsigned int *entry_ptr = rsdp + 36 / 4;
+
+    struct FACP *facp = 0;
+
+    while (entries-- > 0) {
+        if (acpiCheckHeader((unsigned int *)*entry_ptr, "FACP") == 0) {
+            facp = (struct FACP *)*entry_ptr;
+            break;
+        }
+        entry_ptr++;
+    }
+    if (!facp) return;
+
+    //DSDT
+    if (acpiCheckHeader((unsigned int *)facp->DSDT, "DSDT") != 0) return;
+
+    //Поиск \_S5 в DSDT (AML-сканер)
+    char *S5Addr = (char *)facp->DSDT + 36;       //пропускаем заголовок DSDT
+    int dsdtLength = ((uint32_t *)facp->DSDT)[1] - 36;   // Length DSDT (поле Length в заголовке) минус 36
+
+    while (dsdtLength-- > 0) {
+        if (memcmp(S5Addr, "_S5_", 4) == 0) break;
+        S5Addr++;
+    }
+
+    if (dsdtLength <= 0) return; //\_S5 не найден
+
+    //Проверяем, что это действительно Name(\_S5, Package(...))
+    if ((*(S5Addr - 1) == 0x08 ||
+        (*(S5Addr - 2) == 0x08 && *(S5Addr - 1) == '\\')) &&
+        *(S5Addr + 4) == 0x12) {
+
+        S5Addr += 5;
+        S5Addr += ((*S5Addr & 0xC0) >> 6) + 2; //PkgLength size
+
+        if (*S5Addr == 0x0A) S5Addr++;          //byteprefix
+        SLP_TYPa = *(uint8_t *)S5Addr << 10;
+        S5Addr++;
+
+        if (*S5Addr == 0x0A) S5Addr++;          //byteprefix
+        SLP_TYPb = *(uint8_t *)S5Addr << 10;
+
+        SMI_CMD      = (uint32_t *)facp->SMI_CMD;
+        ACPI_ENABLE  = facp->ACPI_ENABLE;
+        PM1a_CNT     = (uint32_t *)facp->PM1a_CNT_BLK;
+        PM1b_CNT     = (uint32_t *)facp->PM1b_CNT_BLK;
+        acpi_ready   = 1;
+    }
+}
+
+
+void acpi_poweroff(void) {
+    if (!acpi_ready) return;
+
+    acpiEnable();  //если BIOS не включил ACPI
+
+    //Записываем SLP_TYPa | SLP_EN в PM1a_CNT
+    outw((uint32_t)(uintptr_t)PM1a_CNT, SLP_TYPa | SLP_EN);
+
+    //Если есть PM1b_CNT — повторяем для него
+    if (PM1b_CNT != 0) {
+        outw((uint32_t)(uintptr_t)PM1b_CNT, SLP_TYPb | SLP_EN);
+    }
 }

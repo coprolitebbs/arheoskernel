@@ -19,9 +19,41 @@
 #define HARDWARE_H
 
 #include <stdint.h>
+#include "ports_io.h"
+
+//‘труктуры ACPI
+
+struct RSDPtr {
+    uint8_t  Signature[8];      //"RSD PTR "
+    uint8_t  CheckSum;
+    uint8_t  OemID[6];
+    uint8_t  Revision;
+    uint32_t RsdtAddress;       //физический адрес RSDT
+} __attribute__((packed));
+
+struct FACP {
+    uint8_t  Signature[4];      //"FACP"
+    uint32_t Length;
+    uint8_t  unneded1[40 - 8];
+    uint32_t DSDT;              //физический адрес DSDT
+    uint8_t  unneded2[48 - 44];
+    uint32_t SMI_CMD;
+    uint8_t  ACPI_ENABLE;
+    uint8_t  ACPI_DISABLE;
+    uint8_t  unneded3[64 - 54];
+    uint32_t PM1a_CNT_BLK;
+    uint32_t PM1b_CNT_BLK;
+    uint8_t  unneded4[89 - 72];
+    uint8_t  PM1_CNT_LEN;
+} __attribute__((packed));
+
+
 void beep(uint32_t count);
 
 uint32_t enumerate_pci_ven_dev_ids(void);
 void find_and_prepare_s3_trio64(void);
+
+void acpi_init(void);
+void acpi_poweroff(void);
 
 #endif

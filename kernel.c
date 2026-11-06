@@ -41,6 +41,8 @@
 #include "include-kernel/font_vga.h"
 #include "include-kernel/kload_screen.h"
 
+
+
 void _start(void)
 {
     /*
@@ -124,11 +126,11 @@ void _start(void)
     //fill_screen(0xFF, 0x1, 0x1);
     //for(;;);
 
-    draw_string(0, 232, boot_info->modules[2].name);
-    draw_hex_dword(boot_info->bpp, 20, 50);
-    draw_hex_dword(boot_info->pitch, 20, 60);
-    draw_hex_dword(boot_info->framebuffer, 20, 70);
-    draw_hex_dword(boot_info->graphics_flags, 20, 80);
+    //draw_string(0, 232, boot_info->modules[2].name);
+    //draw_hex_dword(boot_info->bpp, 20, 50);
+    //draw_hex_dword(boot_info->pitch, 20, 60);
+    //draw_hex_dword(boot_info->framebuffer, 20, 70);
+    //draw_hex_dword(boot_info->graphics_flags, 20, 80);
 //for(;;);
 
     //com_puts("[KERNEL] VBE Framebuffer addr: ");
@@ -178,6 +180,8 @@ void _start(void)
 
     // ---- Инициализация Virtual Memory Manager ----
     vmm_init(/*lfb_addr*/);
+
+    acpi_init();
 
     // ---- Попытка поиска адреса линейного фреймбуффера в памяти -----
     uint32_t total_mem = pmm_get_total_memory();
@@ -455,6 +459,9 @@ void kernel_halt_all(void)
     kprintf("\n=== ARHeos Operating System ===\n");
     kprintf("Initiating structural system shutdown sequences...\n");
     kprintf("All VFS partitions unmounted safely.\n");
+
+    acpi_poweroff();
+
     //Прямой выстрел в фиксированные ACPI порты QEMU / Bochs / VirtualBox
     outw(0x604, 0x2000);  // QEMU ACPI Soft Off
     outw(0xB004, 0x2000); // Bochs Power Off

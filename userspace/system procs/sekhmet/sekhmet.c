@@ -1187,7 +1187,7 @@ void load_config(void)
             scr_pitch = 1024 * 4;
         }
 
-        uint8_t *wp_buffer = load_tga_to_buffer(wp_file, scr_width, scr_height, scr_bpp, scr_pitch, mode, &loading_struct);
+        uint8_t *wp_buffer = load_image_to_buffer(wp_file, scr_width, scr_height, scr_bpp, scr_pitch, mode, &loading_struct);
         if (wp_buffer)
         {
             uint32_t wp_size_bytes = scr_height * scr_pitch;

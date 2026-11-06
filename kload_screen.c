@@ -285,7 +285,7 @@ static void draw_static(void)
     //(сами строки лога рисуются через redraw_log() в конце функции)
     uint32_t rx = panel_x + 20;
     uint32_t ry = panel_y + 14;
-    color_string(rx, ry, "Загрузка:", C_TEXT_BRIGHT);
+    color_string(rx, ry, "\x87\xA0\xA3\xE0\xE3\xA7\xAA\xA0:", C_TEXT_BRIGHT); //loading str
 
     //Место прогрессбара
     bar_x = panel_x + 20;
@@ -298,9 +298,9 @@ static void draw_static(void)
 
     //Футер
     {
-        uint32_t fy = panel_y + ph + 18;
-        color_string_centered(fy,      "ARHeOS (c) 2026  -  Навеяно старыми ОС", C_TEXT_DIM);
-        color_string_centered(fy + 14, "Загрузка, ожидайте...", C_TEXT_DIM);
+        uint32_t fy = panel_y + ph + 18 + 400;
+        color_string_centered(fy,"ARHeOS (c) 2026  -  \x8D\xA0\xA2\xA5\xEF\xAD\xAE \xE1\xE2\xA0\xE0\xEB\xAC\xA8 \x8E\x91", C_TEXT_DIM);
+        color_string_centered(fy + 14, "\x87\xA0\xA3\xE0\xE3\xA7\xAA\xA0, ожидайте...", C_TEXT_DIM);
     }
 
     //Лог поверх статики, в свою область
