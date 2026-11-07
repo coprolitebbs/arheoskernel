@@ -748,14 +748,20 @@ static bool is_valid_executable(const char *path)
  *
  * with_prompt = true  — полная отрисовка от якоря (промпт + весь текст):
  *                       первый вывод, история, автодополнение, Enter.
- * with_prompt = false — точечная правка: допечатать хвост от позиции курсора
- *                       (вставка в середину, удаление), не трогая остальное.
+ * with_prompt = false — точечная правка: допечатать хвост от edit_from —
+ *                       индекса байта, с которого началась правка.
+ *                       Это НЕ текущая позиция курсора: при вставке новый
+ *                       символ оказывается ПЕРЕД курсором, поэтому печать
+ *                       от curr_idx пропустила бы его (введенный текст не
+ *                       отображался бы до самого Enter). Для удалений
+ *                       (Backspace/DEL) edit_from равен новой curr_idx —
+ *                       хвост съезжает влево от места курсора.
  *
  * В обоих случаях лишний хвост прошлой отрисовки стирается, курсор
  * возвращается точно на свою ячейку, ядру сообщается позиция мигающего
  * курсора. Сплошной очистки «всей строки» нет — мерцать нечему.
  */
-static void redraw_line_with_cursor(const char *buffer, int pos, int curr_idx, bool with_prompt)
+static void redraw_line_with_cursor(const char *buffer, int pos, int curr_idx, int edit_from, bool with_prompt)
 {
     static char out[1280];
     int n = 0;
@@ -783,7 +789,7 @@ static void redraw_line_with_cursor(const char *buffer, int pos, int curr_idx, b
     line_cell_pos(end_off, &end_row, &end_col);
 
     //1) Печать. Полная отрисовка всегда идет ОТ ЯКОРЯ (промпт + весь текст),
-    //точечная правка — от позиции курсора (только хвост).
+    //точечная правка — от НАЧАЛА правки edit_from (см. комментарий к функции).
     //Печать сама переносит строки и обновляет текстовую матрицу ядра
     if (with_prompt)
     {
@@ -793,8 +799,12 @@ static void redraw_line_with_cursor(const char *buffer, int pos, int curr_idx, b
     }
     else
     {
-        n = line_emit_cup(out, 0, cur_row, cur_col);
-        for (int i = curr_idx; i < pos && n < (int)sizeof(out) - 32; i++) out[n++] = buffer[i];
+        if (edit_from < 0 || edit_from > pos) edit_from = curr_idx;
+        int from_off = prompt_v + get_visible_length(buffer, edit_from);
+        int from_row, from_col;
+        line_cell_pos(from_off, &from_row, &from_col);
+        n = line_emit_cup(out, 0, from_row, from_col);
+        for (int i = edit_from; i < pos && n < (int)sizeof(out) - 32; i++) out[n++] = buffer[i];
     }
     u_write(STDOUT, out, n);
 
@@ -855,7 +865,7 @@ void sekhmet_read_line(char *buffer, int max_len)
     //Глиф курсора из config.cfg — мигает им ядро, а не Сехмет
     u_tty_line_edit(2, cursor_char, 0);
 
-    redraw_line_with_cursor(buffer, pos, curr_idx, true);
+    redraw_line_with_cursor(buffer, pos, curr_idx, 0, true);
 
     while (1)
     {
@@ -949,7 +959,7 @@ void sekhmet_read_line(char *buffer, int max_len)
                     strcpy(buffer, cmd_history[history_browse_idx]);
                     pos = strlen(buffer);
                     curr_idx = pos;
-                    redraw_line_with_cursor(buffer, pos, curr_idx, true);
+                    redraw_line_with_cursor(buffer, pos, curr_idx, 0, true);
                 }
                 continue;
             }
@@ -972,7 +982,7 @@ void sekhmet_read_line(char *buffer, int max_len)
                         pos = strlen(buffer);
                         curr_idx = pos;
                     }
-                    redraw_line_with_cursor(buffer, pos, curr_idx, true);
+                    redraw_line_with_cursor(buffer, pos, curr_idx, 0, true);
                 }
                 continue;
             }
@@ -1003,7 +1013,8 @@ void sekhmet_read_line(char *buffer, int max_len)
                     }
                     pos -= del_bytes;
                     buffer[pos] = '\0';
-                    redraw_line_with_cursor(buffer, pos, curr_idx, false);
+                    //DEL: хвост съезжает влево от курсора — печать от новой curr_idx
+                    redraw_line_with_cursor(buffer, pos, curr_idx, curr_idx, false);
                 }
                 continue;
             }
@@ -1016,7 +1027,7 @@ void sekhmet_read_line(char *buffer, int max_len)
 
             //Финальное эхо: полная отрисовка строки от якоря — гарантирует
             //целостный текст команды независимо от того, как его правили
-            redraw_line_with_cursor(buffer, pos, curr_idx, true);
+            redraw_line_with_cursor(buffer, pos, curr_idx, 0, true);
 
             //Перевод строки под конец текста. Если текст кончился ровно
             //на границе экранной строки, консоль уже перенесла курсор
@@ -1058,14 +1069,16 @@ void sekhmet_read_line(char *buffer, int max_len)
                 pos -= del_bytes;
                 curr_idx -= del_bytes;
                 buffer[pos] = '\0';
-                redraw_line_with_cursor(buffer, pos, curr_idx, false);
+                //Backspace: хвост съезжает влево от курсора — печать от новой curr_idx
+                redraw_line_with_cursor(buffer, pos, curr_idx, curr_idx, false);
             }
             continue;
         }
         if (scancode == 0x0F)
         {
+            int edit_from = curr_idx; //начало правки ДО вставки автодополнения
             autocomplete_file(buffer, &pos, &curr_idx);
-            redraw_line_with_cursor(buffer, pos, curr_idx, false);
+            redraw_line_with_cursor(buffer, pos, curr_idx, edit_from, false);
             continue;
         }
         if (scancode < 128)
@@ -1084,10 +1097,11 @@ void sekhmet_read_line(char *buffer, int max_len)
                     }
                     for (int i = 0; i < step; i++)
                         buffer[curr_idx + i] = utf8[i];
+                    int edit_from = curr_idx; //начало правки: здесь теперь новый символ
                     curr_idx += step;
                     pos      += step;
                     buffer[pos] = '\0';
-                    redraw_line_with_cursor(buffer, pos, curr_idx, false);
+                    redraw_line_with_cursor(buffer, pos, curr_idx, edit_from, false);
                 }
             }
         }
