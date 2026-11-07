@@ -102,6 +102,20 @@ typedef struct tty
     uint32_t line_cursor_cell_x;                //Ячейка, где глиф нарисован (для восстановления)
     uint32_t line_cursor_cell_y;
 
+    //Канонический редактор строки ядра (cooked STDIN, systemcall_file_read).
+    //Строку до Enter набирает ядро: эхо, Backspace/DEL, стрелки, HOME/END,
+    //Ctrl+C и мигающий курсор в ячейке kernel_cursor_row/col.
+    //Позиция курсора считается ОТ КОНЦА строки (kernel_end_row/col), поэтому
+    //переносы и скроллы ее не сбивают
+    volatile bool kernel_line_active;           //Идет набор строки (cooked)
+    int32_t kernel_cursor_row;                  //Ячейка курсора набора (для мигания)
+    int32_t kernel_cursor_col;
+    int32_t kernel_end_row;                     //Первая свободная ячейка ЗА последним символом строки
+    int32_t kernel_end_col;
+    volatile uint32_t line_sent_bytes;          //Сколько байт готовой строки уже отдано приложению
+    bool kernel_ctrl_down;                      //Зажат ли Ctrl (для Ctrl+C)
+    bool kernel_e0_prefix;                      //Пришел ли префикс 0xE0 расширенных клавиш
+
     //Индивидуальные экранные координаты курсора для данного TTY
     uint32_t cursor_x;
     uint32_t cursor_y;
@@ -135,6 +149,11 @@ void kconsole_update_cursor(void);
 //show рисует глиф в текущей позиции, hide восстанавливает ячейку из матрицы
 void kconsole_line_cursor_show(void);
 void kconsole_line_cursor_hide(void);
+//Нарисовать/стереть глиф курсора в КОНКРЕТНОЙ ячейке (cooked-редактор ядра:
+//позиция приходит уже пересчитанной от конца строки)
+void kconsole_line_cursor_draw_at(uint32_t cell_x, uint32_t cell_y, bool draw_glyph);
+//Ячейка курсора строки Ring-3 по якорю и смещению (SYS_TTY_LINE_EDIT)
+void kconsole_line_cursor_cell(uint32_t *cell_x, uint32_t *cell_y);
 void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color);
 void kernel_stdout_write_char(char c, uint32_t color);
 void kconsole_clear_current_line(void);

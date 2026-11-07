@@ -30,4 +30,11 @@ void font_vga_init(void);
 
 void init_standard_locales(void);
 
+//Конвертация CP866-байта в кодпойнт шрифта vga-8x8.
+//Шрифт хранит глифы font_data[256][8] под Unicode-кодпойнтами:
+//font_data[0xB1] (▒ в CP866) доступен под кодпойнтом U+2592.
+//0x00..0x7F — ASCII, возвращается как есть; 0x80..0xFF — по таблице
+//cp866_upper; значения больше 0xFF считаются уже готовым кодпойнтом
+uint32_t cp866_byte_to_codepoint(uint32_t b);
+
 #endif

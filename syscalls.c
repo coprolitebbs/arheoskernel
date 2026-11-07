@@ -32,6 +32,7 @@
 #include "include-kernel/ports_io.h"
 #include "include-kernel/kbd_translate.h"
 #include "include-kernel/locale.h"
+#include "include-kernel/font_vga.h"
 #include "userspace/include/syscall.h"
 #include "include-kernel/usb_registry.h"
 #include "userspace/include/udevices_struct.h"
@@ -369,14 +370,227 @@ void systemcall_readdir(struct regs *r)
     r->eax = FS_OK;
 }
 
+//================ Канонический редактор строки ядра (cooked STDIN) ================
+//SYS_READ(STDIN) в cooked-режиме сам набирает строку до Enter: печатает эхо,
+//правит её (Backspace/DEL, стрелки, HOME/END), отменяет по Ctrl+C и мигает
+//курсором. Приложение получает готовую UTF-8 строку, завершённую '\n'
+//(пользовательский scanf/u_read этого даже не замечают — они читают байты).
+
+//Число Unicode-кодпойнтов в первых bytes байтах UTF-8 строки
+static uint32_t cooked_cp_count(const char *buf, uint32_t bytes)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < bytes; i++)
+    {
+        if ((((uint8_t)buf[i]) & 0xC0) != 0x80) n++; //не continuation
+    }
+    return n;
+}
+
+//UTF-8 кодирование кодпойнта, возвращает число записанных байтов (1..4)
+static int cooked_utf8_encode(uint32_t cp, uint8_t *out)
+{
+    int n = 0;
+    if (cp < 0x80)
+    {
+        out[n++] = (uint8_t)cp;
+    }
+    else if (cp < 0x800)
+    {
+        out[n++] = (uint8_t)(0xC0 | (cp >> 6));
+        out[n++] = (uint8_t)(0x80 | (cp & 0x3F));
+    }
+    else if (cp < 0x10000)
+    {
+        out[n++] = (uint8_t)(0xE0 | (cp >> 12));
+        out[n++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+        out[n++] = (uint8_t)(0x80 | (cp & 0x3F));
+    }
+    else
+    {
+        out[n++] = (uint8_t)(0xF0 | (cp >> 18));
+        out[n++] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
+        out[n++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
+        out[n++] = (uint8_t)(0x80 | (cp & 0x3F));
+    }
+    return n;
+}
+
+//Начало кодпойнта, ПРЕДШЕСТВУЮЩЕГО байту pos (pos всегда на границе кодпойнтов)
+static uint32_t cooked_prev_cp(const char *buf, uint32_t pos)
+{
+    if (pos == 0) return 0;
+    uint32_t i = pos - 1;
+    while (i > 0 && ((((uint8_t)buf[i]) & 0xC0) == 0x80)) i--;
+    return i;
+}
+
+//Индекс ЗА кодпойнтом, начинающимся в pos (не дальше len)
+static uint32_t cooked_next_cp(const char *buf, uint32_t pos, uint32_t len)
+{
+    uint32_t i = pos + 1;
+    while (i < len && ((((uint8_t)buf[i]) & 0xC0) == 0x80)) i++;
+    return i;
+}
+
+//Первая свободная ячейка за последним символом строки — по фактическому
+//текстовому курсору ядра (он после печати всегда стоит ровно там, включая
+//автоперенос на новую строку и скролл)
+static void cooked_track_end_from_cursor(tty_t *t)
+{
+    t->kernel_end_row = (int32_t)(t->cursor_y / t->cell_h);
+    t->kernel_end_col = (int32_t)(t->cursor_x / t->cell_w);
+}
+
+//Ячейка экрана для байта pos внутри набираемой строки.
+//Считаем ОТ КОНЦА строки (kernel_end_row/col актуальны после каждого
+//изменения), поэтому переносы и скроллы позицию не сбивают
+static void cooked_calc_cursor_cell(const tty_t *t, uint32_t pos, int32_t *out_row, int32_t *out_col)
+{
+    int cols = (int)t->console_cols;
+    if (cols <= 0) cols = 1;
+
+    uint32_t start_col = t->input_start_x / t->cell_w;
+    uint32_t total_cells = start_col + cooked_cp_count(t->line_buffer, t->copied_bytes);
+    uint32_t pos_cells   = start_col + cooked_cp_count(t->line_buffer, pos);
+
+    int32_t back = (int32_t)total_cells - (int32_t)pos_cells; //ячеек от pos до конца
+    int32_t c = t->kernel_end_col - back;
+    int32_t r = t->kernel_end_row;
+    while (c < 0)
+    {
+        c += cols;
+        r--;
+    }
+    *out_row = r;
+    *out_col = c;
+}
+
+//Служебное: дописать десятичное число в буфер
+static int cooked_emit_uint(char *out, int n, uint32_t v)
+{
+    char tmp[8];
+    int t = 0;
+    if (v == 0)
+    {
+        out[n++] = '0';
+        return n;
+    }
+    while (v > 0 && t < (int)sizeof(tmp))
+    {
+        tmp[t++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (t > 0)
+    {
+        out[n++] = tmp[--t];
+    }
+    return n;
+}
+
+//CUP-последовательность \x1B[row+1;col+1H прямо в STDOUT ядра
+//(координаты 1-based, как требует ANSI; парсер ядра сам клампит за экран)
+static void cooked_emit_cup(int32_t row, int32_t col)
+{
+    char seq[24];
+    int n = 0;
+    if (row < 0) row = 0;
+    if (col < 0) col = 0;
+    seq[n++] = '\x1B';
+    seq[n++] = '[';
+    n = cooked_emit_uint(seq, n, (uint32_t)(row + 1));
+    seq[n++] = ';';
+    n = cooked_emit_uint(seq, n, (uint32_t)(col + 1));
+    seq[n++] = 'H';
+    for (int i = 0; i < n; i++)
+    {
+        kernel_stdout_write_char(seq[i], console_fgcolor);
+    }
+}
+
+//Перерисовка хвоста строки: CUP к ячейке (row,col), печать line_buffer[from..),
+//фиксация нового конца строки и EL-очистка остатка ряда (вместо пробела —
+//чтобы не уехать за нижнюю границу экрана и не вызвать лишний скролл).
+//При отключенном эхе (TTY_ECHO снят) печать не производится вовсе
+static void cooked_repaint_from(tty_t *t, uint32_t from, int32_t row, int32_t col, bool echo)
+{
+    if (!echo) return;
+    cooked_emit_cup(row, col);
+    for (uint32_t i = from; i < t->copied_bytes; i++)
+    {
+        kernel_stdout_write_char(t->line_buffer[i], console_fgcolor);
+    }
+    //Конец строки — где текстовый курсор сразу после печати хвоста
+    cooked_track_end_from_cursor(t);
+    //Стираем бывший хвост старой отрисовки до края ряда (без скролла)
+    kernel_stdout_write_char('\x1B', console_fgcolor);
+    kernel_stdout_write_char('[',  console_fgcolor);
+    kernel_stdout_write_char('K',  console_fgcolor);
+    //Текстовый курсор обратно в позицию ввода
+    cooked_emit_cup(row, col);
+}
+
+//Пересчитать и показать курсор набора в ячейке байта pos
+static void cooked_sync_cursor(tty_t *t, uint32_t pos, bool echo)
+{
+    int32_t row, col;
+    cooked_calc_cursor_cell(t, pos, &row, &col);
+    if (row < 0) row = 0;
+    if (col < 0) col = 0;
+    t->kernel_cursor_row = row;
+    t->kernel_cursor_col = col;
+    if (echo) kconsole_line_cursor_draw_at((uint32_t)col, (uint32_t)row, true);
+}
+
+//Перестановка курсора БЕЗ перерисовки текста (стрелки, HOME/END):
+//CUP + глиф курсора, ни одна ячейка текста не трогается
+static void cooked_move_cursor(tty_t *t, bool echo)
+{
+    int32_t row, col;
+    cooked_calc_cursor_cell(t, t->line_cursor_pos, &row, &col);
+    if (row < 0) row = 0;
+    if (col < 0) col = 0;
+    t->kernel_cursor_row = row;
+    t->kernel_cursor_col = col;
+    if (echo)
+    {
+        cooked_emit_cup(row, col);
+        kconsole_line_cursor_draw_at((uint32_t)col, (uint32_t)row, true);
+    }
+}
+
+//Отдаёт приложению кусок готовой строки (UTF-8 байты + завершающий '\n').
+//Возвращает число отданных байт или -1, если строка ещё не готова
+static int cooked_deliver_line(tty_t *t, uint8_t *user_buf, uint32_t count)
+{
+    if (!t->line_ready) return -1;
+
+    uint32_t total = t->copied_bytes;                    //без '\n'
+    uint32_t have  = total + 1 - t->line_sent_bytes;     //+1 за '\n'
+    if (have == 0 || count == 0) return -1;
+
+    uint32_t to_copy = (count < have) ? count : have;
+    for (uint32_t i = 0; i < to_copy; i++)
+    {
+        uint32_t idx = t->line_sent_bytes + i;
+        user_buf[i] = (idx < total) ? (uint8_t)t->line_buffer[idx] : (uint8_t)'\n';
+    }
+    t->line_sent_bytes += to_copy;
+
+    if (t->line_sent_bytes >= total + 1)
+    {
+        //Строка исчерпана: чистим состояние, следующая — с чистого листа
+        t->line_ready        = false;
+        t->copied_bytes      = 0;
+        t->line_cursor_pos   = 0;
+        t->line_sent_bytes   = 0;
+        t->kernel_line_active = false;
+    }
+    return (int)to_copy;
+}
+
 void systemcall_file_read(struct regs *r)
 {
-    //Непрерывные UTF-8 байты, которые не удалось отдать за один SYS_READ
-    //Хранятся для следующего вызова SYS_READ от того же task'а (cooked STDIN)
-    static uint8_t  cooked_pending_buf[4];
-    static int      cooked_pending_len = 0;
-    static int      cooked_pending_pos = 0;
-
     int file_d = (int)r->ebx;
     void *user_buf = (void *)r->ecx;
     uint32_t count = r->edx;
@@ -429,82 +643,246 @@ void systemcall_file_read(struct regs *r)
             }
             return;
         }
-        //COOKED: сначала доставляем то, что осталось с прошлого раза
-        if (cooked_pending_pos < cooked_pending_len)
+        //=== COOKED: канонический редактор строки ядра ===
+        tty_t *tty = current_tty;
+        if (!tty)
         {
-            uint32_t avail = (uint32_t)(cooked_pending_len - cooked_pending_pos);
-            uint32_t to_copy = (count < avail) ? count : avail;
-            for (uint32_t i = 0; i < to_copy; i++)
-                ((uint8_t*)user_buf)[i] = cooked_pending_buf[cooked_pending_pos + i];
-            cooked_pending_pos += (int)to_copy;
-            if (cooked_pending_pos >= cooked_pending_len)
-            {
-                cooked_pending_pos = 0;
-                cooked_pending_len = 0;
-            }
-            r->eax = (int32_t)to_copy;
+            r->eax = -1;
             return;
         }
 
-        //COOKED: иначе берём новое событие из клавиатуры
+        bool echo = (current_task->tty_flags & TTY_ECHO) != 0;
+
+        //1) Уже готовая строка — отдаём её байты (возможно, по частям)
+        int ready = cooked_deliver_line(tty, (uint8_t *)user_buf, count);
+        if (ready >= 0)
+        {
+            r->eax = ready;
+            return;
+        }
+
+        //2) Старт новой строки: якорь — текущая позиция текстового курсора ядра
+        if (!tty->kernel_line_active && tty->copied_bytes == 0)
+        {
+            tty->input_start_x      = tty->cursor_x;
+            tty->input_start_y      = tty->cursor_y / tty->cell_h;
+            tty->copied_bytes       = 0;
+            tty->line_cursor_pos    = 0;
+            tty->line_sent_bytes    = 0;
+            tty->kernel_ctrl_down   = false;
+            tty->kernel_e0_prefix   = false;
+            //Мигание и глиф — только при включенном эхе (ввод без эха — невидимый)
+            tty->kernel_line_active = echo;
+            tty->cursor_visible     = true;
+            tty->last_blink_tick    = tick_count;
+            kconsole_reset_utf8_state();
+            //Курсор виден сразу, до первого нажатия
+            cooked_sync_cursor(tty, 0, echo);
+        }
+
+        //3) Разбор накопившихся событий клавиатуры
         while (kbd_driver_api->has_chars())
         {
             uint32_t packed = kbd_driver_api->get_char_blocked();
+            uint8_t sc   = (uint8_t)(packed & 0xFF);
+            uint8_t type = (uint8_t)((packed >> 8) & 0xFF);
+
+            //Префикс расширенных клавиш (стрелки, HOME/END, DEL)
+            if (sc == 0xE0)
+            {
+                tty->kernel_e0_prefix = true;
+                continue;
+            }
+            bool e0 = tty->kernel_e0_prefix;
+            tty->kernel_e0_prefix = false;
+
+            //Ctrl отслеживаем только как модификатор Ctrl+C
+            if (sc == 0x1D)
+            {
+                tty->kernel_ctrl_down = (type == 1);
+                continue;
+            }
+            //Отпускания клавиш редактору не интересны
+            if (type == 0) continue;
+
+            //--- Ctrl+C: отмена ввода строки ---
+            if (tty->kernel_ctrl_down && sc == 0x2E)
+            {
+                if (echo)
+                {
+                    kernel_stdout_write_codepoint('^', console_fgcolor);
+                    kernel_stdout_write_codepoint('C', console_fgcolor);
+                    kernel_stdout_write_codepoint('\n', console_fgcolor);
+                }
+                kconsole_line_cursor_hide();
+                tty->copied_bytes       = 0;
+                tty->line_cursor_pos    = 0;
+                tty->line_sent_bytes    = 0;
+                tty->line_ready         = false;
+                tty->kernel_line_active = false;
+                r->eax = -1; //чтение прервано: scanf/u_read увидят ошибку
+                return;
+            }
+
+            uint32_t pos = tty->line_cursor_pos;
+            uint32_t len = tty->copied_bytes;
+
+            //--- Enter: строка готова ---
+            if (sc == 0x1C)
+            {
+                if (echo) kernel_stdout_write_codepoint('\n', console_fgcolor);
+                if (len < LINE_BUFFER_SIZE) tty->line_buffer[len] = '\0';
+                tty->line_ready         = true;
+                tty->line_sent_bytes    = 0;
+                tty->kernel_line_active = false; //гасим мигание
+                kconsole_line_cursor_hide();
+                break;
+            }
+
+            //--- Расширенные клавиши: стрелки, HOME/END, DEL ---
+            if (e0)
+            {
+                if (sc == 0x4B) //стрелка влево — на кодпойнт влево
+                {
+                    if (pos > 0)
+                    {
+                        tty->line_cursor_pos = cooked_prev_cp(tty->line_buffer, pos);
+                        cooked_move_cursor(tty, echo);
+                    }
+                    continue;
+                }
+                if (sc == 0x4D) //стрелка вправо — на кодпойнт вправо
+                {
+                    if (pos < len)
+                    {
+                        tty->line_cursor_pos = cooked_next_cp(tty->line_buffer, pos, len);
+                        cooked_move_cursor(tty, echo);
+                    }
+                    continue;
+                }
+                if (sc == 0x47) //HOME — начало строки
+                {
+                    if (pos != 0)
+                    {
+                        tty->line_cursor_pos = 0;
+                        cooked_move_cursor(tty, echo);
+                    }
+                    continue;
+                }
+                if (sc == 0x4F) //END — конец строки
+                {
+                    if (pos != len)
+                    {
+                        tty->line_cursor_pos = len;
+                        cooked_move_cursor(tty, echo);
+                    }
+                    continue;
+                }
+                if (sc == 0x53) //DEL — удалить кодпойнт ПОД курсором
+                {
+                    if (pos < len)
+                    {
+                        uint32_t nxt = cooked_next_cp(tty->line_buffer, pos, len);
+                        int32_t row, col;
+                        //Ячейку pos считаем ДО модификации (конец строки ещё старый)
+                        cooked_calc_cursor_cell(tty, pos, &row, &col);
+                        for (uint32_t i = nxt; i <= len; i++)
+                        {
+                            tty->line_buffer[pos + (i - nxt)] = tty->line_buffer[i];
+                        }
+                        tty->copied_bytes = len - (nxt - pos);
+                        cooked_repaint_from(tty, pos, row, col, echo);
+                        cooked_sync_cursor(tty, pos, echo);
+                    }
+                    continue;
+                }
+                //Стрелки вверх/вниз и прочие расширенные — игнорируем
+                continue;
+            }
+
             uint32_t cp = kbd_translate_event(packed);
-            if (cp == 0) continue;   //модификатор — проглотили
+            if (cp == 0) continue;
 
-            //Кодируем codepoint в UTF-8
-            uint8_t utf8[4];
-            int n = 0;
-            if (cp < 0x80)
+            //--- Backspace: удалить кодпойнт ПЕРЕД курсором ---
+            if (sc == 0x0E || cp == '\b')
             {
-                utf8[n++] = (uint8_t)cp;
-            }
-            else if (cp < 0x800)
-            {
-                utf8[n++] = 0xC0 | (cp >> 6);
-                utf8[n++] = 0x80 | (cp & 0x3F);
-            }
-            else if (cp < 0x10000)
-            {
-                utf8[n++] = 0xE0 | (cp >> 12);
-                utf8[n++] = 0x80 | ((cp >> 6) & 0x3F);
-                utf8[n++] = 0x80 | (cp & 0x3F);
-            }
-            else
-            {
-                utf8[n++] = 0xF0 | (cp >> 18);
-                utf8[n++] = 0x80 | ((cp >> 12) & 0x3F);
-                utf8[n++] = 0x80 | ((cp >> 6)  & 0x3F);
-                utf8[n++] = 0x80 | (cp & 0x3F);
+                if (pos > 0)
+                {
+                    uint32_t prev = cooked_prev_cp(tty->line_buffer, pos);
+                    int32_t row, col;
+                    //Ячейку prev считаем ДО модификации (конец строки ещё старый)
+                    cooked_calc_cursor_cell(tty, prev, &row, &col);
+                    for (uint32_t i = pos; i <= len; i++)
+                    {
+                        tty->line_buffer[prev + (i - pos)] = tty->line_buffer[i];
+                    }
+                    tty->copied_bytes    = len - (pos - prev);
+                    tty->line_cursor_pos = prev;
+                    cooked_repaint_from(tty, prev, row, col, echo);
+                    cooked_sync_cursor(tty, prev, echo);
+                }
+                continue;
             }
 
-            //Эхо — печатаем весь codepoint
-            if (current_task->tty_flags & TTY_ECHO)
+            //--- Печатные символы: вставка кодпойнта в позицию курсора ---
+            if (cp >= 0x20 && cp != 0x7F)
             {
-                for (int i = 0; i < n; i++)
-                    kernel_stdout_write_char((char)utf8[i], console_fgcolor);
+                uint8_t utf8[4];
+                int step = cooked_utf8_encode(cp, utf8);
+                if (step > 0 && len + (uint32_t)step < LINE_BUFFER_SIZE - 1)
+                {
+                    if (pos < len)
+                    {
+                        //Вставка в середину: сдвиг хвоста вправо и перерисовка
+                        int32_t row, col;
+                        //Ячейку pos считаем ДО модификации
+                        cooked_calc_cursor_cell(tty, pos, &row, &col);
+                        for (int32_t i = (int32_t)len; i >= (int32_t)pos; i--)
+                        {
+                            tty->line_buffer[i + step] = tty->line_buffer[i];
+                        }
+                        for (int k = 0; k < step; k++)
+                        {
+                            tty->line_buffer[pos + k] = (char)utf8[k];
+                        }
+                        tty->copied_bytes    = len + (uint32_t)step;
+                        tty->line_cursor_pos = pos + (uint32_t)step;
+                        cooked_repaint_from(tty, pos, row, col, echo);
+                        cooked_sync_cursor(tty, pos + (uint32_t)step, echo);
+                    }
+                    else
+                    {
+                        //Дописывание в конец: просто эхо символа
+                        for (int k = 0; k < step; k++)
+                        {
+                            tty->line_buffer[len + k] = (char)utf8[k];
+                        }
+                        tty->copied_bytes    = len + (uint32_t)step;
+                        tty->line_cursor_pos = len + (uint32_t)step;
+                        if (echo)
+                        {
+                            kernel_stdout_write_codepoint(cp, console_fgcolor);
+                            //Конец строки — где курсор сразу после печати
+                            cooked_track_end_from_cursor(tty);
+                        }
+                        cooked_sync_cursor(tty, tty->line_cursor_pos, echo);
+                    }
+                }
+                continue;
             }
+            //Прочие управляющие коды игнорируем (например '\t': он занимает
+            //4 ячейки, но один кодпойнт — сломал бы расчёт позиций)
+        }
 
-            //Сколько сможем отдать сразу
-            uint32_t to_copy = (count < (uint32_t)n) ? count : (uint32_t)n;
-            for (uint32_t i = 0; i < to_copy; i++)
-                ((uint8_t*)user_buf)[i] = utf8[i];
-
-            //Остаток кладём в pending для следующего SYS_READ
-            if (to_copy < (uint32_t)n)
-            {
-                for (int i = 0; i < n - (int)to_copy; i++)
-                    cooked_pending_buf[i] = utf8[to_copy + i];
-                cooked_pending_len = n - (int)to_copy;
-                cooked_pending_pos = 0;
-            }
-
-            r->eax = (int32_t)to_copy;
+        //4) Если во время разбора нажали Enter — сразу отдаём начало строки
+        int ready_after = cooked_deliver_line(tty, (uint8_t *)user_buf, count);
+        if (ready_after >= 0)
+        {
+            r->eax = ready_after;
             return;
         }
 
-        r->eax = 0;   //печатных данных пока нет
+        r->eax = 0; //строка ещё не готова — приложение подождёт
         return;
     }
 
@@ -1639,7 +2017,37 @@ void systemcall_tty_line_edit(struct regs *r)
     }
     else if (r->ebx == 2)
     {
-        current_tty->cursor_code = r->ecx;
+        //Глиф курсора. Из config.cfg Сехмета приходит CP866-код
+        //(cursor_code=0xB1 и т.п.), а шрифт индексируется Unicode-кодпойнтами:
+        //конвертируем честно, чтобы 0xB1 рисовался как ▒, 0x23 — как '#',
+        //0xDB — как █ и т.д. для ВСЕХ 256 кодов. Значения выше 0xFF
+        //считаются уже готовым кодпойнтом (обратная совместимость)
+        uint32_t new_code = cp866_byte_to_codepoint(r->ecx);
+        if (new_code != current_tty->cursor_code)
+        {
+            //Если глиф сейчас нарисован — сразу перерисовываем с новым кодом,
+            //чтобы смена курсора была видна, не дожидаясь следующего мигания
+            bool was_drawn = current_tty->line_cursor_drawn;
+            if (was_drawn) kconsole_line_cursor_hide();
+            current_tty->cursor_code = new_code;
+            if (was_drawn)
+            {
+                if (current_tty->line_edit_active)
+                {
+                    uint32_t cx, cy;
+                    kconsole_line_cursor_cell(&cx, &cy);
+                    kconsole_line_cursor_draw_at(cx, cy, true);
+                }
+                else if (current_tty->kernel_line_active)
+                {
+                    int32_t row = current_tty->kernel_cursor_row;
+                    int32_t col = current_tty->kernel_cursor_col;
+                    if (row < 0) row = 0;
+                    if (col < 0) col = 0;
+                    kconsole_line_cursor_draw_at((uint32_t)col, (uint32_t)row, true);
+                }
+            }
+        }
     }
 
     r->eax = 0;

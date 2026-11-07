@@ -289,102 +289,11 @@ void irq33_handler(struct regs *r)
         //Оставим только обработку переключения TTY по комбинациям клавиш
         return;
     }
-    //Fallback ядра
-    if (!current_tty) return;
-    static bool caps_lock_active = false;
-    static bool ctrl_pressed = false;
-    extern bool shift_pressed;
-
-    if (scancode == 0x1D)      ctrl_pressed = true;
-    else if (scancode == 0x9D) ctrl_pressed = false;
-    if (current_tty->line_ready) return;
-
-    //Вспомогательные лямбды восстановления символов под курсором ядра
-    void restore_char_at_cursor(uint32_t buffer_idx)
-    {
-        uint32_t cx, cy;
-        kconsole_get_render_coords(buffer_idx, &cx, &cy);
-        uint32_t cell_x = cx / current_tty->cell_w;
-        uint32_t cell_y = cy / current_tty->cell_h;
-        uint32_t orig_char = ' ';
-        if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
-        {
-            orig_char = current_tty->matrix[cell_y][cell_x].codepoint;
-        }
-        if (fb && fb->clear_tile) fb->clear_tile(cx, cy, console_bgcolor);
-        else
-            fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_bgcolor);
-        //fb->draw_char(cx, cy, current_tty->cursor_code, console_bgcolor);
-        if (orig_char != ' ' && orig_char != '\0') fb->draw_codepoint(cx, cy, orig_char, console_fgcolor);
-    }
-
-    void force_draw_new_cursor(void)
-    {
-        uint32_t new_cx, new_cy;
-        kconsole_get_render_coords(current_tty->line_cursor_pos, &new_cx, &new_cy);
-        //fb->draw_char(new_cx, new_cy, current_tty->cursor_code, console_fgcolor);
-        fb->draw_codepoint(new_cx, new_cy, current_tty->cursor_code, console_fgcolor);
-        current_tty->cursor_visible = true;
-        current_tty->last_blink_tick = tick_count;
-    }
-
-    if (scancode == 0x4B)  //Стрелочка <-
-    {
-        if (current_tty->line_cursor_pos > 0)
-        {
-            restore_char_at_cursor(current_tty->line_cursor_pos);
-            current_tty->line_cursor_pos--;
-            kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
-            force_draw_new_cursor();
-        }
-        return;
-    }
-    if (scancode == 0x4D)  //Стрелочка ->
-    {
-        if (current_tty->line_cursor_pos < current_tty->copied_bytes)
-        {
-            restore_char_at_cursor(current_tty->line_cursor_pos);
-            current_tty->line_cursor_pos++;
-            kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
-            force_draw_new_cursor();
-        }
-        return;
-    }
-
-    if (scancode < 128)
-    {
-        if (scancode == 0x3A)
-        {
-            caps_lock_active = !caps_lock_active;
-            return;
-        }
-        if (scancode == 0x2A || scancode == 0x36)
-        {
-            shift_pressed = true;
-            return;
-        }
-
-        const locale_t *loc = locale_get_active();
-        uint32_t cp = locale_resolve_key(loc, scancode, shift_pressed);
-        if (cp != 0)
-        {
-            //char ascii = (char)cp866_from_codepoint(cp);
-            restore_char_at_cursor(current_tty->line_cursor_pos);
-            if (cp == '\n')
-            {
-                kernel_stdout_write_char('\n', console_fgcolor);
-                current_tty->line_ready = true;
-            }
-        }
-
-    }
-    else
-    {
-        if (scancode == 0x2A || scancode == 0x36 || scancode == 0xAA || scancode == 0xB6)
-        {
-            if (scancode == 0xAA || scancode == 0xB6) shift_pressed = false;
-        }
-    }
+    //Канонический (cooked) ввод строки теперь полностью обрабатывает ядро
+    //в systemcall_file_read (SYS_READ STDIN): эхо, Backspace/DEL, стрелки,
+    //HOME/END, Ctrl+C и мигающий курсор. Прежний fallback-редактор из IRQ
+    //удален: он не наполнял буфер, не печатал символы и рисовал второй
+    //блочный курсор поверх нового редактора ядра
 }
 
 

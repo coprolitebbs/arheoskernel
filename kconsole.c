@@ -404,7 +404,8 @@ static void kconsole_line_cursor_render_at(uint32_t cell_x, uint32_t cell_y, boo
 }
 
 //Ячейка курсора строки Ring-3 по якорю и смещению внутри строки
-static void kconsole_line_cursor_cell(uint32_t *cell_x, uint32_t *cell_y)
+//(используется и из syscalls.c — перерисовка глифа при смене cursor_code)
+void kconsole_line_cursor_cell(uint32_t *cell_x, uint32_t *cell_y)
 {
     uint32_t total_chars_offset = (current_tty->line_anchor_x / current_tty->cell_w) + current_tty->line_cursor_off;
     *cell_x = total_chars_offset % current_tty->console_cols;
@@ -429,10 +430,38 @@ void kconsole_line_cursor_hide(void)
     kconsole_line_cursor_render_at(current_tty->line_cursor_cell_x, current_tty->line_cursor_cell_y, false);
 }
 
+//Вариант для канонического редактора ядра (cooked STDIN): ячейка уже
+//пересчитана редактором от конца строки, рисуем/стираем как есть
+void kconsole_line_cursor_draw_at(uint32_t cell_x, uint32_t cell_y, bool draw_glyph)
+{
+    if (!current_tty) return;
+    kconsole_line_cursor_render_at(cell_x, cell_y, draw_glyph);
+}
+
 void kconsole_update_cursor(void)
 {
     extern volatile uint32_t tick_count;
     if (!current_tty) return;
+
+    if (current_tty->kernel_line_active)
+    {
+        //--- Курсор канонического редактора ядра (cooked STDIN) ---
+        //Позиция уже лежит в kernel_cursor_row/col (пересчитана редактором
+        //от конца строки, переживает переносы и скролл)
+        if (tick_count - current_tty->last_blink_tick >= current_tty->cursor_tick_count)
+        {
+            current_tty->last_blink_tick = tick_count;
+            current_tty->cursor_visible = !current_tty->cursor_visible;
+
+            int32_t row = current_tty->kernel_cursor_row;
+            if (row < 0) row = 0;
+            int32_t col = current_tty->kernel_cursor_col;
+            if (col < 0) col = 0;
+            kconsole_line_cursor_render_at((uint32_t)col, (uint32_t)row,
+                                           current_tty->cursor_visible);
+        }
+        return;
+    }
 
     if (current_tty->line_edit_active)
     {
@@ -904,6 +933,14 @@ void kconsole_init(void)
         tty_terminals[t].line_cursor_drawn = false;
         tty_terminals[t].line_cursor_cell_x = 0;
         tty_terminals[t].line_cursor_cell_y = 0;
+        tty_terminals[t].kernel_line_active = false;
+        tty_terminals[t].kernel_cursor_row = 0;
+        tty_terminals[t].kernel_cursor_col = 0;
+        tty_terminals[t].kernel_end_row = 0;
+        tty_terminals[t].kernel_end_col = 0;
+        tty_terminals[t].line_sent_bytes = 0;
+        tty_terminals[t].kernel_ctrl_down = false;
+        tty_terminals[t].kernel_e0_prefix = false;
         tty_terminals[t].cursor_visible = false;
         tty_terminals[t].last_blink_tick = 0;
         tty_terminals[t].cursor_code = DEFAULT_CURSOR_CODEPOINT; // 0x2588

@@ -70,6 +70,18 @@ static font_t g_vga_font =
 };
 
 
+//Конвертация CP866-байта в кодпойнт шрифта vga-8x8 (см. font_vga.h).
+//Именно её проходит глиф курсора из config.cfg Сехмета: код 0xB1 из
+//конфигурации превращается в U+2592, и font_lookup находит в шрифте
+//глиф font_data[0xB1] — тот самый блок ▒ из CP866
+uint32_t cp866_byte_to_codepoint(uint32_t b)
+{
+    if (b <= 0x7F) return b;                     //ASCII совпадает 1:1
+    if (b <= 0xFF) return cp866_upper[b - 0x80]; //CP866 -> Unicode
+    return b;                                    //уже готовый кодпойнт
+}
+
+
 void font_vga_init(void)
 {
     font_registry_init();
