@@ -348,79 +348,127 @@ void kconsole_get_render_coords(uint32_t buffer_idx, uint32_t *out_x, uint32_t *
 }
 
 
+//Отрисовка/восстановление одной ячейки мигающего курсора строки Ring-3.
+//draw_glyph=true  — нарисовать глиф курсора (cursor_code)
+//draw_glyph=false — восстановить содержимое ячейки из текстовой матрицы
+static void kconsole_line_cursor_render_at(uint32_t cell_x, uint32_t cell_y, bool draw_glyph)
+{
+    if (cell_y >= current_tty->console_rows) cell_y = current_tty->console_rows - 1;
+    if (cell_x >= current_tty->console_cols) cell_x = current_tty->console_cols - 1;
+    uint32_t cx = cell_x * current_tty->cell_w;
+    uint32_t cy = cell_y * current_tty->cell_h;
+
+    uint32_t old_cr3;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(old_cr3));
+    if (current_task && current_task->pid != 0)
+    {
+        __asm__ __volatile__("mov %0, %%cr3" : : "r"(current_task->page_dir_phys));
+    }
+
+    if (draw_glyph)
+    {
+        if (fb && fb->draw_codepoint) fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_fgcolor);
+        current_tty->line_cursor_drawn = true;
+        current_tty->line_cursor_cell_x = cell_x;
+        current_tty->line_cursor_cell_y = cell_y;
+    }
+    else
+    {
+        uint32_t original_char = ' ';
+        uint32_t original_bg = 0xFFFFFFFF;
+
+        if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
+        {
+            original_char = current_tty->matrix[cell_y][cell_x].codepoint;
+            original_bg = current_tty->matrix[cell_y][cell_x].bg;
+        }
+
+        if (original_bg != 0xFFFFFFFF && fb && fb->fill_rect)
+        {
+            fb->fill_rect(cx, cy, current_tty->cell_w, current_tty->cell_h, original_bg);
+        }
+        else if (fb && fb->clear_tile)
+        {
+            fb->clear_tile(cx, cy, console_bgcolor);
+        }
+
+        //Если в ячейке был символ текста — перерисовываем его поверх обоев
+        if (original_char != ' ' && original_char != '\0')
+        {
+            if (fb && fb->draw_codepoint) fb->draw_codepoint(cx, cy, original_char, console_fgcolor);
+        }
+        current_tty->line_cursor_drawn = false;
+    }
+
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
+}
+
+//Ячейка курсора строки Ring-3 по якорю и смещению внутри строки
+static void kconsole_line_cursor_cell(uint32_t *cell_x, uint32_t *cell_y)
+{
+    uint32_t total_chars_offset = (current_tty->line_anchor_x / current_tty->cell_w) + current_tty->line_cursor_off;
+    *cell_x = total_chars_offset % current_tty->console_cols;
+    *cell_y = current_tty->line_anchor_y + (total_chars_offset / current_tty->console_cols);
+}
+
+//Мгновенно нарисовать курсор строки Ring-3 в его текущей позиции
+//(вызывается из SYS_TTY_LINE_EDIT после каждого изменения строки)
+void kconsole_line_cursor_show(void)
+{
+    if (!current_tty || !current_tty->line_edit_active) return;
+    uint32_t cell_x, cell_y;
+    kconsole_line_cursor_cell(&cell_x, &cell_y);
+    kconsole_line_cursor_render_at(cell_x, cell_y, true);
+}
+
+//Стереть нарисованный глиф курсора, восстановив содержимое его ячейки
+//(вызывается при смене позиции курсора и при завершении редактирования)
+void kconsole_line_cursor_hide(void)
+{
+    if (!current_tty || !current_tty->line_cursor_drawn) return;
+    kconsole_line_cursor_render_at(current_tty->line_cursor_cell_x, current_tty->line_cursor_cell_y, false);
+}
+
 void kconsole_update_cursor(void)
 {
     extern volatile uint32_t tick_count;
-    if (!current_tty || current_tty->foreground_pid == 0 || current_tty->line_ready) return;
-    //Мигаем только когда строку редактирует Ring-3 редактор (Сехмет и др.)
-    //и он передал нам якорь строки и позицию курсора (SYS_TTY_LINE_EDIT)
-    if (!current_tty->line_edit_active) return;
+    if (!current_tty) return;
+
+    if (current_tty->line_edit_active)
+    {
+        //--- Курсор редактора строки Ring-3 (Сехмет и др. raw-шеллы) ---
+        //Позиция = якорь строки + смещение внутри строки (SYS_TTY_LINE_EDIT).
+        //foreground_pid/line_ready здесь НЕ проверяются: это состояние
+        //СОБСТВЕННОГО редактора ядра. foreground_pid для Ring-3 шеллов никогда
+        //не выставляется, а line_ready залипает в true после первого Enter —
+        //с любым из этих флагов курсор Ring-3 не мигал бы никогда
+        if (tick_count - current_tty->last_blink_tick >= current_tty->cursor_tick_count)
+        {
+            current_tty->last_blink_tick = tick_count;
+            current_tty->cursor_visible = !current_tty->cursor_visible;
+
+            //Курсор корректно переживает перенос строки ввода на следующую
+            //экранную строку и скролл (якорь скорректирован в kconsole_scroll_up)
+            uint32_t cell_x, cell_y;
+            kconsole_line_cursor_cell(&cell_x, &cell_y);
+            kconsole_line_cursor_render_at(cell_x, cell_y, current_tty->cursor_visible);
+        }
+        return;
+    }
+
+    //--- Курсор собственного строчного редактора ядра (прежнее поведение) ---
+    if (current_tty->foreground_pid == 0 || current_tty->line_ready) return;
 
     if (tick_count - current_tty->last_blink_tick >= current_tty->cursor_tick_count)
     {
         current_tty->last_blink_tick = tick_count;
         current_tty->cursor_visible = !current_tty->cursor_visible;
 
-        //Позиция курсора = якорь строки + смещение внутри строки.
-        //Так курсор корректно переживает перенос строки ввода на следующую
-        //экранную строку и скролл (якорь скорректирован в kconsole_scroll_up)
-        uint32_t total_chars_offset = (current_tty->line_anchor_x / current_tty->cell_w) + current_tty->line_cursor_off;
-        uint32_t cell_x = total_chars_offset % current_tty->console_cols;
-        uint32_t cell_y = current_tty->line_anchor_y + (total_chars_offset / current_tty->console_cols);
-        if (cell_y >= current_tty->console_rows) cell_y = current_tty->console_rows - 1;
-        uint32_t cx = cell_x * current_tty->cell_w;
-        uint32_t cy = cell_y * current_tty->cell_h;
-
-        uint32_t old_cr3;
-        __asm__ __volatile__("mov %%cr3, %0" : "=r"(old_cr3));
-        if (current_task && current_task->pid != 0)
-        {
-            __asm__ __volatile__("mov %0, %%cr3" : : "r"(current_task->page_dir_phys));
-        }
-
-        if (current_tty->cursor_visible)
-        {
-            //fb->draw_char(cx, cy, current_tty->cursor_code, console_fgcolor);
-            fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_fgcolor);
-        }
-        else
-        {
-            uint32_t cell_x = cx / current_tty->cell_w;
-            uint32_t cell_y = cy / current_tty->cell_h;
-            uint32_t original_char = ' ';
-            uint32_t original_bg = 0xFFFFFFFF;
-
-            if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
-            {
-                original_char = current_tty->matrix[cell_y][cell_x].codepoint;
-                original_bg = current_tty->matrix[cell_y][cell_x].bg;
-            }
-
-            /*
-            if (fb && fb->clear_tile) {
-                fb->clear_tile(cx, cy, console_bgcolor);
-            } else {
-                //fb->draw_char(cx, cy, current_tty->cursor_code, console_bgcolor);
-                fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_bgcolor);
-            }*/
-            if (original_bg != 0xFFFFFFFF && fb && fb->fill_rect)             // ←
-            {
-                fb->fill_rect(cx, cy, current_tty->cell_w, current_tty->cell_h, original_bg);
-            }
-            else if (fb && fb->clear_tile)
-            {
-                fb->clear_tile(cx, cy, console_bgcolor);
-            }
-
-            //Если на этом месте был символ текста — перерисовываем его поверх обоев
-            if (original_char != ' ' && original_char != '\0')
-            {
-                //fb->draw_char(cx, cy, original_char, console_fgcolor);
-                fb->draw_codepoint(cx, cy, original_char, console_fgcolor);
-            }
-        }
-
-        __asm__ __volatile__("mov %0, %%cr3" : : "r"(old_cr3));
+        uint32_t cx, cy;
+        kconsole_get_render_coords(current_tty->line_cursor_pos, &cx, &cy);
+        kconsole_line_cursor_render_at(cx / current_tty->cell_w,
+                                       cy / current_tty->cell_h,
+                                       current_tty->cursor_visible);
     }
 }
 
@@ -665,6 +713,13 @@ void kconsole_scroll_up(void)
         current_tty->line_anchor_y--;
     }
 
+    //Нарисованный глиф курсора Ring-3 уезжает вверх вместе с экраном
+    if (current_tty->line_edit_active && current_tty->line_cursor_drawn &&
+        current_tty->line_cursor_cell_y > 0)
+    {
+        current_tty->line_cursor_cell_y--;
+    }
+
     current_tty->cursor_y = (current_tty->console_rows - 1) * current_tty->cell_h;
 }
 
@@ -846,6 +901,9 @@ void kconsole_init(void)
         tty_terminals[t].line_anchor_x = 0;
         tty_terminals[t].line_anchor_y = 0;
         tty_terminals[t].line_cursor_off = 0;
+        tty_terminals[t].line_cursor_drawn = false;
+        tty_terminals[t].line_cursor_cell_x = 0;
+        tty_terminals[t].line_cursor_cell_y = 0;
         tty_terminals[t].cursor_visible = false;
         tty_terminals[t].last_blink_tick = 0;
         tty_terminals[t].cursor_code = DEFAULT_CURSOR_CODEPOINT; // 0x2588

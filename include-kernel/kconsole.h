@@ -98,6 +98,9 @@ typedef struct tty
     uint32_t line_anchor_x;                     //Якорь: колонка начала строки (в ячейках)
     uint32_t line_anchor_y;                     //Якорь: экранная строка начала строки ввода
     volatile uint32_t line_cursor_off;          //Смещение курсора от якоря, в ячейках
+    volatile bool line_cursor_drawn;            //Глиф курсора сейчас нарисован на экране
+    uint32_t line_cursor_cell_x;                //Ячейка, где глиф нарисован (для восстановления)
+    uint32_t line_cursor_cell_y;
 
     //Индивидуальные экранные координаты курсора для данного TTY
     uint32_t cursor_x;
@@ -128,6 +131,10 @@ extern tty_t *current_tty;
 
 void kconsole_get_render_coords(uint32_t buffer_idx, uint32_t *out_x, uint32_t *out_y);
 void kconsole_update_cursor(void);
+//Мгновенно нарисовать/стереть мигающий курсор строки Ring-3 (SYS_TTY_LINE_EDIT).
+//show рисует глиф в текущей позиции, hide восстанавливает ячейку из матрицы
+void kconsole_line_cursor_show(void);
+void kconsole_line_cursor_hide(void);
 void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color);
 void kernel_stdout_write_char(char c, uint32_t color);
 void kconsole_clear_current_line(void);

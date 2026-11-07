@@ -1618,17 +1618,24 @@ void systemcall_tty_line_edit(struct regs *r)
 
     if (r->ebx == 0)
     {
+        //Строка завершена: стираем нарисованный глиф и отключаем мигание
+        kconsole_line_cursor_hide();
         current_tty->line_edit_active = false;
     }
     else if (r->ebx == 1)
     {
+        //Сначала стираем глиф со СТАРОЙ ячейки (иначе при сдвиге курсора
+        //влево/HOME/END в старой ячейке остается блочный след),
+        //затем обновляем якорь/смещение и рисуем курсор на новом месте
+        kconsole_line_cursor_hide();
         current_tty->line_anchor_x = (r->ecx & 0xFFFFu) * current_tty->cell_w;
         current_tty->line_anchor_y = (r->ecx >> 16) & 0xFFFFu;
         current_tty->line_cursor_off = r->edx;
         current_tty->line_edit_active = true;
-        //После каждого изменения строки курсор горит и начинает мигать заново
+        //Курсор виден сразу после изменения строки и начинает мигать заново
         current_tty->cursor_visible = true;
         current_tty->last_blink_tick = tick_count;
+        kconsole_line_cursor_show();
     }
     else if (r->ebx == 2)
     {
