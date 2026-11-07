@@ -671,6 +671,12 @@ void systemcall_file_read(struct regs *r)
             tty->line_sent_bytes    = 0;
             tty->kernel_ctrl_down   = false;
             tty->kernel_e0_prefix   = false;
+            //Конец строки сейчас = сам якорь. Без этой синхронизации позиция
+            //курсора считается от устаревшего kernel_end (при первом чтении это
+            //0,0, при повторном — конец ПРЕДЫДУЩЕЙ строки), и курсор рисуется
+            //не там, где закончился вывод. После первого же нажатия он "отлетал"
+            //к правильному месту — теперь стоит там с самого начала
+            cooked_track_end_from_cursor(tty);
             //Мигание и глиф — только при включенном эхе (ввод без эха — невидимый)
             tty->kernel_line_active = echo;
             tty->cursor_visible     = true;
@@ -852,7 +858,7 @@ void systemcall_file_read(struct regs *r)
                     }
                     else
                     {
-                        //Дописывание в конец: просто эхо символа
+                        //Дописывание в конец: сначала буфер, потом эхо
                         for (int k = 0; k < step; k++)
                         {
                             tty->line_buffer[len + k] = (char)utf8[k];
@@ -861,6 +867,12 @@ void systemcall_file_read(struct regs *r)
                         tty->line_cursor_pos = len + (uint32_t)step;
                         if (echo)
                         {
+                            //Текстовый курсор ядра мог остаться где угодно
+                            //(после вставки в середину строки или стрелок) —
+                            //сначала ставим его в первую свободную ячейку за
+                            //строкой и только затем печатаем символ. Иначе
+                            //символ ложится поверх середины строки
+                            cooked_emit_cup(tty->kernel_end_row, tty->kernel_end_col);
                             kernel_stdout_write_codepoint(cp, console_fgcolor);
                             //Конец строки — где курсор сразу после печати
                             cooked_track_end_from_cursor(tty);

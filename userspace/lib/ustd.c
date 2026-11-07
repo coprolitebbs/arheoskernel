@@ -663,6 +663,17 @@ int scanf(const char *format, ...)
         {
             fmt_ptr++;
 
+            //Необязательная ширина поля: %63s и т.п. Ограничивает максимум
+            //символов, записываемых в приёмник (защита от переполнения буфера:
+            //без неё длинный токен затирал стек текстом ввода и ронял задачу
+            //Page Fault-ом по адресу из ASCII введённой строки)
+            int field_width = 0;
+            while (*fmt_ptr >= '0' && *fmt_ptr <= '9')
+            {
+                field_width = field_width * 10 + (*fmt_ptr - '0');
+                fmt_ptr++;
+            }
+
             if (*fmt_ptr == 'c')
             {
                 char *char_dst = __builtin_va_arg(args, char *);
@@ -679,7 +690,10 @@ int scanf(const char *format, ...)
                 if (str_dst)
                 {
                     int s_idx = 0;
-                    while (*str_ptr != '\0' && *str_ptr != ' ' && *str_ptr != '\t' && *str_ptr != '\n' && *str_ptr != '\r')
+                    //%Ns пишем не больше N символов (+ '\0') — как требует
+                    //стандарт; без ширины поведение прежнее (без ограничений)
+                    while (*str_ptr != '\0' && *str_ptr != ' ' && *str_ptr != '\t' && *str_ptr != '\n' && *str_ptr != '\r' &&
+                           (field_width <= 0 || s_idx < field_width))
                     {
                         str_dst[s_idx++] = *str_ptr++;
                     }

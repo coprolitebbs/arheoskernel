@@ -367,6 +367,16 @@ static void kconsole_line_cursor_render_at(uint32_t cell_x, uint32_t cell_y, boo
 
     if (draw_glyph)
     {
+        //Если глиф уже нарисован в ДРУГОЙ ячейке — сначала честно стираем его
+        //(fill_rect цветом фона / clear_tile с обоями). Рисовать поверх нельзя:
+        //глифы печатаются на прозрачном фоне, старые пиксели остались бы на экране
+        if (current_tty->line_cursor_drawn &&
+            (current_tty->line_cursor_cell_x != cell_x ||
+             current_tty->line_cursor_cell_y != cell_y))
+        {
+            kconsole_line_cursor_render_at(current_tty->line_cursor_cell_x,
+                                           current_tty->line_cursor_cell_y, false);
+        }
         if (fb && fb->draw_codepoint) fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_fgcolor);
         current_tty->line_cursor_drawn = true;
         current_tty->line_cursor_cell_x = cell_x;
@@ -374,15 +384,25 @@ static void kconsole_line_cursor_render_at(uint32_t cell_x, uint32_t cell_y, boo
     }
     else
     {
+        //Стирать есть смысл только реально нарисованный глиф
+        if (!current_tty->line_cursor_drawn) return;
+
         uint32_t original_char = ' ';
         uint32_t original_bg = 0xFFFFFFFF;
+        uint32_t original_fg = console_fgcolor;
 
         if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
         {
             original_char = current_tty->matrix[cell_y][cell_x].codepoint;
-            original_bg = current_tty->matrix[cell_y][cell_x].bg;
+            original_bg   = current_tty->matrix[cell_y][cell_x].bg;
+            original_fg   = current_tty->matrix[cell_y][cell_x].color;
+            if (original_fg == 0) original_fg = console_fgcolor;
         }
 
+        //Стирание по правилам консоли: активный фон — заливаем им ячейку,
+        //иначе clear_tile (он возвращает на место пиксели ОБОЕВ, а без обоев
+        //заливает тайл цветом фона). Пробелом стирать нельзя — глиф пробела
+        //на прозрачном фоне не рисует ни одного пикселя
         if (original_bg != 0xFFFFFFFF && fb && fb->fill_rect)
         {
             fb->fill_rect(cx, cy, current_tty->cell_w, current_tty->cell_h, original_bg);
@@ -392,10 +412,10 @@ static void kconsole_line_cursor_render_at(uint32_t cell_x, uint32_t cell_y, boo
             fb->clear_tile(cx, cy, console_bgcolor);
         }
 
-        //Если в ячейке был символ текста — перерисовываем его поверх обоев
+        //Если в ячейке был символ текста — перерисовываем его родным цветом
         if (original_char != ' ' && original_char != '\0')
         {
-            if (fb && fb->draw_codepoint) fb->draw_codepoint(cx, cy, original_char, console_fgcolor);
+            if (fb && fb->draw_codepoint) fb->draw_codepoint(cx, cy, original_char, original_fg);
         }
         current_tty->line_cursor_drawn = false;
     }
@@ -506,6 +526,16 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
 {
     if (!fb || !current_tty) return;
 
+    //Глиф мигающего курсора строки нарисован ПОВЕРХ прозрачного фона, поэтому
+    //новый текст его сам не затирает — старые пиксели остаются торчать на
+    //напечатанном символе. Перед любым выводом честно восстанавливаем ячейку
+    //курсора (fill_rect цветом фона / clear_tile с обоями), и только потом
+    //рисуем текст на чистое место
+    if (current_tty->line_cursor_drawn)
+    {
+        kconsole_line_cursor_hide();
+    }
+
     void sync_input_grid_down(void)
     {
         if (current_tty->line_ready == false)
@@ -532,7 +562,9 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
             if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
                 current_tty->matrix[cell_y][cell_x].codepoint = ' ';
             if (fb && fb->clear_tile) fb->clear_tile(current_tty->cursor_x, current_tty->cursor_y, console_bgcolor);
-            else if (fb && fb->draw_codepoint) fb->draw_codepoint(current_tty->cursor_x, current_tty->cursor_y, ' ', console_bgcolor);
+            //Пробелом стирать нельзя: его глиф на прозрачном фоне не рисует ни
+            //одного пикселя. Стираем сплошным блоком цвета фона (см. console.c)
+            else if (fb && fb->draw_codepoint) fb->draw_codepoint(current_tty->cursor_x, current_tty->cursor_y, current_tty->cursor_code, console_bgcolor);
         }
         else if (current_row == current_tty->input_start_y)
         {
@@ -742,11 +774,19 @@ void kconsole_scroll_up(void)
         current_tty->line_anchor_y--;
     }
 
-    //Нарисованный глиф курсора Ring-3 уезжает вверх вместе с экраном
-    if (current_tty->line_edit_active && current_tty->line_cursor_drawn &&
-        current_tty->line_cursor_cell_y > 0)
+    //Нарисованный глиф курсора уезжает вверх вместе с экраном (поля ячейки
+    //общие для редактора Ring-3 и cooked-редактора ядра)
+    if (current_tty->line_cursor_drawn && current_tty->line_cursor_cell_y > 0)
     {
         current_tty->line_cursor_cell_y--;
+    }
+
+    //Служебные координаты cooked-редактора тоже смещаются на строку вверх,
+    //иначе после скролла курсор набора и расчёт ячеек поедут по старой сетке
+    if (current_tty->kernel_line_active)
+    {
+        if (current_tty->kernel_cursor_row > 0) current_tty->kernel_cursor_row--;
+        if (current_tty->kernel_end_row   > 0) current_tty->kernel_end_row--;
     }
 
     current_tty->cursor_y = (current_tty->console_rows - 1) * current_tty->cell_h;
@@ -778,6 +818,10 @@ void kconsole_redraw_screen(void)
             }
         }
     }
+
+    //После полной перерисовки глифа курсора на экране больше нет: сбрасываем
+    //флаг, чтобы последующее "скрытие" не трогало ячейку зря
+    current_tty->line_cursor_drawn = false;
 }
 
 

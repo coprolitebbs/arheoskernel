@@ -28,8 +28,9 @@ int main(int argc, char *argv[])
     char name[64];
 
     //u_read() внутри ustd.c заблокирует поток, дождется ввода строки лога,
-    //а scanf распарсит её по переменным
-    int scanned = scanf("%d %s", &age, name);
+    //а scanf распарсит её по переменным. %63s: name[64] — максимум 63 символа
+    //+ '\0'; без ширины длинный ввод переполнял стек и ронял задачу
+    int scanned = scanf("%d %63s", &age, name);
 
     printf("\nРезолюция scanf (успешных совпадений: %d):\n", scanned);
     printf("  Ваш возраст: %d лет\n", age);
