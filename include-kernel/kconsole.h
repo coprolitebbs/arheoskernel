@@ -40,10 +40,6 @@ extern uint32_t text_cursor_y;
 extern uint32_t console_bgcolor;
 extern uint32_t console_fgcolor;
 
-//Признак «фон консоли задан ANSI-кодом» (иначе фон прозрачный/обои).
-//Используется редактором строки в isr.c при отрисовке ячеек и курсора
-extern bool console_bg_active;
-
 //Состояния конечного автомата ANSI парсера
 typedef enum
 {
@@ -83,9 +79,8 @@ typedef struct tty
     volatile uint32_t copied_bytes;            //Сколько байт накоплено в line_buffer
     volatile bool line_ready;                   //Флаг готовности строки (нажат Enter)
 
-    volatile uint32_t line_cursor_pos;          //Индекс курсора ВНУТРИ line_buffer (0 .. copied_bytes), в БАЙТАХ UTF-8
+    volatile uint32_t line_cursor_pos;          //Индекс курсора ВНУТРИ line_buffer (0 .. copied_bytes)
     volatile bool cursor_visible;               //Флаг фазы мигания: true = инверсный блок, false = обычный символ
-    volatile bool line_session_active;          //Активна ли сессия построчного ввода (cooked): курсор мигает и редактор строки работает
     uint32_t last_blink_tick;                   //На каком тике таймера последний раз меняли фазу мигания
     uint32_t cursor_tick_count;                 //Максимальное количество тиков таймера для задержки мигания курсора
     //char cursor_code;                           //Дефолтный код курсорного блока в кодовой таблице
@@ -141,10 +136,6 @@ void kconsole_init(void);
 void kconsole_reconfigure(cfg_file_t *cfg);
 
 void kconsole_reset_utf8_state(void);
-
-//Старт сессии построчного ввода (cooked): фиксирует input_start в текущей позиции
-//курсора и сбрасывает буфер строки. Общая точка входа для SYS_READ и редактора строки
-void kconsole_arm_input_session(void);
 
 void kernel_clipboard_set(const uint8_t *src, uint32_t size);
 uint32_t kernel_clipboard_get(uint8_t *dst, uint32_t max_size);

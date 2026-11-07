@@ -29,20 +29,10 @@
 #include "include-kernel/kernel_heap.h"
 #include "include-kernel/kload_screen.h"
 
-//Флаг RAW-режима клавиатуры (обычно приходит из userspace/include/syscall.h).
-//Здесь дублируем определение, чтобы не тянуть userspace-заголовок в ядро:
-//если текущая задача выставила себе TTY_KBD_RAW, она сама рисует курсор и
-//обрабатывает ввод — блочный курсор ядра в это время замирает
-#ifndef TTY_KBD_RAW
-#define TTY_KBD_RAW 0x0008
-#endif
-
 uint32_t console_bgcolor = 0x00000000;
 uint32_t console_fgcolor = 0x00FFFFFF;
 
-//Признак «фон консоли задан ANSI-кодом» (а не прозрачный/обои).
-//Не static: редактор строки в isr.c рисует ячейки тем же паттерном фона
-bool console_bg_active = false;
+static bool console_bg_active = false;
 
 //Состояние UTF-8 декодера для байтового входного потока
 static uint32_t utf8_acc   = 0;
@@ -261,38 +251,10 @@ static void parse_and_execute_ansi(char cmd)
     }
     case 'J':  //Спецификатор ED (Очистка экрана)
     {
-        uint32_t mode = (arg_count > 0) ? (uint32_t)args[0] : 0;
-        if (mode == 2)
+        if (arg_count > 0 && args[0] == 2)
         {
             // \x1B[2J — Полная очистка экрана и сброс курсора
             kconsole_clear_screen();
-        }
-        else if (mode == 0)
-        {
-            // \x1B[0J (или \x1B[J) — очистка от курсора до конца экрана.
-            //Используется Сехметом для перерисовки многострочного ввода
-            uint32_t start_row = current_tty->cursor_y / current_tty->cell_h;
-            uint32_t start_col = current_tty->cursor_x / current_tty->cell_w;
-            uint32_t cell_bg   = console_bg_active ? console_bgcolor : 0xFFFFFFFF;
-            for (uint32_t r = start_row; r < current_tty->console_rows; r++)
-            {
-                uint32_t c0 = (r == start_row) ? start_col : 0;
-                for (uint32_t c = c0; c < current_tty->console_cols; c++)
-                {
-                    current_tty->matrix[r][c].codepoint = ' ';
-                    current_tty->matrix[r][c].bg        = cell_bg;
-                    uint32_t px = c * current_tty->cell_w;
-                    uint32_t py = r * current_tty->cell_h;
-                    if (console_bg_active && fb && fb->fill_rect)
-                    {
-                        fb->fill_rect(px, py, current_tty->cell_w, current_tty->cell_h, console_bgcolor);
-                    }
-                    else if (fb && fb->clear_tile)
-                    {
-                        fb->clear_tile(px, py, console_bgcolor);
-                    }
-                }
-            }
         }
         break;
     }
@@ -372,17 +334,7 @@ void kconsole_get_render_coords(uint32_t buffer_idx, uint32_t *out_x, uint32_t *
         return;
     }
 
-    //buffer_idx — индекс в line_buffer в БАЙТАХ UTF-8.
-    //Экранная позиция считается по ВИДИМЫМ символам: continuation-байты UTF-8
-    //(10xxxxxx) отдельного знакоместа не занимают, иначе кириллица (2 байта/символ)
-    //уезжала бы вдвое быстрее курсора
-    uint32_t visible_chars = 0;
-    for (uint32_t i = 0; i < buffer_idx && i < current_tty->copied_bytes; i++)
-    {
-        if ((((uint8_t)current_tty->line_buffer[i]) & 0xC0) != 0x80) visible_chars++;
-    }
-
-    uint32_t total_chars_offset = (current_tty->input_start_x / current_tty->cell_w) + visible_chars;
+    uint32_t total_chars_offset = (current_tty->input_start_x / current_tty->cell_w) + buffer_idx;
     uint32_t cell_x = total_chars_offset % current_tty->console_cols;
 
     uint32_t cell_y = current_tty->input_start_y + (total_chars_offset / current_tty->console_cols);
@@ -399,11 +351,7 @@ void kconsole_get_render_coords(uint32_t buffer_idx, uint32_t *out_x, uint32_t *
 void kconsole_update_cursor(void)
 {
     extern volatile uint32_t tick_count;
-    //Блочный курсор ядра мигает только пока активна сессия построчного ввода (cooked)
-    //и строка еще не собрана. Если текущая задача работает с клавиатурой в RAW-режиме
-    //(например, Сехмет рисует свой курсор сама) — ядерный курсор не трогаем
-    if (!current_tty || !current_tty->line_session_active || current_tty->line_ready) return;
-    if (current_task && (current_task->tty_flags & TTY_KBD_RAW)) return;
+    if (!current_tty || current_tty->foreground_pid == 0 || current_tty->line_ready) return;
 
     if (tick_count - current_tty->last_blink_tick >= current_tty->cursor_tick_count)
     {
@@ -471,12 +419,15 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
 {
     if (!fb || !current_tty) return;
 
-    //ВНИМАНИЕ: начало строки ввода (input_start_x/y) больше НЕ двигается здесь.
-    //Оно фиксируется один раз при старте сессии ввода (см. systemcall_file_read /
-    //kbd_session_arm в isr.c), а перенос строк внутри сессии считает
-    //kconsole_get_render_coords. Логика sync_input_grid_down была удалена:
-    //она сдвигала input_start_y на каждом переносе и ломала backspace
-    //через границу строк (курсор не мог вернуться на предыдущую строку)
+    void sync_input_grid_down(void)
+    {
+        if (current_tty->line_ready == false)
+        {
+            current_tty->input_start_y++;
+            if (current_tty->input_start_y >= current_tty->console_rows)
+                current_tty->input_start_y = current_tty->console_rows - 1;
+        }
+    }
 
     if (cp == '\b')
     {
@@ -517,6 +468,7 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
         current_tty->cursor_x = 0;
         current_tty->cursor_y += current_tty->cell_h;
         if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)) kconsole_scroll_up();
+        else sync_input_grid_down();
     }
 
     if (cp == '\n')
@@ -524,6 +476,7 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
         current_tty->cursor_x = 0;
         current_tty->cursor_y += current_tty->cell_h;
         if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)) kconsole_scroll_up();
+        else sync_input_grid_down();
         return;
     }
 
@@ -541,6 +494,7 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
             current_tty->cursor_x = 0;
             current_tty->cursor_y += current_tty->cell_h;
             if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)) kconsole_scroll_up();
+            else sync_input_grid_down();
         }
         return;
     }
@@ -573,6 +527,7 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
         current_tty->cursor_x = 0;
         current_tty->cursor_y += current_tty->cell_h;
         if (current_tty->cursor_y >= (current_tty->console_rows * current_tty->cell_h)) kconsole_scroll_up();
+        else sync_input_grid_down();
     }
 }
 
@@ -872,7 +827,6 @@ void kconsole_init(void)
         tty_terminals[t].cursor_tick_count = MAX_CURSOR_TICK_COUNT;
         tty_terminals[t].line_cursor_pos = 0;
         tty_terminals[t].cursor_visible = false;
-        tty_terminals[t].line_session_active = false;
         tty_terminals[t].last_blink_tick = 0;
         tty_terminals[t].cursor_code = DEFAULT_CURSOR_CODEPOINT; // 0x2588
         tty_terminals[t].active_layout = 0;
@@ -896,25 +850,6 @@ void kconsole_init(void)
         }
     }
     current_tty = &tty_terminals[0];
-}
-
-
-//Стартует новую сессию построчного ввода (cooked): фиксирует начало строки ввода
-//в текущей позиции курсора вывода (там, куда только что вывелся промпт программы)
-//и сбрасывает буфер строки. Вызывается из SYS_READ (первый опрос пустого STDIN)
-//и из редактора строки в irq33_handler (первое нажатие клавиши)
-void kconsole_arm_input_session(void)
-{
-    if (!current_tty) return;
-    extern volatile uint32_t tick_count;
-    current_tty->input_start_x = current_tty->cursor_x;
-    current_tty->input_start_y = current_tty->cursor_y;
-    current_tty->copied_bytes     = 0;
-    current_tty->line_cursor_pos  = 0;
-    current_tty->line_buffer[0]   = 0;
-    current_tty->cursor_visible   = true;
-    current_tty->last_blink_tick  = tick_count;
-    current_tty->line_session_active = true;
 }
 
 

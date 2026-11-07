@@ -56,13 +56,6 @@ uint32_t cursor_char = '_';
 //static bool kbd_lang_ru = false;
 static bool g_cursor_blink_on = true;
 
-//Геометрия текущей строки ввода (сессии read_line):
-//координаты старта строки ввода (там, где напечатан промпт) в знакоместах
-//и ширина консоли для пересчета переноса. g_line_start_row < 0 — сессия не начата
-static int      g_line_start_row = -1;
-static int      g_line_start_col = 0;
-static uint32_t g_line_cols      = 80;
-
 static alias_t g_aliases[MAX_ALIASES];
 static int     g_alias_count = 0;
 
@@ -631,59 +624,6 @@ static bool is_valid_executable(const char *path)
     return false;
 }
 
-//Записывает десятичное число в dst, возвращает число записанных байтов
-static int emit_uint(char *dst, uint32_t v)
-{
-    char rev[10];
-    int r = 0, n = 0;
-    if (v == 0)
-    {
-        dst[n++] = '0';
-        return n;
-    }
-    while (v > 0 && r < 10)
-    {
-        rev[r++] = (char)('0' + (v % 10));
-        v /= 10;
-    }
-    while (r > 0) dst[n++] = rev[--r];
-    return n;
-}
-
-//Экранная позиция (строка/колонка) видимого смещения visible_off от начала
-//строки ввода: тот же расчет переноса, что и у ядра — строка начинается в
-//(g_line_start_row; g_line_start_col) и продолжается с переносом по g_line_cols
-static void sekhmet_cell_of(int visible_off, int *out_row, int *out_col)
-{
-    int total = g_line_start_col + visible_off;
-    *out_col = total % (int)g_line_cols;
-    *out_row = g_line_start_row + total / (int)g_line_cols;
-}
-
-//Префикс перерисовки: CUP в начало строки ввода + ED0 (очистка от курсора
-//до конца экрана). Записывает байты в out, возвращает новую длину
-static int emit_line_home(char *out)
-{
-    int n = 0;
-    if (g_line_start_row < 0)
-    {
-        //сессия не начата — старое поведение: \r + очистка текущей строки
-        out[n++] = '\r';
-        out[n++] = '\x1B'; out[n++] = '['; out[n++] = 'K';
-        return n;
-    }
-    // \x1B[<row>;<col>H — в начало строки ввода
-    out[n++] = '\x1B'; out[n++] = '[';
-    n += emit_uint(out + n, (uint32_t)(g_line_start_row + 1));
-    out[n++] = ';';
-    n += emit_uint(out + n, (uint32_t)(g_line_start_col + 1));
-    out[n++] = 'H';
-    // \x1B[J — очистить от курсора до конца экрана (убирает мусор
-    //от предыдущей более длинной перерисовки на всех строках ниже)
-    out[n++] = '\x1B'; out[n++] = '['; out[n++] = 'J';
-    return n;
-}
-
 static void redraw_line_with_cursor(const char *buffer, int pos, int curr_idx)
 {
     static char out[1024];
@@ -691,63 +631,47 @@ static void redraw_line_with_cursor(const char *buffer, int pos, int curr_idx)
     char cwd_buf[256];
     getcwd(cwd_buf, 255);
 
-    //Начало перерисовки: всегда от СТАРТА строки ввода, а не от текущей позиции
-    //каретки. Именно поэтому при переносе на новую строку текст больше не
-    //дублируется с начала предыдущей строки и не множится по таймеру мигания
-    int n = emit_line_home(out);
+    // \r \x1B[K + prompt + cwd + "> " + buffer[:curr_idx]
+    int n = 0;
+    out[n++] = '\r';
+    out[n++] = '\x1B';
+    out[n++] = '[';
+    out[n++] = 'K';
 
-    // prompt + cwd + "> " + buffer[:curr_idx]
     char prompt_buf[192];
     build_prompt(prompt_buf, sizeof(prompt_buf), cwd_buf);
     for (const char *p = prompt_buf; *p && n < (int)sizeof(out) - 32; p++) out[n++] = *p;
 
-    for (int i = 0; i < curr_idx && n < (int)sizeof(out) - 32; i++) out[n++] = buffer[i];
+    for (int i = 0; i < curr_idx; i++) out[n++] = buffer[i];
 
-    //одна ячейка под курсор. Cursor OFF -> пробел, чтобы хвост строки не съезжал влево
+    u_write(STDOUT, out, n);
+    //одна ячейка под курсор
     char cur = ' ';
     if (g_cursor_blink_on)
     {
         cur = (char)(cursor_char & 0xFF);
     }
-    out[n++] = cur;
-
-    //buffer[curr_idx:pos]
-    for (int i = curr_idx; i < pos && n < (int)sizeof(out) - 16; i++) out[n++] = buffer[i];
-
-    u_write(STDOUT, out, n);
-
-    //Возврат каретки в позицию ввода: считаем видимую длину промпта плюс
-    //видимую длину текста до curr_idx и переводим позицию через CUP.
-    //Это работает и для многострочного ввода, в отличие от \\x1B[ND,
-    //которая двигала курсор только в пределах одной строки
-    if (g_line_start_row >= 0)
+    // Cursor OFF -> пробел, чтобы хвост строки не съезжал влево
+    u_write(STDOUT, &cur, 1);
+    //buffer[curr_idx:pos] + \x1B[ND
+    n = 0;
+    for (int i = curr_idx; i < pos; i++) out[n++] = buffer[i];
+    int back_chars = get_visible_length(buffer, pos) - get_visible_length(buffer, curr_idx);
+    if (back_chars > 0 && n < (int)sizeof(out) - 12)
     {
-        char prompt_buf2[192];
-        build_prompt(prompt_buf2, sizeof(prompt_buf2), cwd_buf);
-        int vis = get_visible_length(prompt_buf2, strlen(prompt_buf2))
-                + get_visible_length(buffer, curr_idx);
-        int row = 0, col = 0;
-        sekhmet_cell_of(vis, &row, &col);
-
-        int m = 0;
-        out[m++] = '\x1B'; out[m++] = '[';
-        m += emit_uint(out + m, (uint32_t)(row + 1));
-        out[m++] = ';';
-        m += emit_uint(out + m, (uint32_t)(col + 1));
-        out[m++] = 'H';
-        u_write(STDOUT, out, m);
-
-        //Если во время перерисовки экран уехал вверх (ввод уперся в низ экрана
-        //и ядро скроллило) — реальная строка каретки окажется выше запрошенной.
-        //Сдвигаем точку старта строки вслед за содержимым
-        uint32_t ax = 0, ay = 0;
-        u_get_console_pos(&ax, &ay);
-        if ((int)ay != row)
+        out[n++] = '\x1B';
+        out[n++] = '[';
+        char rev[8];
+        int r = 0, tmp = back_chars;
+        while (tmp > 0 && r < 8)
         {
-            g_line_start_row -= (row - (int)ay);
-            if (g_line_start_row < 0) g_line_start_row = 0;
+            rev[r++] = '0' + (tmp % 10);
+            tmp /= 10;
         }
+        while (r > 0) out[n++] = rev[--r];
+        out[n++] = 'D';
     }
+    u_write(STDOUT, out, n);
 }
 
 
@@ -757,25 +681,10 @@ void sekhmet_read_line(char *buffer, int max_len)
     int pos = 0;
     int curr_idx = 0;
     bool shift_active = false;
-    bool ctrl_active = false;
     bool extended_prefix = false;
     buffer[0] = '\0';
 
     ensure_keymap();
-
-    //Старт новой сессии ввода: фиксируем, где на экране начинается строка
-    //(курсор стоит сразу за последним выводом/промптом) и ширину консоли.
-    //Все перерисовки идут от этой точки через CUP+ED0, поэтому многострочный
-    //ввод не дублируется и корректно стирается
-    uint32_t start_col = 0, start_row = 0;
-    u_get_console_pos(&start_col, &start_row);
-    g_line_start_col = (int)start_col;
-    g_line_start_row = (int)start_row;
-    {
-        uint32_t cols_g = 0, rows_g = 0, cw_g = 8, ch_g = 8;
-        u_get_console_geometry(&cols_g, &rows_g, &cw_g, &ch_g);
-        if (cols_g > 0) g_line_cols = cols_g;
-    }
 
     //int locale_idx = u_locale_get();
     //if (locale_idx < 0) locale_idx = 0;
@@ -823,17 +732,6 @@ void sekhmet_read_line(char *buffer, int max_len)
         {
             if (type == 1) shift_active = true;
             if (type == 0) shift_active = false;
-            continue;
-        }
-        //Отслеживание Ctrl (нажатие/отпускание) для комбинаций вроде Ctrl+C
-        if (scancode == 0x1D)
-        {
-            ctrl_active = (type == 1);
-            continue;
-        }
-        if (scancode == 0x9D)
-        {
-            ctrl_active = false;
             continue;
         }
         /*
@@ -960,33 +858,16 @@ void sekhmet_read_line(char *buffer, int max_len)
             }
             continue;
         }
-        //Ctrl+C — отмена ввода: подтираем область строки и показываем ^C,
-        //возвращаем пустую команду (main-цикл перерисует промпт сам)
-        if (ctrl_active && scancode == 0x2E)
-        {
-            char cancel_buf[48];
-            int cn = emit_line_home(cancel_buf);
-            if (cn < (int)sizeof(cancel_buf) - 4)
-            {
-                cancel_buf[cn++] = '^';
-                cancel_buf[cn++] = 'C';
-                cancel_buf[cn++] = '\n';
-                u_write(STDOUT, cancel_buf, cn);
-            }
-            buffer[0] = '\0';
-            g_line_start_row = -1;   //следующая строка начнет новую сессию
-            return;
-        }
         if (scancode == 0x1C)
         {
             buffer[pos] = '\0';
             curr_idx = pos;
             char final_buf[512];
             int f_pos = 0;
-            //Перерисовка финальной строки — тоже от начала строки ввода,
-            //а не от текущей позиции каретки (иначе при переносе строк
-            //хвост дублировался бы выше по экрану)
-            f_pos += emit_line_home(final_buf + f_pos);
+            final_buf[f_pos++] = '\r';
+            final_buf[f_pos++] = '\x1B';
+            final_buf[f_pos++] = '[';
+            final_buf[f_pos++] = 'K';
 
             char cwd_buf2[256];
             getcwd(cwd_buf2, 255);
@@ -1006,7 +887,6 @@ void sekhmet_read_line(char *buffer, int max_len)
                 if (history_count < HISTORY_MAX) history_count++;
             }
             history_browse_idx = -1;
-            g_line_start_row = -1;   //сессия ввода завершена, следующая строка начнет новую
             return;
         }
         if (scancode == 0x0E)

@@ -266,352 +266,6 @@ void isr_pagefault(struct regs *r)
 
 
 
-
-//=======================================================================
-//  Редактор строки cooked-режима ядра (kbd line discipline)
-//=======================================================================
-//Полноценная линейная дисциплина в прерывании клавиатуры: набор символов
-//с вставкой в произвольную позицию, Backspace, Del, стрелки, Home/End,
-//Ctrl+C (отмена ввода), Enter (сдача строки читателю через SYS_READ).
-//Буфер строки — current_tty->line_buffer (UTF-8), позиция курсора —
-//line_cursor_pos в БАЙТАХ. Экранная позиция любой ячейки буфера
-//вычисляется через kconsole_get_render_coords (UTF-8-aware, перенос
-//строк считается от input_start_x/y, зафиксированных на старте сессии).
-//=======================================================================
-
-//Флаг RAW-режима клавиатуры (дублируется из userspace/include/syscall.h)
-#ifndef TTY_KBD_RAW
-#define TTY_KBD_RAW 0x0008
-#endif
-
-//Декодирует codepoint в line_buffer[idx], возвращает длину через out_len.
-//На битых данных отдает сам байт длиной 1 — редактор не зависает
-static uint32_t kbd_utf8_decode_at(uint32_t idx, uint32_t *out_len)
-{
-    uint8_t *buf = (uint8_t *)current_tty->line_buffer;
-    *out_len = 1;
-    if (idx >= current_tty->copied_bytes) return ' ';
-
-    uint8_t b = buf[idx];
-    uint32_t need, cp, min;
-    if ((b & 0x80) == 0x00) return b;
-    if ((b & 0xE0) == 0xC0) { need = 1; cp = b & 0x1F; min = 0x80;    }
-    else if ((b & 0xF0) == 0xE0) { need = 2; cp = b & 0x0F; min = 0x800;   }
-    else if ((b & 0xF8) == 0xF0) { need = 3; cp = b & 0x07; min = 0x10000; }
-    else return b;
-
-    if (current_tty->copied_bytes - idx < need + 1) return b;
-    for (uint32_t k = 1; k <= need; k++)
-    {
-        if ((buf[idx + k] & 0xC0) != 0x80) return b;
-        cp = (cp << 6) | (uint32_t)(buf[idx + k] & 0x3F);
-    }
-    if (cp < min) return b;
-    *out_len = need + 1;
-    return cp;
-}
-
-//Индекс предыдущего символа UTF-8 (вызывать при pos > 0)
-static uint32_t kbd_prev_char_pos(uint32_t pos)
-{
-    uint8_t *buf = (uint8_t *)current_tty->line_buffer;
-    uint32_t p = pos - 1;
-    while (p > 0 && ((buf[p] & 0xC0) == 0x80)) p--;
-    return p;
-}
-
-//Индекс следующего символа UTF-8 (вызывать при pos < copied_bytes)
-static uint32_t kbd_next_char_pos(uint32_t pos)
-{
-    uint8_t *buf = (uint8_t *)current_tty->line_buffer;
-    uint32_t p = pos + 1;
-    while (p < current_tty->copied_bytes && ((buf[p] & 0xC0) == 0x80)) p++;
-    return p;
-}
-
-//Затирает знакоместо по БАЙТОВОМУ индексу в line_buffer: восстанавливает фон
-//под символом (wallpaper через clear_tile, иначе заливка фоном) и чистит матрицу
-static void kbd_clear_cell_at(uint32_t byte_idx)
-{
-    uint32_t cx, cy;
-    kconsole_get_render_coords(byte_idx, &cx, &cy);
-    uint32_t cell_x = cx / current_tty->cell_w;
-    uint32_t cell_y = cy / current_tty->cell_h;
-    if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
-    {
-        current_tty->matrix[cell_y][cell_x].codepoint = ' ';
-    }
-    if (fb && fb->clear_tile)
-    {
-        fb->clear_tile(cx, cy, console_bgcolor);
-    }
-    else if (fb && fb->draw_codepoint)
-    {
-        fb->draw_codepoint(cx, cy, ' ', console_bgcolor);
-    }
-}
-
-//Рисует символ по БАЙТОВОМУ индексу в line_buffer (тот же паттерн фона,
-//что и в kernel_stdout_write_codepoint)
-static void kbd_draw_char_at(uint32_t byte_idx, uint32_t cp)
-{
-    uint32_t cx, cy;
-    kconsole_get_render_coords(byte_idx, &cx, &cy);
-    uint32_t cell_x = cx / current_tty->cell_w;
-    uint32_t cell_y = cy / current_tty->cell_h;
-    uint32_t cell_bg = console_bg_active ? console_bgcolor : 0xFFFFFFFF;
-
-    if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
-    {
-        current_tty->matrix[cell_y][cell_x].codepoint = cp;
-        current_tty->matrix[cell_y][cell_x].color     = console_fgcolor;
-        current_tty->matrix[cell_y][cell_x].bg        = cell_bg;
-    }
-    if (cell_bg != 0xFFFFFFFF && fb && fb->fill_rect)
-    {
-        fb->fill_rect(cx, cy, current_tty->cell_w, current_tty->cell_h, cell_bg);
-    }
-    if (fb && fb->draw_codepoint)
-    {
-        fb->draw_codepoint(cx, cy, cp, console_fgcolor);
-    }
-}
-
-//Стирает блочный курсор в ячейке buffer_idx, восстанавливая лежащий под ним символ
-static void kbd_erase_cursor_at(uint32_t byte_idx)
-{
-    uint32_t cx, cy;
-    kconsole_get_render_coords(byte_idx, &cx, &cy);
-    uint32_t cell_x = cx / current_tty->cell_w;
-    uint32_t cell_y = cy / current_tty->cell_h;
-    uint32_t orig_char = ' ';
-    uint32_t orig_bg   = 0xFFFFFFFF;
-    if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
-    {
-        orig_char = current_tty->matrix[cell_y][cell_x].codepoint;
-        orig_bg   = current_tty->matrix[cell_y][cell_x].bg;
-    }
-    if (orig_bg != 0xFFFFFFFF && fb && fb->fill_rect)
-    {
-        fb->fill_rect(cx, cy, current_tty->cell_w, current_tty->cell_h, orig_bg);
-    }
-    else if (fb && fb->clear_tile)
-    {
-        fb->clear_tile(cx, cy, console_bgcolor);
-    }
-    else if (fb && fb->draw_codepoint)
-    {
-        fb->draw_codepoint(cx, cy, ' ', console_bgcolor);
-    }
-    if (orig_char != ' ' && orig_char != '\0')
-    {
-        if (fb && fb->draw_codepoint) fb->draw_codepoint(cx, cy, orig_char, console_fgcolor);
-    }
-}
-
-//Рисует блочный курсор в ячейке buffer_idx и перезапускает фазу мигания
-static void kbd_draw_cursor_at(uint32_t byte_idx)
-{
-    uint32_t cx, cy;
-    kconsole_get_render_coords(byte_idx, &cx, &cy);
-    if (fb && fb->draw_codepoint)
-    {
-        fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_fgcolor);
-    }
-    current_tty->cursor_visible  = true;
-    current_tty->last_blink_tick = tick_count;
-}
-
-//Синхронизирует курсор вывода ядра (cursor_x/y) с экранной позицией byte_idx.
-//Нужно, чтобы последующий вывод программ и перевод строки на Enter
-//начинались ровно с того места, куда указывает курсор ввода
-static void kbd_place_output_cursor(uint32_t byte_idx)
-{
-    uint32_t cx, cy;
-    kconsole_get_render_coords(byte_idx, &cx, &cy);
-    current_tty->cursor_x = cx;
-    current_tty->cursor_y = cy;
-}
-
-//Перерисовывает хвост строки от byte_idx до конца и затирает ячейки,
-//освободившиеся после удаления символов (в границах old_end_idx)
-static void kbd_redraw_tail(uint32_t from_idx, uint32_t old_end_idx)
-{
-    uint32_t i = from_idx;
-    while (i < current_tty->copied_bytes)
-    {
-        uint32_t len = 1;
-        uint32_t cp  = kbd_utf8_decode_at(i, &len);
-        kbd_draw_char_at(i, cp);
-        i += len;
-    }
-    for (uint32_t c = current_tty->copied_bytes; c < old_end_idx; c++)
-    {
-        kbd_clear_cell_at(c);
-    }
-}
-
-//Вставка символа (codepoint) в позицию курсора со сдвигом хвоста вправо
-static void kbd_line_insert_cp(uint32_t cp)
-{
-    uint8_t utf8[4];
-    int n = 0;
-    if (cp < 0x80)
-    {
-        utf8[n++] = (uint8_t)cp;
-    }
-    else if (cp < 0x800)
-    {
-        utf8[n++] = (uint8_t)(0xC0 | (cp >> 6));
-        utf8[n++] = (uint8_t)(0x80 | (cp & 0x3F));
-    }
-    else if (cp < 0x10000)
-    {
-        utf8[n++] = (uint8_t)(0xE0 | (cp >> 12));
-        utf8[n++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
-        utf8[n++] = (uint8_t)(0x80 | (cp & 0x3F));
-    }
-    else
-    {
-        utf8[n++] = (uint8_t)(0xF0 | (cp >> 18));
-        utf8[n++] = (uint8_t)(0x80 | ((cp >> 12) & 0x3F));
-        utf8[n++] = (uint8_t)(0x80 | ((cp >> 6) & 0x3F));
-        utf8[n++] = (uint8_t)(0x80 | (cp & 0x3F));
-    }
-    //Резервируем минимум 1 байт под '\n' и 1 под '\0'
-    if (current_tty->copied_bytes + (uint32_t)n > LINE_BUFFER_SIZE - 2) return;
-
-    //Сначала подтираем блочный курсор в текущей ячейке,
-    //иначе после сдвига символов под блоком останется артефакт
-    kbd_erase_cursor_at(current_tty->line_cursor_pos);
-
-    uint32_t old_end = current_tty->copied_bytes;
-    for (uint32_t i = current_tty->copied_bytes; i > current_tty->line_cursor_pos; i--)
-    {
-        current_tty->line_buffer[i + n - 1] = current_tty->line_buffer[i - 1];
-    }
-    for (int k = 0; k < n; k++)
-    {
-        current_tty->line_buffer[current_tty->line_cursor_pos + k] = (char)utf8[k];
-    }
-    current_tty->copied_bytes += (uint32_t)n;
-    current_tty->line_buffer[current_tty->copied_bytes] = 0;
-
-    kbd_redraw_tail(current_tty->line_cursor_pos, old_end);
-    current_tty->line_cursor_pos += (uint32_t)n;
-    kbd_place_output_cursor(current_tty->line_cursor_pos);
-    kbd_draw_cursor_at(current_tty->line_cursor_pos);
-}
-
-//Backspace: удаление символа СЛЕВА от курсора, хвост сдвигается и перерисовывается.
-//При переходе через границу строк kconsole_get_render_coords сама вернет
-//экранную позицию на предыдущую строку (у самой правой ячейки строки выше)
-static void kbd_line_backspace(void)
-{
-    if (current_tty->line_cursor_pos == 0) return;
-
-    uint32_t del_pos = kbd_prev_char_pos(current_tty->line_cursor_pos);
-    uint32_t del_len = current_tty->line_cursor_pos - del_pos;
-    if (del_len == 0) return;
-
-    kbd_erase_cursor_at(current_tty->line_cursor_pos);
-    uint32_t old_end = current_tty->copied_bytes;
-    for (uint32_t i = del_pos; i + del_len < current_tty->copied_bytes; i++)
-    {
-        current_tty->line_buffer[i] = current_tty->line_buffer[i + del_len];
-    }
-    current_tty->copied_bytes -= del_len;
-    current_tty->line_buffer[current_tty->copied_bytes] = 0;
-    current_tty->line_cursor_pos = del_pos;
-
-    kbd_redraw_tail(del_pos, old_end);
-    kbd_place_output_cursor(current_tty->line_cursor_pos);
-    kbd_draw_cursor_at(current_tty->line_cursor_pos);
-}
-
-//Del: удаление символа СПРАВА от курсора со сдвигом и перерисовкой хвоста
-static void kbd_line_delete(void)
-{
-    if (current_tty->line_cursor_pos >= current_tty->copied_bytes) return;
-
-    uint32_t del_len = 1;
-    kbd_utf8_decode_at(current_tty->line_cursor_pos, &del_len);
-
-    kbd_erase_cursor_at(current_tty->line_cursor_pos);
-    uint32_t old_end = current_tty->copied_bytes;
-    for (uint32_t i = current_tty->line_cursor_pos;
-         i + del_len < current_tty->copied_bytes; i++)
-    {
-        current_tty->line_buffer[i] = current_tty->line_buffer[i + del_len];
-    }
-    if (current_tty->copied_bytes > del_len) current_tty->copied_bytes -= del_len;
-    else current_tty->copied_bytes = 0;
-    current_tty->line_buffer[current_tty->copied_bytes] = 0;
-
-    kbd_redraw_tail(current_tty->line_cursor_pos, old_end);
-    kbd_place_output_cursor(current_tty->line_cursor_pos);
-    kbd_draw_cursor_at(current_tty->line_cursor_pos);
-}
-
-//Стирает всю область строки ввода на экране (от начала строки до позиции
-//за последним символом включительно) — используется при отмене ввода
-static void kbd_erase_input_area(void)
-{
-    for (uint32_t i = 0; i <= current_tty->copied_bytes; i++)
-    {
-        kbd_clear_cell_at(i);
-    }
-}
-
-//Ctrl+C: отмена ввода. Строка на экране подтирается, читателю сдается
-//пустая строка ('\n' в буфере) — для вызывающего это обычный пустой Enter
-static void kbd_session_cancel(void)
-{
-    kbd_erase_input_area();
-    current_tty->cursor_x = current_tty->input_start_x;
-    current_tty->cursor_y = current_tty->input_start_y;
-    kernel_stdout_write_char('^', console_fgcolor);
-    kernel_stdout_write_char('C', console_fgcolor);
-    kernel_stdout_write_char('\n', console_fgcolor);
-
-    current_tty->line_buffer[0] = '\n';
-    current_tty->line_buffer[1] = 0;
-    current_tty->copied_bytes    = 1;
-    current_tty->line_cursor_pos = 0;
-    current_tty->line_ready      = true;
-    stdin_cancel_flag            = 1;
-}
-
-//Enter: сдача строки. '\n' дописывается в буфер (u_read пользователя
-//завершает строку именно по '\n'), курсор вывода переводится на новую строку
-static void kbd_line_commit(void)
-{
-    kbd_erase_cursor_at(current_tty->line_cursor_pos);
-    if (current_tty->copied_bytes < LINE_BUFFER_SIZE - 1)
-    {
-        current_tty->line_buffer[current_tty->copied_bytes++] = '\n';
-        current_tty->line_buffer[current_tty->copied_bytes] = 0;
-    }
-    //Курсор вывода — в конец содержимого строки, затем честный перевод строки
-    kbd_place_output_cursor(current_tty->copied_bytes - 1);
-    kernel_stdout_write_char('\n', console_fgcolor);
-    current_tty->line_ready = true;
-}
-
-//Caps Lock: переворот регистра букв (та же логика, что в kbd_translate_event)
-static uint32_t kbd_apply_caps(uint32_t cp, bool caps)
-{
-    if (!caps) return cp;
-    if (cp >= 'a' && cp <= 'z')            return cp - 0x20;
-    if (cp >= 'A' && cp <= 'Z')            return cp + 0x20;
-    if (cp >= 0x0430 && cp <= 0x044F)      return cp - 0x20;
-    if (cp >= 0x0410 && cp <= 0x042F)      return cp + 0x20;
-    if (cp == 0x0451)                      return 0x0401;
-    if (cp == 0x0401)                      return 0x0451;
-    return cp;
-}
-
-
 void irq33_handler(struct regs *r)
 {
     //Аппаратно вычитываем скан-код клавиши из порта контроллера i8042
@@ -624,18 +278,18 @@ void irq33_handler(struct regs *r)
     //сам скан-код при этом идёт дальше обычным путём
     kbd_hotkey_process(scancode);
     //Передаем скан-код в драйвер клавы
-    //Это наполнит кольцевой буфер kbd_event_buf, и RAW-читатели (Сехмет) увидят нажатие
+    //Это наполнит кольцевой буфер kbd_event_buf, и sekhmet_read_line(), или кому там еще нужно, увидит нажатие
     if (kbd_driver_api && kbd_driver_api->irq_callback)
     {
         kbd_driver_api->irq_callback(scancode);
     }
     if (current_tty && current_tty->foreground_pid != 0)
     {
-        //Если терминал захвачен активным шеллом/процессом Ring 3 — выходим
+        //Если терминал захвачен активным шеллом/процессором Ring 3 — выходим
         //Оставим только обработку переключения TTY по комбинациям клавиш
         return;
     }
-    //Fallback ядра (cooked-редактор строки)
+    //Fallback ядра
     if (!current_tty) return;
     static bool caps_lock_active = false;
     static bool ctrl_pressed = false;
@@ -643,80 +297,58 @@ void irq33_handler(struct regs *r)
 
     if (scancode == 0x1D)      ctrl_pressed = true;
     else if (scancode == 0x9D) ctrl_pressed = false;
-
-    //Если текущая задача читает клавиатуру в RAW-режиме (Сехмет и т.п.) —
-    //она сама обрабатывает ввод и рисует свой курсор, ядерный редактор молчит
-    if (current_task && (current_task->tty_flags & TTY_KBD_RAW)) return;
-
-    //Пока собранная строка не отдана читателю — редактирование закрыто
     if (current_tty->line_ready) return;
 
-    //Ctrl+C — отмена ввода: строка подтирается, читателю сдается пустая.
-    //Действуем только если сессия ввода реально активна — иначе курсор вывода
-    //прыгнул бы в устаревшую позицию посреди вывода работающей программы
-    if (ctrl_pressed && scancode == 0x2E)
+    //Вспомогательные лямбды восстановления символов под курсором ядра
+    void restore_char_at_cursor(uint32_t buffer_idx)
     {
-        if (current_tty->line_session_active)
+        uint32_t cx, cy;
+        kconsole_get_render_coords(buffer_idx, &cx, &cy);
+        uint32_t cell_x = cx / current_tty->cell_w;
+        uint32_t cell_y = cy / current_tty->cell_h;
+        uint32_t orig_char = ' ';
+        if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
         {
-            kbd_session_cancel();
+            orig_char = current_tty->matrix[cell_y][cell_x].codepoint;
+        }
+        if (fb && fb->clear_tile) fb->clear_tile(cx, cy, console_bgcolor);
+        else
+            fb->draw_codepoint(cx, cy, current_tty->cursor_code, console_bgcolor);
+        //fb->draw_char(cx, cy, current_tty->cursor_code, console_bgcolor);
+        if (orig_char != ' ' && orig_char != '\0') fb->draw_codepoint(cx, cy, orig_char, console_fgcolor);
+    }
+
+    void force_draw_new_cursor(void)
+    {
+        uint32_t new_cx, new_cy;
+        kconsole_get_render_coords(current_tty->line_cursor_pos, &new_cx, &new_cy);
+        //fb->draw_char(new_cx, new_cy, current_tty->cursor_code, console_fgcolor);
+        fb->draw_codepoint(new_cx, new_cy, current_tty->cursor_code, console_fgcolor);
+        current_tty->cursor_visible = true;
+        current_tty->last_blink_tick = tick_count;
+    }
+
+    if (scancode == 0x4B)  //Стрелочка <-
+    {
+        if (current_tty->line_cursor_pos > 0)
+        {
+            restore_char_at_cursor(current_tty->line_cursor_pos);
+            current_tty->line_cursor_pos--;
+            kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
+            force_draw_new_cursor();
         }
         return;
     }
-
-    //Первое нажатие в новой строке: фиксируем начало сессии ввода
-    //в текущей позиции курсора вывода (сразу за промптом программы)
-    if (!current_tty->line_session_active)
+    if (scancode == 0x4D)  //Стрелочка ->
     {
-        kconsole_arm_input_session();
-    }
-
-    //Навигация и правка по make-кодам (у CF-18 нет numpad, конфликтов кодов нет)
-    switch (scancode)
-    {
-    case 0x4B: //Стрелочка <-
-        if (current_tty->line_cursor_pos > 0)
-        {
-            kbd_erase_cursor_at(current_tty->line_cursor_pos);
-            current_tty->line_cursor_pos = kbd_prev_char_pos(current_tty->line_cursor_pos);
-            kbd_place_output_cursor(current_tty->line_cursor_pos);
-            kbd_draw_cursor_at(current_tty->line_cursor_pos);
-        }
-        return;
-    case 0x4D: //Стрелочка ->
         if (current_tty->line_cursor_pos < current_tty->copied_bytes)
         {
-            kbd_erase_cursor_at(current_tty->line_cursor_pos);
-            current_tty->line_cursor_pos = kbd_next_char_pos(current_tty->line_cursor_pos);
-            kbd_place_output_cursor(current_tty->line_cursor_pos);
-            kbd_draw_cursor_at(current_tty->line_cursor_pos);
+            restore_char_at_cursor(current_tty->line_cursor_pos);
+            current_tty->line_cursor_pos++;
+            kconsole_get_render_coords(current_tty->line_cursor_pos, &current_tty->cursor_x, &current_tty->cursor_y);
+            force_draw_new_cursor();
         }
         return;
-    case 0x47: //HOME
-        if (current_tty->line_cursor_pos > 0)
-        {
-            kbd_erase_cursor_at(current_tty->line_cursor_pos);
-            current_tty->line_cursor_pos = 0;
-            kbd_place_output_cursor(0);
-            kbd_draw_cursor_at(0);
-        }
-        return;
-    case 0x4F: //END
-        if (current_tty->line_cursor_pos < current_tty->copied_bytes)
-        {
-            kbd_erase_cursor_at(current_tty->line_cursor_pos);
-            current_tty->line_cursor_pos = current_tty->copied_bytes;
-            kbd_place_output_cursor(current_tty->line_cursor_pos);
-            kbd_draw_cursor_at(current_tty->line_cursor_pos);
-        }
-        return;
-    case 0x53: //DELETE — удаление символа правее курсора
-        kbd_line_delete();
-        return;
-    case 0x0E: //BACKSPACE — удаление символа левее курсора
-        kbd_line_backspace();
-        return;
-    default:
-        break;
     }
 
     if (scancode < 128)
@@ -731,37 +363,26 @@ void irq33_handler(struct regs *r)
             shift_pressed = true;
             return;
         }
-        if (scancode == 0x1C) //Enter
-        {
-            kbd_line_commit();
-            return;
-        }
 
         const locale_t *loc = locale_get_active();
         uint32_t cp = locale_resolve_key(loc, scancode, shift_pressed);
         if (cp != 0)
         {
-            cp = kbd_apply_caps(cp, caps_lock_active);
+            //char ascii = (char)cp866_from_codepoint(cp);
+            restore_char_at_cursor(current_tty->line_cursor_pos);
             if (cp == '\n')
             {
-                kbd_line_commit();
+                kernel_stdout_write_char('\n', console_fgcolor);
+                current_tty->line_ready = true;
             }
-            else if (cp == '\b')
-            {
-                kbd_line_backspace();
-            }
-            else if (cp >= 0x20 && cp != 0x7F)
-            {
-                kbd_line_insert_cp(cp);
-            }
-            //остальные control-символы (tab и пр.) в строку не попадают
         }
+
     }
     else
     {
-        if (scancode == 0xAA || scancode == 0xB6)
+        if (scancode == 0x2A || scancode == 0x36 || scancode == 0xAA || scancode == 0xB6)
         {
-            shift_pressed = false;
+            if (scancode == 0xAA || scancode == 0xB6) shift_pressed = false;
         }
     }
 }
