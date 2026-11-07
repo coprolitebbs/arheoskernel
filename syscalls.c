@@ -371,11 +371,10 @@ void systemcall_readdir(struct regs *r)
 
 void systemcall_file_read(struct regs *r)
 {
-    //Непрерывные UTF-8 байты, которые не удалось отдать за один SYS_READ
-    //Хранятся для следующего вызова SYS_READ от того же task'а (cooked STDIN)
-    static uint8_t  cooked_pending_buf[4];
-    static int      cooked_pending_len = 0;
-    static int      cooked_pending_pos = 0;
+    //Позиция раздачи готовой строки из line_buffer редактора ядра (cooked STDIN).
+    //Строка набирается в прерывании клавиатуры (irq33_handler) и сдается
+    //читателю по частям: u_read запрашивает по 1 байту, пока не встретит '\n'
+    static uint32_t cooked_serve_pos = 0;
 
     int file_d = (int)r->ebx;
     void *user_buf = (void *)r->ecx;
@@ -396,13 +395,13 @@ void systemcall_file_read(struct regs *r)
 
     if (global_fd == 0)
     {
-        if (!kbd_driver_api)
+        if (!kbd_driver_api || !current_tty)
         {
             r->eax = -1;
             return;
         }
 
-        //RAW-режим
+        //RAW-режим (Сехмет и т.п.): отдаем упакованные события скан-кодов как есть
         if (current_task->tty_flags & TTY_KBD_RAW)
         {
             if (kbd_driver_api->has_chars())
@@ -429,82 +428,42 @@ void systemcall_file_read(struct regs *r)
             }
             return;
         }
-        //COOKED: сначала доставляем то, что осталось с прошлого раза
-        if (cooked_pending_pos < cooked_pending_len)
+
+        //COOKED: раздача готовой строки из буфера редактора ядра
+        if (current_tty->line_ready && cooked_serve_pos < current_tty->copied_bytes)
         {
-            uint32_t avail = (uint32_t)(cooked_pending_len - cooked_pending_pos);
+            uint32_t avail   = current_tty->copied_bytes - cooked_serve_pos;
             uint32_t to_copy = (count < avail) ? count : avail;
             for (uint32_t i = 0; i < to_copy; i++)
-                ((uint8_t*)user_buf)[i] = cooked_pending_buf[cooked_pending_pos + i];
-            cooked_pending_pos += (int)to_copy;
-            if (cooked_pending_pos >= cooked_pending_len)
+                ((uint8_t*)user_buf)[i] = (uint8_t)current_tty->line_buffer[cooked_serve_pos + i];
+            cooked_serve_pos += to_copy;
+
+            //Строка отдана полностью — сбрасываем сессию ввода.
+            //Сбрасываем СРАЗУ, чтобы нажатия в промежутке между сдачей строки
+            //и следующим опросом не дописывались в уже использованный буфер
+            if (cooked_serve_pos >= current_tty->copied_bytes)
             {
-                cooked_pending_pos = 0;
-                cooked_pending_len = 0;
+                cooked_serve_pos = 0;
+                current_tty->line_ready         = false;
+                current_tty->copied_bytes       = 0;
+                current_tty->line_cursor_pos    = 0;
+                current_tty->line_session_active = false;
+                stdin_cancel_flag = 0;
             }
+
             r->eax = (int32_t)to_copy;
             return;
         }
 
-        //COOKED: иначе берём новое событие из клавиатуры
-        while (kbd_driver_api->has_chars())
+        //COOKED: данных пока нет — армируем сессию ввода (однократно) и ждем.
+        //Начало строки ввода фиксируется в текущей позиции курсора вывода,
+        //т.е. ровно за промптом, который программа напечатала перед чтением
+        if (!current_tty->line_session_active && !current_tty->line_ready)
         {
-            uint32_t packed = kbd_driver_api->get_char_blocked();
-            uint32_t cp = kbd_translate_event(packed);
-            if (cp == 0) continue;   //модификатор — проглотили
-
-            //Кодируем codepoint в UTF-8
-            uint8_t utf8[4];
-            int n = 0;
-            if (cp < 0x80)
-            {
-                utf8[n++] = (uint8_t)cp;
-            }
-            else if (cp < 0x800)
-            {
-                utf8[n++] = 0xC0 | (cp >> 6);
-                utf8[n++] = 0x80 | (cp & 0x3F);
-            }
-            else if (cp < 0x10000)
-            {
-                utf8[n++] = 0xE0 | (cp >> 12);
-                utf8[n++] = 0x80 | ((cp >> 6) & 0x3F);
-                utf8[n++] = 0x80 | (cp & 0x3F);
-            }
-            else
-            {
-                utf8[n++] = 0xF0 | (cp >> 18);
-                utf8[n++] = 0x80 | ((cp >> 12) & 0x3F);
-                utf8[n++] = 0x80 | ((cp >> 6)  & 0x3F);
-                utf8[n++] = 0x80 | (cp & 0x3F);
-            }
-
-            //Эхо — печатаем весь codepoint
-            if (current_task->tty_flags & TTY_ECHO)
-            {
-                for (int i = 0; i < n; i++)
-                    kernel_stdout_write_char((char)utf8[i], console_fgcolor);
-            }
-
-            //Сколько сможем отдать сразу
-            uint32_t to_copy = (count < (uint32_t)n) ? count : (uint32_t)n;
-            for (uint32_t i = 0; i < to_copy; i++)
-                ((uint8_t*)user_buf)[i] = utf8[i];
-
-            //Остаток кладём в pending для следующего SYS_READ
-            if (to_copy < (uint32_t)n)
-            {
-                for (int i = 0; i < n - (int)to_copy; i++)
-                    cooked_pending_buf[i] = utf8[to_copy + i];
-                cooked_pending_len = n - (int)to_copy;
-                cooked_pending_pos = 0;
-            }
-
-            r->eax = (int32_t)to_copy;
-            return;
+            kconsole_arm_input_session();
         }
 
-        r->eax = 0;   //печатных данных пока нет
+        r->eax = 0;   //строка еще не готова — читатель подождет (yield)
         return;
     }
 
