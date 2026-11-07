@@ -362,12 +362,48 @@ bpb_init:
     ; === Boot sector: свой FDC-драйвер вместо BIOS int 13h ===
     ; BIOS TA-NC529/CS5530 внутри int 13h ждёт IRQ6 без таймаута
     ; и зависает навсегда. disk_read_sector теперь поллинговый.
+    ;
+    ; Скорость данных до разбора BPB неизвестна, а чтение не на той
+    ; скорости даёт таймаут фазы данных (FDC не находит адресные
+    ; метки; 86box и реальное железо скорость учитывают, QEMU — нет).
+    ; Поэтому пробуем сектор 0 на 500 кбит/с (HD: 1.44M/1.2M), при
+    ; неудаче — на 250 кбит/с (DD: 720K/360K). По одной попытке на
+    ; скорость: полные три повтора на заведомо неверной скорости
+    ; не нужны. 'r0'/'r2' — маркеры проб в отладке.
+    pusha
+    mov byte [cs:fdc_max_attempts], 1
+    mov al, 'r'
+    call debug_char
+    mov al, '0'
+    call debug_char
+    popa
+
     xor ax, ax
     mov es, ax
     mov bx, 0x0600
     xor ax, ax              ; LBA 0
     call disk_read_sector
+    jnc .rate_ok
+
+    ; повтор на 250 кбит/с (DD-медиа: 720K/360K)
+    pusha
+    mov byte [cs:fdc_max_attempts], 1
+    mov al, 'r'
+    call debug_char
+    mov al, '2'
+    call debug_char
+    popa
+    mov byte [cs:fdc_ccr], 0x02
+    mov byte [cs:fdc_inited], 0     ; форсировать fdc_reset в чтении
+    xor ax, ax
+    mov es, ax
+    mov bx, 0x0600
+    xor ax, ax
+    call disk_read_sector
     jc .fail
+
+.rate_ok:
+    mov byte [cs:fdc_max_attempts], 3
 
     mov si, 0x0600
     mov ax, [cs:si+11]
@@ -406,6 +442,18 @@ bpb_init:
     mov ax, [cs:root_start]
     add ax, [cs:root_size]
     mov [cs:data_start], ax
+
+    ; авторитетная скорость по BPB: 9 секторов на дорожку и меньше —
+    ; DD 250 кбит/с (CCR=2: 720K/360K), больше — HD 500 кбит/с
+    ; (CCR=0: 1.2M/1.44M). Дальше все fdc_reset ставят её сами.
+    mov byte [cs:fdc_ccr_force], 1
+    cmp word [cs:spt], 9
+    jbe .ccr_250
+    mov byte [cs:fdc_ccr], 0x00
+    jmp .ccr_set
+.ccr_250:
+    mov byte [cs:fdc_ccr], 0x02
+.ccr_set:
     clc
     jmp .done
 .fail:

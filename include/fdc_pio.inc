@@ -28,8 +28,18 @@
 ; Все ожидания ограничены программными таймаутами — драйвер
 ; не может зависнуть ни при каком состоянии контроллера.
 ; При ошибке печатается диагностика:
-;   'f' + код фазы  — на каждой повторной попытке;
-;   'F' + фаза + ST0 ST1 ST2 (hex) — когда попытки исчерпаны.
+;   'f' + код фазы + MSR (hex) — на каждой повторной попытке;
+;   'F' + фаза + ST0 ST1 ST2 (hex) + 'M' + MSR (hex) — когда попытки
+;   исчерпаны. Финальный дамп печатается ДО fdc_reset: сброс затирает
+;   фазу и регистры состояния. MSR — последний прочитанный Main
+;   Status Register на момент таймаута: 0x10..0x30 = командная фаза,
+;   0x50 = ждёт чтения байта, 0x70 = есть байт результата,
+;   0x80 = простой (RQM=1, DIO=0), 0x90 = готов приём команды,
+;   0xD0 = исполняет команду (данные с носителя не идут).
+;   'r0'/'r2' из bpb_init — проба скорости 500/250 кбит/с.
+;   'B' — FDC на машине нет (шина 0x3F4 читается 0xFF, напр. загрузка
+;   с USB-FDD) либо PIO так и не смог: чтение переключено на BIOS
+;   int 13h и останется там до конца загрузки.
 ; Коды фаз: 1=готовность после reset, 2=SPECIFY, 3=SENSE INT,
 ; 4=RECALIBRATE, 5=SEEK, 6=команда READ, 7=фаза данных,
 ; 8=фаза результатов, 9=проверка.
@@ -72,6 +82,7 @@ fdc_ph          db 0            ; текущая фаза (диагностик�
 fdc_st0         db 0
 fdc_st1         db 0
 fdc_st2         db 0
+fdc_msr_last    db 0            ; MSR на момент последнего таймаута
 fdc_rc          db 0            ; результат: C
 fdc_rr          db 0            ; результат: R
 fdc_C           db 0            ; целевые C/H/R
@@ -80,7 +91,13 @@ fdc_R           db 0
 fdc_stmp        db 0            ; целевой цилиндр для seek
 fdc_pic         db 0            ; сохранённая маска PIC
 fdc_attempts    db 0
+fdc_max_attempts db 3           ; попыток на чтение; bpb_init на время
+                                ; проб скорости временно ставит 1
 fdc_inited      db 0            ; контроллер уже переведён в наш режим
+fdc_ccr         db 0x00         ; код скорости: 0=500 кбит/с, 2=250 кбит/с
+fdc_ccr_force   db 1            ; 1 = программируем CCR при каждом reset
+fdc_probed      db 0            ; щуп шины 0x3F4 уже делали
+fdc_use_bios    db 0            ; 1 = FDC нет/умер, читаем через BIOS
 fdc_dst_seg     dw 0            ; приёмник сектора
 fdc_dst_off     dw 0
 
@@ -117,6 +134,38 @@ fdc_read_lba:
         mov [cs:fdc_dst_seg], es
         mov [cs:fdc_dst_off], bx
 
+        ; режим BIOS уже включён (FDC нет на машине)?
+        cmp byte [cs:fdc_use_bios], 0
+        jne .bios_path
+
+        ; Одноразовый щуп шины 0x3F4: два чтения подряд возвращают
+        ; 0xFF — легаси-FDC не декодируется (CF-18/USB-FDD и т.п.).
+        ; Весь диск тогда читаем через BIOS int 13h, как в старых
+        ; сборках; на машинах с живым FDC щуп прозрачен.
+        cmp byte [cs:fdc_probed], 0
+        jne .probe_done
+        mov byte [cs:fdc_probed], 1
+        mov dx, FDC_MSR
+        in  al, dx
+        mov bl, al
+        in  al, dx
+        cmp al, bl
+        jne .probe_done         ; значение дрожит — FDC живой
+        cmp al, 0xFF
+        jne .probe_done
+        mov byte [cs:fdc_use_bios], 1
+        pusha
+        mov al, 'B'
+        call debug_char
+        popa
+.bios_path:
+        call fdc_bios_read
+        pop es
+        pop ds
+        popa
+        ret
+.probe_done:
+
         ; IRQ6 маскируем на время операции: прерывание нам не
         ; нужно, а BIOS-обработчик int 0Eh не должен трогать
         ; результаты команды
@@ -125,7 +174,8 @@ fdc_read_lba:
         or  al, 0x40
         out 0x21, al
 
-        mov byte [cs:fdc_attempts], 3
+        mov al, [cs:fdc_max_attempts]
+        mov [cs:fdc_attempts], al
 .rl_try:
         ; не даём BIOS выключить мотор по своему таймеру
         push ds
@@ -137,8 +187,8 @@ fdc_read_lba:
         ; первый доступ: BIOS оставил контроллер в СВОЁМ режиме
         ; (SPECIFY c ND=0 — DMA). Наше чтение без DMA-обслуживания
         ; в этом режиме отклоняется (ST0=0x20, без фазы данных).
-        ; Полный fdc_reset ставит НАШ SPECIFY (ND=1), CCR 500к/с
-        ; и чистое состояние — после него чтения идут без отказов.
+        ; Полный fdc_reset ставит НАШ SPECIFY (ND=1), скорость из
+        ; fdc_ccr и чистое состояние — после него чтения идут без отказов.
         cmp byte [cs:fdc_inited], 0
         jne .rl_inited
         call fdc_reset
@@ -146,29 +196,18 @@ fdc_read_lba:
         jc .rl_retry
 .rl_inited:
         ; мотор. fdc_reset уже включил мотор и отработал раскрутку;
-        ; здесь страхуемся: если BIOS успел выключить мотор (DOR),
-        ; включаем заново с задержкой; если крутится — не трогаем DOR
-        ; (перезапись перезапускает таймеры контроллера).
+        ; состояние мотора проверяем ТОЛЬКО по своему флагу.
         cmp byte [cs:fdc_motor_up], 0
-        jne .rl_motor_check
+        jne .rl_motor_ok
         call fdc_dor_motor
         mov dx, FDC_DOR
         out dx, al
         call fdc_spinup
         mov byte [cs:fdc_motor_up], 1
-        jmp .rl_motor_ok
-.rl_motor_check:
-        mov dx, FDC_DOR
-        in  al, dx
-        mov cl, [cs:fdc_unit]
-        mov ch, 0x10
-        shl ch, cl
-        test al, ch
-        jnz .rl_motor_ok
-        call fdc_dor_motor
-        mov dx, FDC_DOR
-        out dx, al
-        call fdc_spinup
+        ; Порт 0x3F2 на части чипсетов (CS5530) при ЧТЕНИИ возвращает
+        ; мусор, поэтому состояние мотора проверяем только по своему
+        ; флагу: fdc_reset после сброса всегда раскручивает мотор, а
+        ; BIOS не успеет его погасить — счётчик motor-off обновлён выше.
 .rl_motor_ok:
         ; калибровка (если позиция головки неизвестна)
         cmp byte [cs:fdc_calibrated], 0
@@ -188,12 +227,16 @@ fdc_read_lba:
         call fdc_read_op
         jnc .rl_ok
 .rl_retry:
-        ; диагностика повтора: 'f' + код фазы
+        ; диагностика повтора: 'f' + код фазы + последний MSR (hex)
         pusha
         mov al, 'f'
         call debug_char
         mov al, [cs:fdc_ph]
         add al, '0'
+        call debug_char
+        mov al, [cs:fdc_msr_last]
+        call screen_hex_byte
+        mov al, ' '
         call debug_char
         popa
         dec byte [cs:fdc_attempts]
@@ -209,8 +252,10 @@ fdc_read_lba:
         clc
         ret
 .rl_final:
-        ; финальная диагностика: 'F' + фаза + ST0 ST1 ST2 (hex)
-        call fdc_reset              ; снять хвосты, вернуть в покой
+        ; финальная диагностика: 'F' + фаза + ST0 ST1 ST2 + 'M' + MSR.
+        ; Печатаем ДО fdc_reset: сброс затирает фазу и регистры
+        ; состояния (раньше вместо реальной ошибки печатался мусор
+        ; вида "F3 800000" от пустой очереди SENSE INTERRUPT).
         pusha
         push ds
         push es
@@ -229,20 +274,72 @@ fdc_read_lba:
         call screen_hex_byte
         mov al, ' '
         call debug_char
+        mov al, 'M'
+        call debug_char
+        mov al, [cs:fdc_msr_last]
+        call screen_hex_byte
+        mov al, ' '
+        call debug_char
         pop es
         pop ds
         popa
+        call fdc_reset              ; снять хвосты, вернуть в покой
         mov al, [cs:fdc_pic]
         out 0x21, al
+
+        ; Последний шанс остаться загрузиться: одна BIOS-попытка.
+        ; Сброс через BIOS обязателен — PIO правил DOR за спиной BIOS.
+        ; На платах, где BIOS внутри int 13h реально ждёт IRQ6, мы сюда
+        ; не попадаем: там FDC живой и PIO работает. Если BIOS помог —
+        ; дальше читаем только через BIOS (флаг fdc_use_bios).
+        mov byte [cs:fdc_use_bios], 1
+        mov ah, 0x00
+        mov dl, [cs:drive]
+        int 0x13
+        pusha
+        mov al, 'B'
+        call debug_char
+        popa
+        call fdc_bios_read          ; CF от int 13h
         pop es
         pop ds
         popa
-        stc
+        ret
+
+; ------------------------------------------------------------
+; fdc_bios_read: чтение сектора fdc_C/H/R через BIOS int 13h в
+; fdc_dst_seg:off. Путь для машин без легаси-FDC (USB-FDD) и
+; аварийный резерв, когда PIO не смог. CF от int 13h.
+; ------------------------------------------------------------
+fdc_bios_read:
+        push ax
+        push bx
+        push cx
+        push dx
+        push es
+        mov cl, [cs:fdc_R]          ; сектор (1-based)
+        mov al, [cs:fdc_C]
+        mov ch, al                  ; младшие 8 бит цилиндра
+        shr al, 2
+        and al, 3
+        shl al, 6
+        or  cl, al                  ; старшие 2 бита цилиндра -> биты 6-7 CL
+        mov dh, [cs:fdc_H]
+        mov dl, [cs:drive]
+        mov ax, 0x0201              ; AH=02 read, AL=1 сектор
+        mov es, [cs:fdc_dst_seg]
+        mov bx, [cs:fdc_dst_off]
+        int 0x13
+        pop es
+        pop dx
+        pop cx
+        pop bx
+        pop ax
         ret
 
 ; ------------------------------------------------------------
 ; fdc_reset: полный сброс контроллера + SPECIFY + drain SENSE
-; INTERRUPT + 500 кбит/с. CF=0 при успехе.
+; INTERRUPT + скорость данных из fdc_ccr. CF=0 при успехе.
 ; ------------------------------------------------------------
 fdc_reset:
         push ax
@@ -288,10 +385,19 @@ fdc_reset:
         call fdc_out
         jc .rs_fail
 
-        ; скорость 500 кбит/с MFM (после сброса чип даёт 250)
+        ; скорость данных. После сброса чип по умолчанию даёт 250
+        ; кбит/с, поэтому скорость НЕОБХОДИМО программировать явно:
+        ; чтение DD-медиа (720K/360K) на 500 кбит/с даёт таймаут фазы
+        ; данных (FDC не находит адресные метки), HD-медиа (1.2M/1.44M)
+        ; наоборот требует 500. Значение берём из fdc_ccr — его
+        ; выставляет bpb_init по BPB (spt<=9 -> 250, иначе 500), а до
+        ; разбора BPB перебирает 500/250 пробами загрузочного сектора.
+        cmp byte [cs:fdc_ccr_force], 0
+        je  .rs_noccr
         mov dx, FDC_CCR
-        xor al, al
+        mov al, [cs:fdc_ccr]
         out dx, al
+.rs_noccr:
 
         ; осушить очередь SENSE INTERRUPT (после reset)
         mov byte [cs:fdc_ph], PH_SENSED
@@ -529,6 +635,7 @@ fdc_wait_msr:
         jnz .wm_inner
         dec si
         jnz .wm_outer
+        mov [cs:fdc_msr_last], bl   ; запомнить MSR для диагностики
         stc
         jmp .wm_ret
 .wm_ok:
