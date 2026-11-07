@@ -31,6 +31,16 @@ start:
 
     mov [cs:drive], dl
 
+    ;Свежее состояние контроллера перед первой работой stage2: BIOS-сброс
+    ;+ пауза на мотор по тикам BIOS. Stage1 до этого трогал DOR (0x3F2)
+    ;напрямую, а на реальном FDC (в отличие от USB-FDD и эмуляторов)
+    ;контроллер может оказаться в не самом чистом состоянии
+    mov ah, 0x00
+    mov dl, [cs:drive]
+    int 0x13
+    mov ax, 5
+    call wait_ticks
+
     ;call fdc_init
 
     ;pusha
@@ -357,7 +367,10 @@ bpb_init:
     popa
 
     ; === Boot sector via BIOS int 13h ===
-    ; BIOS уже работал с этой дискетой в stage1, состояние корректно.
+    ; BIOS уже работал с этой дискетой в stage1, но на реальном FDC разовый
+    ; таймаут — норма, поэтому до 3 попыток с паузой и сбросом между ними.
+    mov si, 3               ;счётчик попыток
+.bb_try:
     xor ax, ax
     mov es, ax
     mov bx, 0x0600
@@ -368,7 +381,16 @@ bpb_init:
     mov ah, 0x02
     mov al, 1
     int 0x13
-    jc .fail
+    jnc .bb_ok
+    dec si
+    jz .fail
+    mov ax, 1               ;пауза ~55 мс + BIOS-сброс + повтор
+    call wait_ticks
+    mov ah, 0x00
+    mov dl, [cs:drive]
+    int 0x13
+    jmp .bb_try
+.bb_ok:
 
     mov si, 0x0600
     mov ax, [cs:si+11]

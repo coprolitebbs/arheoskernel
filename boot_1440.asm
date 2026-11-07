@@ -42,15 +42,13 @@ VolumeLabel       db "MYOS      "
 FileSystem        db "FAT12   "
 
 %macro DEBUG 1
+    ;int 10h AH=0E портит AX и BX; BX на всех точках вызова не живой —
+    ;сохраняем только AX (экономия байт в boot-секторе)
     push ax
-    push bx
-    push dx
     mov al, %1
     mov ah, 0x0E
     mov bx, 0x0007
     int 0x10
-    pop dx
-    pop bx
     pop ax
 %endmacro
 
@@ -67,35 +65,23 @@ start:
     mov [drive], dl
     DEBUG 'S'
 
-    ;Форсированный motor-on + spin-up
+    ;Форсированный motor-on + spin-up. DOR пишем КОНСТАНТОЙ: на части
+    ;чипсетов (в т.ч. CS5530 на Geode GX1) порт 0x3F2 не читается, и
+    ;read-modify-write "in/or/and/out" записывает мусор (все моторы + drive 3)
     mov dx, 0x3F2           ; DOR
-    in  al, dx
-    or  al, 0x1C            ; motor0 on, DMA+IRQ, no reset
-    and al, 0xFC            ; drive 0, no reset
+    mov al, 0x1C            ; drive 0, RESET# снят, DMA+IRQ разрешены, мотор0
     out dx, al
 
-    ;Грубая задержка ~100-250 мс (для старта мотора)
-    ;Работает при 100-500 МГц, реальное время зависит от CPU
-    mov bx, 200
-.delay_outer:
-    xor dx, dx
-.delay_inner:
-    dec dx
-    jnz .delay_inner
-    dec bx
-    jnz .delay_outer
-    ;200 × 65536 ≈ 13 000 000 итераций dec+jnz ≈ 260 мс @ 100 МГц, ≈ 130 мс @ 200 МГц, ≈ 78 мс @ 333 МГц
+    ;Ждём раскрутку мотора по тикам BIOS (~55 мс на тик, ~550 мс на 10 тиков).
+    ;Не зависит от частоты CPU, в отличие от пустых циклов
+    mov ax, 10
+    call wait_ticks
 
-    ;Теперь reset через BIOS
+    ;Сброс контроллера через BIOS (провал не фатален: чтения в disk.inc
+    ;сами делают сброс между попытками)
     mov ah, 0x00
     mov dl, [cs:drive]
     int 0x13
-    jc disk_error
-
-    ;Ещё немного подождать после reset
-    mov cx, 0
-.reset_delay:
-    loop .reset_delay
 
     ;DEBUG 'I'
 
@@ -224,7 +210,6 @@ root_start dw 0
 root_size  dw 0
 data_start dw 0
 
-disk_lba   dw 0
 disk_spt   dw 18
 disk_heads dw 2
 
