@@ -31,9 +31,11 @@ _stage2_entry:
     mov es, ax
     mov ss, ax
     mov sp, 0xFFF0
-    sti
-
+    ;Номер диска сохраняем ДО sti: после sti обработчик IRQ (BIOS)
+    ;может испортить DL
     mov [cs:drive], dl
+
+    sti
 
     ;Инициализация VBE и A20
     call vbe_init

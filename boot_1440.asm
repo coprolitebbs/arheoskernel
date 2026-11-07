@@ -59,10 +59,12 @@ start:
     mov es, ax
     mov ss, ax
     mov sp, 0x7C00
+    ;Номер диска сохраняем ДО sti: после sti обработчик IRQ (BIOS)
+    ;может испортить DL (на SeaBIOS/QEMU — DL=0xFC)
+    mov [drive], dl
     sti
     cld
 
-    mov [drive], dl
     DEBUG 'S'
 
     ;Форсированный motor-on + spin-up. DOR пишем КОНСТАНТОЙ: на части
