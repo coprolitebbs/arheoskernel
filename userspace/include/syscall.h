@@ -19,8 +19,8 @@
 #define SYSCALL_H
 
 #define SYS_FILL_SCREEN     2
-#define SYS_EXIT 		    3
-#define SYS_YIELD 		    4
+#define SYS_EXIT                    3
+#define SYS_YIELD                   4
 #define SYS_DRAW_STRING     5
 #define SYS_DRAW_CHAR       6
 #define SYS_GET_FB_INFO     7
@@ -77,6 +77,9 @@
 
 #define SYS_GET_MOUNT_COUNT       63
 #define SYS_GET_MOUNT_INFO        64
+
+//Управление курсором редактора строки из Ring-3 (см. systemcall_tty_line_edit)
+#define SYS_TTY_LINE_EDIT         65
 
 #define SYS_HALT_OS               99
 

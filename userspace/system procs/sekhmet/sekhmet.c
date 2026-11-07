@@ -54,7 +54,111 @@ char f_execute_mess[64], wallp_load[32], f_cd_mess[64], exit_mess[64], awake_mes
 
 uint32_t cursor_char = '_';
 //static bool kbd_lang_ru = false;
-static bool g_cursor_blink_on = true;
+
+/*
+ * ================= Редактор строки ввода =================
+ *
+ * Строка рисуется ЯДРОМ посимвольно через STDOUT, а позиционирование
+ * курсора — абсолютными ANSI-координатами CUP (\x1B[<row>;<col>H) от
+ * «якоря» — ячейки экрана, где начинается промпт. Такой подход (в отличие
+ * от прежнего «\r + очистка строки + перепечаток») корректно работает
+ * и когда строка ввода переносится на несколько экранных строк.
+ *
+ * Перерисовка происходит ТОЛЬКО по изменению и точечно:
+ *   — допечатывается хвост от позиции курсора;
+ *   — стирается лишний хвост прежней отрисовки;
+ *   — курсор возвращается на свое место.
+ * Никаких периодических перерисовок по таймеру нет — мерцать нечему.
+ *
+ * Мигающий курсор рисует ядро (kconsole_update_cursor): Сехмет после
+ * каждого изменения сообщает ему якорь и смещение курсора через
+ * u_tty_line_edit(). Поэтому курсор виден всегда, включая простой ввода,
+ * и его мигание не трогает саму строку.
+ */
+static uint32_t line_cols = 80;   //ширина консоли в ячейках
+static int      line_anchor_col = 0; //якорь: колонка начала строки (промпта)
+static int      line_anchor_row = 0; //якорь: экранная строка начала строки
+static int      line_last_end_off = 0; //длина прошлой отрисовки от якоря (ячейки)
+static int      line_prompt_v = 0;  //видимая длина промпта текущей строки
+
+//Экранная позиция ячейки для смещения off от якоря (с учетом переноса)
+static void line_cell_pos(int off, int *row, int *col)
+{
+    int cols = (int)line_cols;
+    if (cols <= 0) { cols = 80; }
+    *row = line_anchor_row + off / cols;
+    *col = off % cols;
+}
+
+//Дописывает в буфер число в десятичной записи, возвращает новый индекс
+static int line_emit_uint(char *out, int n, uint32_t v)
+{
+    char tmp[6];
+    int t = 0;
+    if (v == 0) { out[n++] = '0'; return n; }
+    while (v > 0 && t < (int)sizeof(tmp))
+    {
+        tmp[t++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (t > 0) { out[n++] = tmp[--t]; }
+    return n;
+}
+
+//Дописывает CUP-последовательность \x1B[<row+1>;<col+1>H, возвращает новый индекс
+static int line_emit_cup(char *out, int n, int row, int col)
+{
+    out[n++] = '\x1B';
+    out[n++] = '[';
+    n = line_emit_uint(out, n, (uint32_t)(row + 1));
+    out[n++] = ';';
+    n = line_emit_uint(out, n, (uint32_t)(col + 1));
+    out[n++] = 'H';
+    return n;
+}
+
+//Сообщает ядру, где стоит курсор строки (для мигания), и запоминает длину отрисовки
+static void line_sync_cursor(int cur_off, int end_off)
+{
+    u_tty_line_edit(1,
+                    (uint32_t)line_anchor_col | ((uint32_t)line_anchor_row << 16),
+                    (uint32_t)cur_off);
+    line_last_end_off = end_off;
+}
+
+//Видимая длина строки в ячейках (реализация ниже по файлу)
+static int get_visible_length(const char *str, int bytes_limit);
+
+//Показать курсор на новом месте БЕЗ перерисовки текста (стрелки, HOME/END):
+//один CUP + сообщение ядру, ни одна ячейка текста не перерисовывается
+static void line_move_cursor(const char *buffer, int curr_idx)
+{
+    char out[24];
+    int row, col;
+    int off = line_prompt_v + get_visible_length(buffer, curr_idx);
+    line_cell_pos(off, &row, &col);
+    int n = line_emit_cup(out, 0, row, col);
+    u_write(STDOUT, out, n);
+    u_tty_line_edit(1,
+                    (uint32_t)line_anchor_col | ((uint32_t)line_anchor_row << 16),
+                    (uint32_t)off);
+}
+
+//Определяет, съехал ли экран из-за скролла во время печати, и тянет якорь вверх.
+//Ожидаемый конец текста — end_row; если реально курсор выше — было прокручивание
+static void line_fix_anchor_after_scroll(int end_row, int end_col)
+{
+    uint32_t qc = 0, qr = 0;
+    u_get_console_pos(&qc, &qr);
+    int delta = end_row - (int)qr;
+    //Колонка должна совпасть; если нет — позицию все равно чинит следующий CUP
+    (void)end_col;
+    if (delta > 0)
+    {
+        line_anchor_row -= delta;
+        if (line_anchor_row < 0) line_anchor_row = 0;
+    }
+}
 
 static alias_t g_aliases[MAX_ALIASES];
 static int     g_alias_count = 0;
@@ -588,12 +692,27 @@ void autocomplete_file(char *buffer, int *pos, int *curr_idx)
 }
 
 
+//Видимая длина строки в ячейках: считает кодпойнты UTF-8,
+//пропуская ESC-последовательности (чтобы цветной промпт не ломал расчет)
 static int get_visible_length(const char *str, int bytes_limit)
 {
     int visible = 0;
+    bool in_ansi = false;
     for (int i = 0; i < bytes_limit && str[i] != '\0'; i++)
     {
-        if ((str[i] & 0xC0) != 0x80)
+        unsigned char c = (unsigned char)str[i];
+        if (in_ansi)
+        {
+            //ESC CSI завершается буквой
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) in_ansi = false;
+            continue;
+        }
+        if (c == 0x1B)
+        {
+            in_ansi = true;
+            continue;
+        }
+        if ((c & 0xC0) != 0x80)
         {
             visible++;
         }
@@ -624,54 +743,88 @@ static bool is_valid_executable(const char *path)
     return false;
 }
 
-static void redraw_line_with_cursor(const char *buffer, int pos, int curr_idx)
+/*
+ * Перерисовка строки ввода.
+ *
+ * with_prompt = true  — полная отрисовка от якоря (промпт + весь текст):
+ *                       первый вывод, история, автодополнение, Enter.
+ * with_prompt = false — точечная правка: допечатать хвост от позиции курсора
+ *                       (вставка в середину, удаление), не трогая остальное.
+ *
+ * В обоих случаях лишний хвост прошлой отрисовки стирается, курсор
+ * возвращается точно на свою ячейку, ядру сообщается позиция мигающего
+ * курсора. Сплошной очистки «всей строки» нет — мерцать нечему.
+ */
+static void redraw_line_with_cursor(const char *buffer, int pos, int curr_idx, bool with_prompt)
 {
-    static char out[1024];
-
-    char cwd_buf[256];
-    getcwd(cwd_buf, 255);
-
-    // \r \x1B[K + prompt + cwd + "> " + buffer[:curr_idx]
+    static char out[1280];
     int n = 0;
-    out[n++] = '\r';
-    out[n++] = '\x1B';
-    out[n++] = '[';
-    out[n++] = 'K';
 
     char prompt_buf[192];
-    build_prompt(prompt_buf, sizeof(prompt_buf), cwd_buf);
-    for (const char *p = prompt_buf; *p && n < (int)sizeof(out) - 32; p++) out[n++] = *p;
-
-    for (int i = 0; i < curr_idx; i++) out[n++] = buffer[i];
-
-    u_write(STDOUT, out, n);
-    //одна ячейка под курсор
-    char cur = ' ';
-    if (g_cursor_blink_on)
+    int prompt_v = 0;
+    if (with_prompt)
     {
-        cur = (char)(cursor_char & 0xFF);
+        char cwd_buf[256];
+        getcwd(cwd_buf, 255);
+        build_prompt(prompt_buf, sizeof(prompt_buf), cwd_buf);
+        prompt_v = get_visible_length(prompt_buf, (int)strlen(prompt_buf));
+        line_prompt_v = prompt_v;
     }
-    // Cursor OFF -> пробел, чтобы хвост строки не съезжал влево
-    u_write(STDOUT, &cur, 1);
-    //buffer[curr_idx:pos] + \x1B[ND
+    else
+    {
+        prompt_v = line_prompt_v;
+    }
+
+    int cur_off = prompt_v + get_visible_length(buffer, curr_idx);
+    int end_off = prompt_v + get_visible_length(buffer, pos);
+
+    int cur_row, cur_col, end_row, end_col;
+    line_cell_pos(cur_off, &cur_row, &cur_col);
+    line_cell_pos(end_off, &end_row, &end_col);
+
+    //1) Печать. Полная отрисовка всегда идет ОТ ЯКОРЯ (промпт + весь текст),
+    //точечная правка — от позиции курсора (только хвост).
+    //Печать сама переносит строки и обновляет текстовую матрицу ядра
+    if (with_prompt)
+    {
+        n = line_emit_cup(out, 0, line_anchor_row, line_anchor_col);
+        for (const char *p = prompt_buf; *p && n < (int)sizeof(out) - 32; p++) out[n++] = *p;
+        for (int i = 0; i < pos && n < (int)sizeof(out) - 32; i++) out[n++] = buffer[i];
+    }
+    else
+    {
+        n = line_emit_cup(out, 0, cur_row, cur_col);
+        for (int i = curr_idx; i < pos && n < (int)sizeof(out) - 32; i++) out[n++] = buffer[i];
+    }
+    u_write(STDOUT, out, n);
+
+    //2) Если при печати экран прокрутился (текст уперся в низ экрана) —
+    //якорь уезжает вверх; пересчитываем позиции по скорректированному якорю
+    line_fix_anchor_after_scroll(end_row, end_col);
+    line_cell_pos(cur_off, &cur_row, &cur_col);
+    line_cell_pos(end_off, &end_row, &end_col);
+
+    //3) Стираем только то, что осталось после нового конца текста
     n = 0;
-    for (int i = curr_idx; i < pos; i++) out[n++] = buffer[i];
-    int back_chars = get_visible_length(buffer, pos) - get_visible_length(buffer, curr_idx);
-    if (back_chars > 0 && n < (int)sizeof(out) - 12)
+    if (end_off < line_last_end_off)
     {
-        out[n++] = '\x1B';
-        out[n++] = '[';
-        char rev[8];
-        int r = 0, tmp = back_chars;
-        while (tmp > 0 && r < 8)
+        n = line_emit_cup(out, 0, end_row, end_col);
+        out[n++] = '\x1B'; out[n++] = '['; out[n++] = 'K';
+        int old_row, old_col;
+        line_cell_pos(line_last_end_off, &old_row, &old_col);
+        for (int r = end_row + 1; r <= old_row; r++)
         {
-            rev[r++] = '0' + (tmp % 10);
-            tmp /= 10;
+            n = line_emit_cup(out, n, r, 0);
+            out[n++] = '\x1B'; out[n++] = '['; out[n++] = 'K';
         }
-        while (r > 0) out[n++] = rev[--r];
-        out[n++] = 'D';
     }
-    u_write(STDOUT, out, n);
+
+    //4) Курсор — точно на свою ячейку
+    n = line_emit_cup(out, n, cur_row, cur_col);
+    if (n > 0) u_write(STDOUT, out, n);
+
+    //5) Ядро знает, где мигать курсором
+    line_sync_cursor(cur_off, end_off);
 }
 
 
@@ -686,34 +839,34 @@ void sekhmet_read_line(char *buffer, int max_len)
 
     ensure_keymap();
 
-    //int locale_idx = u_locale_get();
-    //if (locale_idx < 0) locale_idx = 0;
-    //Состояние мигания курсора
-    //Один "тик" = один yield() когда клавиатура молчит.
-    //При 100 Гц PIT и частоте ~10 мс это ~10 мс на тик.
-    const uint32_t BLINK_TICKS = 40;   //~400 мс
-    g_cursor_blink_on = true;
-    uint32_t last_blink_tick = get_ticks();
-    redraw_line_with_cursor(buffer, pos, curr_idx);
+    //Геометрия консоли и якорь: ячейка экрана, где начнется промпт.
+    //Курсор консоли после предыдущего вывода стоит ровно там
+    uint32_t gc = 0, gr = 0, gw = 0, gh = 0;
+    u_get_console_geometry(&gc, &gr, &gw, &gh);
+    if (gc > 0) line_cols = gc;
+
+    uint32_t qc = 0, qr = 0;
+    u_get_console_pos(&qc, &qr);
+    line_anchor_col = (int)qc;
+    line_anchor_row = (int)qr;
+    line_prompt_v = 0;
+    line_last_end_off = 0;
+
+    //Глиф курсора из config.cfg — мигает им ядро, а не Сехмет
+    u_tty_line_edit(2, cursor_char, 0);
+
+    redraw_line_with_cursor(buffer, pos, curr_idx, true);
+
     while (1)
     {
         if (!u_kbhit())
         {
+            //Ждем клавиши. НИКАКИХ перерисовок по таймеру —
+            //мигание курсора делает ядро, строка не трогается
             yield();
-            uint32_t now = get_ticks();
-            if ((uint32_t)(now - last_blink_tick) >= BLINK_TICKS)
-            {
-                last_blink_tick = now;
-                g_cursor_blink_on = !g_cursor_blink_on;
-                redraw_line_with_cursor(buffer, pos, curr_idx);
-            }
             continue;
         }
         ensure_keymap();
-
-        //любое нажатие — гасим мигание, курсор всегда горит при вводе
-        g_cursor_blink_on = true;
-        last_blink_tick = get_ticks();
 
         uint32_t ev = u_read_scancode();
         if (ev == 0)
@@ -721,9 +874,6 @@ void sekhmet_read_line(char *buffer, int max_len)
             yield();
             continue;
         }
-
-        //locale_idx = u_locale_get();
-        //if (locale_idx < 0) locale_idx = 0;
 
         uint8_t scancode = ev & 0xFF;
         uint8_t type = (ev >> 8) & 0xFF;
@@ -762,7 +912,8 @@ void sekhmet_read_line(char *buffer, int max_len)
                     {
                         curr_idx--;
                     }
-                    redraw_line_with_cursor(buffer, pos, curr_idx);
+                    //Текст не менялся — только переставляем курсор
+                    line_move_cursor(buffer, curr_idx);
                 }
                 continue;
             }
@@ -775,7 +926,7 @@ void sekhmet_read_line(char *buffer, int max_len)
                     {
                         curr_idx++;
                     }
-                    redraw_line_with_cursor(buffer, pos, curr_idx);
+                    line_move_cursor(buffer, curr_idx);
                 }
                 continue;
             }
@@ -798,7 +949,7 @@ void sekhmet_read_line(char *buffer, int max_len)
                     strcpy(buffer, cmd_history[history_browse_idx]);
                     pos = strlen(buffer);
                     curr_idx = pos;
-                    redraw_line_with_cursor(buffer, pos, curr_idx);
+                    redraw_line_with_cursor(buffer, pos, curr_idx, true);
                 }
                 continue;
             }
@@ -821,20 +972,20 @@ void sekhmet_read_line(char *buffer, int max_len)
                         pos = strlen(buffer);
                         curr_idx = pos;
                     }
-                    redraw_line_with_cursor(buffer, pos, curr_idx);
+                    redraw_line_with_cursor(buffer, pos, curr_idx, true);
                 }
                 continue;
             }
             if (scancode == 0x47)
             {
                 curr_idx = 0;
-                redraw_line_with_cursor(buffer, pos, curr_idx);
+                line_move_cursor(buffer, curr_idx);
                 continue;
             }
             if (scancode == 0x4F)
             {
                 curr_idx = pos;
-                redraw_line_with_cursor(buffer, pos, curr_idx);
+                line_move_cursor(buffer, curr_idx);
                 continue;
             }
             if (scancode == 0x53)
@@ -852,7 +1003,7 @@ void sekhmet_read_line(char *buffer, int max_len)
                     }
                     pos -= del_bytes;
                     buffer[pos] = '\0';
-                    redraw_line_with_cursor(buffer, pos, curr_idx);
+                    redraw_line_with_cursor(buffer, pos, curr_idx, false);
                 }
                 continue;
             }
@@ -862,24 +1013,26 @@ void sekhmet_read_line(char *buffer, int max_len)
         {
             buffer[pos] = '\0';
             curr_idx = pos;
-            char final_buf[512];
-            int f_pos = 0;
-            final_buf[f_pos++] = '\r';
-            final_buf[f_pos++] = '\x1B';
-            final_buf[f_pos++] = '[';
-            final_buf[f_pos++] = 'K';
 
-            char cwd_buf2[256];
-            getcwd(cwd_buf2, 255);
-            char prompt_buf[192];
-            build_prompt(prompt_buf, sizeof(prompt_buf), cwd_buf2);
-            for (int i = 0; prompt_buf[i] != '\0' && f_pos < (int)sizeof(final_buf) - 4; i++)
-                final_buf[f_pos++] = prompt_buf[i];
+            //Финальное эхо: полная отрисовка строки от якоря — гарантирует
+            //целостный текст команды независимо от того, как его правили
+            redraw_line_with_cursor(buffer, pos, curr_idx, true);
 
-            for (int i = 0; i < pos; i++) final_buf[f_pos++] = buffer[i];
-            final_buf[f_pos++] = '\n';
-            final_buf[f_pos] = '\0';
-            u_write(STDOUT, final_buf, f_pos);
+            //Перевод строки под конец текста. Если текст кончился ровно
+            //на границе экранной строки, консоль уже перенесла курсор
+            //на свежую строку — лишний перевод не нужен
+            int end_off_total = line_prompt_v + get_visible_length(buffer, pos);
+            if (!(end_off_total > 0 && line_cols > 0 &&
+                  (end_off_total % (int)line_cols) == 0))
+            {
+                char nl = '\n';
+                u_write(STDOUT, &nl, 1);
+            }
+
+            //Строка завершена: прячем мигающий курсор ядра на время вывода
+            u_tty_line_edit(0, 0, 0);
+            line_last_end_off = 0;
+
             if (pos > 0)
             {
                 strncpy(cmd_history[history_write_idx], buffer, MAX_CMD_LEN - 1);
@@ -905,14 +1058,14 @@ void sekhmet_read_line(char *buffer, int max_len)
                 pos -= del_bytes;
                 curr_idx -= del_bytes;
                 buffer[pos] = '\0';
-                redraw_line_with_cursor(buffer, pos, curr_idx);
+                redraw_line_with_cursor(buffer, pos, curr_idx, false);
             }
             continue;
         }
         if (scancode == 0x0F)
         {
             autocomplete_file(buffer, &pos, &curr_idx);
-            redraw_line_with_cursor(buffer, pos, curr_idx);
+            redraw_line_with_cursor(buffer, pos, curr_idx, false);
             continue;
         }
         if (scancode < 128)
@@ -934,7 +1087,7 @@ void sekhmet_read_line(char *buffer, int max_len)
                     curr_idx += step;
                     pos      += step;
                     buffer[pos] = '\0';
-                    redraw_line_with_cursor(buffer, pos, curr_idx);
+                    redraw_line_with_cursor(buffer, pos, curr_idx, false);
                 }
             }
         }

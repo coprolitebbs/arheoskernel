@@ -1601,6 +1601,44 @@ void systemcall_get_tty_cursor_pos(struct regs *r)
 }
 
 
+//SYS_TTY_LINE_EDIT — управление курсором редактора строки из Ring-3.
+//Ring-3 шелл (Сехмет) сам рисует строку ввода, а мигающий курсор рисует ядро.
+//ebx = 0 — спрятать курсор (строка завершена, идет вывод/выполнение команды)
+//ebx = 1 — включить: ecx = якорь строки (младшие 16 бит — колонка, старшие — строка),
+//          edx = смещение курсора от якоря в ячейках.
+//          Ядро мигает ровно в этой ячейке, переживая переносы и скролл.
+//ebx = 2 — задать глиф курсора: ecx = кодпойнт (например 0xB2 из config.cfg)
+void systemcall_tty_line_edit(struct regs *r)
+{
+    if (!current_tty)
+    {
+        r->eax = -1;
+        return;
+    }
+
+    if (r->ebx == 0)
+    {
+        current_tty->line_edit_active = false;
+    }
+    else if (r->ebx == 1)
+    {
+        current_tty->line_anchor_x = (r->ecx & 0xFFFFu) * current_tty->cell_w;
+        current_tty->line_anchor_y = (r->ecx >> 16) & 0xFFFFu;
+        current_tty->line_cursor_off = r->edx;
+        current_tty->line_edit_active = true;
+        //После каждого изменения строки курсор горит и начинает мигать заново
+        current_tty->cursor_visible = true;
+        current_tty->last_blink_tick = tick_count;
+    }
+    else if (r->ebx == 2)
+    {
+        current_tty->cursor_code = r->ecx;
+    }
+
+    r->eax = 0;
+}
+
+
 
 void systemcall_get_mount_count(struct regs *r)
 {
@@ -1708,6 +1746,7 @@ void syscalls_table_init(void)
     syscalls_table[SYS_USB_COUNT].func = &systemcall_usb_count;
     syscalls_table[SYS_USB_GET_DEV].func = &systemcall_usb_get_dev;
     syscalls_table[SYS_GET_CURSOR_POS].func = &systemcall_get_tty_cursor_pos;
+    syscalls_table[SYS_TTY_LINE_EDIT].func = &systemcall_tty_line_edit;
     syscalls_table[SYS_GET_MOUNT_COUNT].func = &systemcall_get_mount_count;
     syscalls_table[SYS_GET_MOUNT_INFO].func = &systemcall_get_mount_info;
 

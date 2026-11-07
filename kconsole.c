@@ -352,14 +352,24 @@ void kconsole_update_cursor(void)
 {
     extern volatile uint32_t tick_count;
     if (!current_tty || current_tty->foreground_pid == 0 || current_tty->line_ready) return;
+    //Мигаем только когда строку редактирует Ring-3 редактор (Сехмет и др.)
+    //и он передал нам якорь строки и позицию курсора (SYS_TTY_LINE_EDIT)
+    if (!current_tty->line_edit_active) return;
 
     if (tick_count - current_tty->last_blink_tick >= current_tty->cursor_tick_count)
     {
         current_tty->last_blink_tick = tick_count;
         current_tty->cursor_visible = !current_tty->cursor_visible;
 
-        uint32_t cx, cy;
-        kconsole_get_render_coords(current_tty->line_cursor_pos, &cx, &cy);
+        //Позиция курсора = якорь строки + смещение внутри строки.
+        //Так курсор корректно переживает перенос строки ввода на следующую
+        //экранную строку и скролл (якорь скорректирован в kconsole_scroll_up)
+        uint32_t total_chars_offset = (current_tty->line_anchor_x / current_tty->cell_w) + current_tty->line_cursor_off;
+        uint32_t cell_x = total_chars_offset % current_tty->console_cols;
+        uint32_t cell_y = current_tty->line_anchor_y + (total_chars_offset / current_tty->console_cols);
+        if (cell_y >= current_tty->console_rows) cell_y = current_tty->console_rows - 1;
+        uint32_t cx = cell_x * current_tty->cell_w;
+        uint32_t cy = cell_y * current_tty->cell_h;
 
         uint32_t old_cr3;
         __asm__ __volatile__("mov %%cr3, %0" : "=r"(old_cr3));
@@ -649,6 +659,12 @@ void kconsole_scroll_up(void)
         current_tty->input_start_y--;
     }
 
+    //Якорь редактора строки (Ring-3) тоже уезжает вверх вместе с экраном
+    if (current_tty->line_edit_active && current_tty->line_anchor_y > 0)
+    {
+        current_tty->line_anchor_y--;
+    }
+
     current_tty->cursor_y = (current_tty->console_rows - 1) * current_tty->cell_h;
 }
 
@@ -826,6 +842,10 @@ void kconsole_init(void)
         tty_terminals[t].foreground_pid = 0;
         tty_terminals[t].cursor_tick_count = MAX_CURSOR_TICK_COUNT;
         tty_terminals[t].line_cursor_pos = 0;
+        tty_terminals[t].line_edit_active = false;
+        tty_terminals[t].line_anchor_x = 0;
+        tty_terminals[t].line_anchor_y = 0;
+        tty_terminals[t].line_cursor_off = 0;
         tty_terminals[t].cursor_visible = false;
         tty_terminals[t].last_blink_tick = 0;
         tty_terminals[t].cursor_code = DEFAULT_CURSOR_CODEPOINT; // 0x2588

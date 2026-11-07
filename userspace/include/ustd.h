@@ -121,5 +121,9 @@ int      u_clipboard_set(const void *buf, uint32_t size);
 void     u_clipboard_clear(void);
 
 void u_get_console_pos(uint32_t *x, uint32_t *y);
+//Управление курсором редактора строки: cmd 0 — спрятать курсор,
+//cmd 1 — якорь (мл.16 бит колонка / ст.16 бит строка) + смещение курсора в ячейках,
+//cmd 2 — задать кодпойнт глифа курсора
+void u_tty_line_edit(uint32_t cmd, uint32_t anchor_colrow, uint32_t cursor_off);
 
 #endif

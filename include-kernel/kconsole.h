@@ -90,6 +90,15 @@ typedef struct tty
     uint32_t input_start_x;
     uint32_t input_start_y;
 
+    //Редактор строки Ring-3 (Сехмет и другие raw-шеллы).
+    //В отличие от input_start_x/y эти поля НЕ трогаются выводом текста:
+    //их задает сам редактор через SYS_TTY_LINE_EDIT, ядро только
+    //использует их для мигания курсора (kconsole_update_cursor)
+    volatile bool line_edit_active;             //Курсор строки управляется из Ring-3
+    uint32_t line_anchor_x;                     //Якорь: колонка начала строки (в ячейках)
+    uint32_t line_anchor_y;                     //Якорь: экранная строка начала строки ввода
+    volatile uint32_t line_cursor_off;          //Смещение курсора от якоря, в ячейках
+
     //Индивидуальные экранные координаты курсора для данного TTY
     uint32_t cursor_x;
     uint32_t cursor_y;

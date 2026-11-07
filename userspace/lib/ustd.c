@@ -811,8 +811,17 @@ void u_get_console_pos(uint32_t *x, uint32_t *y)
 {
     uint32_t c = 0, rr = 0;
     __asm__ __volatile__("int $0x80" : "=a"(c), "=b"(rr): "a"(SYS_GET_CURSOR_POS) : "memory");
-    if (c)   *x   = c;
-    if (rr)   *y   = rr;
+    //Пишем всегда: позиция (0,0) — валидный ответ, а не "нет данных"
+    if (x)  *x = c;
+    if (y)  *y = rr;
+}
+
+//Управление курсором редактора строки (см. systemcall_tty_line_edit в ядре):
+//cmd 0 — спрятать курсор; cmd 1 — якорь+смещение; cmd 2 — глиф курсора
+void u_tty_line_edit(uint32_t cmd, uint32_t anchor_colrow, uint32_t cursor_off)
+{
+    __asm__ __volatile__("int $0x80" : : "a"(SYS_TTY_LINE_EDIT), "b"(cmd),
+                         "c"(anchor_colrow), "d"(cursor_off) : "memory");
 }
 
 
