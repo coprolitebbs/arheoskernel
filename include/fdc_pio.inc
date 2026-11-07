@@ -1,0 +1,652 @@
+ ; Copyright (C) 2026 ARHeOS by Dmitry H
+ ;
+ ; This program is free software: you can redistribute it and/or modify
+ ; it under the terms of the GNU General Public License as published by
+ ; the Free Software Foundation, either version 3 of the License, or
+ ; (at your option) any later version.
+ ;
+ ; This program is distributed in the hope that it will be useful,
+ ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+ ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ ; GNU General Public License for more details.
+ ;
+ ; You should have received a copy of the GNU General Public License
+ ; along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+; ============================================================
+; fdc_pio.inc — поллинговый драйвер НГМД для stage2 (флоппи).
+;
+; ЗАЧЕМ: на TA-NC529 (Geode GX1 300МГц + CS5530) BIOS внутри
+; int 13h ждёт прерывание FDC (IRQ6) без таймаута и зависает
+; навсегда (раньше это выглядело как "!80" = AH=0x80 — таймаут
+; BIOS, а на других фазах зависание без возврата). Поэтому
+; stage2 больше НЕ использует int 13h: чтение сектора делает
+; этот драйвер — опрос MSR (порт 0x3F4), без DMA и без
+; зависимости от IRQ6 (на время операции IRQ6 маскируется в
+; PIC, чтобы BIOS-обработчик int 0Eh не съел результаты).
+;
+; Все ожидания ограничены программными таймаутами — драйвер
+; не может зависнуть ни при каком состоянии контроллера.
+; При ошибке печатается диагностика:
+;   'f' + код фазы  — на каждой повторной попытке;
+;   'F' + фаза + ST0 ST1 ST2 (hex) — когда попытки исчерпаны.
+; Коды фаз: 1=готовность после reset, 2=SPECIFY, 3=SENSE INT,
+; 4=RECALIBRATE, 5=SEEK, 6=команда READ, 7=фаза данных,
+; 8=фаза результатов, 9=проверка.
+; ============================================================
+
+BITS 16
+
+FDC_DOR     equ 0x3F2           ; Digital Output Register
+FDC_MSR     equ 0x3F4           ; Main Status Register
+FDC_FIFO    equ 0x3F5           ; FIFO / данные
+FDC_CCR     equ 0x3F7           ; скорость передачи (запись)
+
+MSR_RQM     equ 0x80            ; готов к обмену байтом
+MSR_DIO     equ 0x40            ; 1 = FDC -> CPU
+
+; Таймауты: единица = 65535 чтений MSR. Чтение ISA-порта
+; ~0.15-1 мкс при 100-300 МГц => единица ~ 10-60 мс.
+TMO_CMD     equ 60              ; завершение seek/recal/read ~1-4 c
+TMO_READY   equ 60              ; готовность после reset
+TMO_BYTEC   equ 16              ; байт командной/результирующей фазы
+TMO_BYTED   equ 8               ; байт фазы данных
+
+; Коды фаз для диагностики
+PH_READY    equ 1
+PH_SPECIFY  equ 2
+PH_SENSED   equ 3
+PH_RECAL    equ 4
+PH_SEEK     equ 5
+PH_READCMD  equ 6
+PH_DATA     equ 7
+PH_RESULT   equ 8
+PH_VERIFY   equ 9
+
+; --- переменные драйвера ---
+fdc_unit        db 0            ; номер устройства (drive & 3)
+fdc_motor_up    db 0            ; мотор раскручен
+fdc_calibrated  db 0            ; позиция головки известна
+fdc_cyl_cur     db 0xFF         ; текущий цилиндр (0xFF = неизвестен)
+fdc_ph          db 0            ; текущая фаза (диагностика)
+fdc_st0         db 0
+fdc_st1         db 0
+fdc_st2         db 0
+fdc_rc          db 0            ; результат: C
+fdc_rr          db 0            ; результат: R
+fdc_C           db 0            ; целевые C/H/R
+fdc_H           db 0
+fdc_R           db 0
+fdc_stmp        db 0            ; целевой цилиндр для seek
+fdc_pic         db 0            ; сохранённая маска PIC
+fdc_attempts    db 0
+fdc_inited      db 0            ; контроллер уже переведён в наш режим
+fdc_dst_seg     dw 0            ; приёмник сектора
+fdc_dst_off     dw 0
+
+; ------------------------------------------------------------
+; fdc_drv_init: вызвать один раз при старте stage2
+; ------------------------------------------------------------
+fdc_drv_init:
+        pusha
+        mov al, [cs:drive]
+        and al, 0x03
+        mov [cs:fdc_unit], al
+        popa
+        ret
+
+; ------------------------------------------------------------
+; fdc_read_lba: AX = LBA, ES:BX = приёмник. Выход: CF.
+; Все регистры сохраняются. Заменяет BIOS int 13h AH=02.
+; ------------------------------------------------------------
+fdc_read_lba:
+        pusha
+        push ds
+        push es
+
+        ; LBA -> CHS (геометрия из BPB, заполненного bpb_init)
+        xor dx, dx
+        div word [cs:spt]       ; AX = трек, DX = сектор-1
+        inc dx
+        mov [cs:fdc_R], dl
+        xor dx, dx
+        div word [cs:heads]     ; AX = цилиндр, DX = головка
+        mov [cs:fdc_H], dl
+        mov [cs:fdc_C], al
+
+        mov [cs:fdc_dst_seg], es
+        mov [cs:fdc_dst_off], bx
+
+        ; IRQ6 маскируем на время операции: прерывание нам не
+        ; нужно, а BIOS-обработчик int 0Eh не должен трогать
+        ; результаты команды
+        in  al, 0x21
+        mov [cs:fdc_pic], al
+        or  al, 0x40
+        out 0x21, al
+
+        mov byte [cs:fdc_attempts], 3
+.rl_try:
+        ; не даём BIOS выключить мотор по своему таймеру
+        push ds
+        mov ax, 0x0040
+        mov ds, ax
+        mov byte [0x0040], 0xFF     ; счётчик motor-off = макс
+        pop ds
+
+        ; первый доступ: BIOS оставил контроллер в СВОЁМ режиме
+        ; (SPECIFY c ND=0 — DMA). Наше чтение без DMA-обслуживания
+        ; в этом режиме отклоняется (ST0=0x20, без фазы данных).
+        ; Полный fdc_reset ставит НАШ SPECIFY (ND=1), CCR 500к/с
+        ; и чистое состояние — после него чтения идут без отказов.
+        cmp byte [cs:fdc_inited], 0
+        jne .rl_inited
+        call fdc_reset
+        mov byte [cs:fdc_inited], 1
+        jc .rl_retry
+.rl_inited:
+        ; мотор. fdc_reset уже включил мотор и отработал раскрутку;
+        ; здесь страхуемся: если BIOS успел выключить мотор (DOR),
+        ; включаем заново с задержкой; если крутится — не трогаем DOR
+        ; (перезапись перезапускает таймеры контроллера).
+        cmp byte [cs:fdc_motor_up], 0
+        jne .rl_motor_check
+        call fdc_dor_motor
+        mov dx, FDC_DOR
+        out dx, al
+        call fdc_spinup
+        mov byte [cs:fdc_motor_up], 1
+        jmp .rl_motor_ok
+.rl_motor_check:
+        mov dx, FDC_DOR
+        in  al, dx
+        mov cl, [cs:fdc_unit]
+        mov ch, 0x10
+        shl ch, cl
+        test al, ch
+        jnz .rl_motor_ok
+        call fdc_dor_motor
+        mov dx, FDC_DOR
+        out dx, al
+        call fdc_spinup
+.rl_motor_ok:
+        ; калибровка (если позиция головки неизвестна)
+        cmp byte [cs:fdc_calibrated], 0
+        jne .rl_cal_ok
+        call fdc_recal
+        jc .rl_retry
+.rl_cal_ok:
+        ; seek, если цилиндр не тот
+        mov al, [cs:fdc_C]
+        cmp al, [cs:fdc_cyl_cur]
+        je  .rl_seek_ok
+        mov bl, al
+        call fdc_seek
+        jc .rl_retry
+.rl_seek_ok:
+        ; само чтение
+        call fdc_read_op
+        jnc .rl_ok
+.rl_retry:
+        ; диагностика повтора: 'f' + код фазы
+        pusha
+        mov al, 'f'
+        call debug_char
+        mov al, [cs:fdc_ph]
+        add al, '0'
+        call debug_char
+        popa
+        dec byte [cs:fdc_attempts]
+        jz  .rl_final
+        call fdc_reset
+        jmp .rl_try
+.rl_ok:
+        mov al, [cs:fdc_pic]
+        out 0x21, al
+        pop es
+        pop ds
+        popa
+        clc
+        ret
+.rl_final:
+        ; финальная диагностика: 'F' + фаза + ST0 ST1 ST2 (hex)
+        call fdc_reset              ; снять хвосты, вернуть в покой
+        pusha
+        push ds
+        push es
+        mov al, 'F'
+        call debug_char
+        mov al, [cs:fdc_ph]
+        add al, '0'
+        call debug_char
+        mov al, ' '
+        call debug_char
+        mov al, [cs:fdc_st0]
+        call screen_hex_byte
+        mov al, [cs:fdc_st1]
+        call screen_hex_byte
+        mov al, [cs:fdc_st2]
+        call screen_hex_byte
+        mov al, ' '
+        call debug_char
+        pop es
+        pop ds
+        popa
+        mov al, [cs:fdc_pic]
+        out 0x21, al
+        pop es
+        pop ds
+        popa
+        stc
+        ret
+
+; ------------------------------------------------------------
+; fdc_reset: полный сброс контроллера + SPECIFY + drain SENSE
+; INTERRUPT + 500 кбит/с. CF=0 при успехе.
+; ------------------------------------------------------------
+fdc_reset:
+        push ax
+        push bx
+        push cx
+        push dx
+        mov byte [cs:fdc_calibrated], 0
+        mov byte [cs:fdc_cyl_cur], 0xFF
+        mov byte [cs:fdc_motor_up], 0
+        mov byte [cs:fdc_inited], 1
+
+        ; RESET=0, мотор выключен
+        mov al, [cs:fdc_unit]
+        or  al, 0x08
+        mov dx, FDC_DOR
+        out dx, al
+        call fdc_delay_2ms
+
+        ; RESET=1 + мотор юнита
+        call fdc_dor_motor
+        mov dx, FDC_DOR
+        out dx, al
+        call fdc_spinup
+        mov byte [cs:fdc_motor_up], 1
+
+        ; готовность: RQM=1, DIO=0, CB=0
+        mov byte [cs:fdc_ph], PH_READY
+        mov al, 0x80
+        mov ah, 0xD0
+        mov cx, TMO_READY
+        call fdc_wait_msr
+        jc .rs_fail
+
+        ; SPECIFY: SRT=6мс, HUT=240мс, HLT=20мс, ND=1 (без DMA)
+        mov byte [cs:fdc_ph], PH_SPECIFY
+        mov bl, 0x03
+        call fdc_out
+        jc .rs_fail
+        mov bl, 0xCF
+        call fdc_out
+        jc .rs_fail
+        mov bl, 0x15
+        call fdc_out
+        jc .rs_fail
+
+        ; скорость 500 кбит/с MFM (после сброса чип даёт 250)
+        mov dx, FDC_CCR
+        xor al, al
+        out dx, al
+
+        ; осушить очередь SENSE INTERRUPT (после reset)
+        mov byte [cs:fdc_ph], PH_SENSED
+        mov cx, 4
+.rs_drain:
+        push cx
+        call fdc_sense_int
+        pop cx
+        jc .rs_fail
+        mov al, [cs:fdc_st0]
+        mov ah, al
+        and ah, 0xC0
+        cmp ah, 0x80            ; INVALID = очередь пуста
+        je  .rs_done
+        loop .rs_drain
+.rs_done:
+        clc
+        jmp .rs_ret
+.rs_fail:
+        stc
+.rs_ret:
+        pop dx
+        pop cx
+        pop bx
+        pop ax
+        ret
+
+; ------------------------------------------------------------
+; fdc_recal: RECALIBRATE (головка на цилиндр 0). CF=0 при успехе.
+; ------------------------------------------------------------
+fdc_recal:
+        push bx
+        mov byte [cs:fdc_ph], PH_RECAL
+        mov bl, 0x07
+        call fdc_out
+        jc .rc_fail
+        mov bl, [cs:fdc_unit]
+        call fdc_out
+        jc .rc_fail
+        ; ждать завершения команды (RQM=1, DIO=0, CB=0)
+        mov al, 0x80
+        mov ah, 0xD0
+        mov cx, TMO_CMD
+        call fdc_wait_msr
+        jc .rc_fail
+        call fdc_sense_int
+        jc .rc_fail
+        mov al, [cs:fdc_st0]
+        test al, 0xC0
+        jnz .rc_fail            ; IC != 00
+        test al, 0x10
+        jnz .rc_fail            ; equipment check
+        test al, 0x20
+        jz  .rc_fail            ; нет признака seek-end
+        test bh, bh
+        jnz .rc_fail            ; PCN != 0
+        mov byte [cs:fdc_cyl_cur], 0
+        mov byte [cs:fdc_calibrated], 1
+        clc
+        jmp .rc_ret
+.rc_fail:
+        stc
+.rc_ret:
+        pop bx
+        ret
+
+; ------------------------------------------------------------
+; fdc_seek: BL = целевой цилиндр. CF=0 при успехе.
+; ------------------------------------------------------------
+fdc_seek:
+        push bx
+        mov byte [cs:fdc_ph], PH_SEEK
+        mov al, bl
+        mov [cs:fdc_stmp], al
+        mov bl, 0x0F
+        call fdc_out
+        jc .sk_fail
+        mov bl, [cs:fdc_H]
+        shl bl, 2
+        or  bl, [cs:fdc_unit]
+        call fdc_out
+        jc .sk_fail
+        mov bl, [cs:fdc_stmp]
+        call fdc_out
+        jc .sk_fail
+        mov al, 0x80
+        mov ah, 0xD0
+        mov cx, TMO_CMD
+        call fdc_wait_msr
+        jc .sk_fail
+        call fdc_sense_int
+        jc .sk_fail
+        mov al, [cs:fdc_st0]
+        test al, 0xC0
+        jnz .sk_fail
+        test al, 0x10
+        jnz .sk_fail
+        test al, 0x20
+        jz  .sk_fail
+        mov al, [cs:fdc_stmp]
+        cmp bh, al
+        jne .sk_fail            ; PCN != цель
+        call fdc_settle
+        mov al, [cs:fdc_stmp]
+        mov [cs:fdc_cyl_cur], al
+        clc
+        jmp .sk_ret
+.sk_fail:
+        stc
+.sk_ret:
+        pop bx
+        ret
+
+; ------------------------------------------------------------
+; fdc_read_op: READ DATA сектора fdc_C/H/R в приёмник.
+; CF=0 при успехе.
+; ------------------------------------------------------------
+fdc_read_op:
+        mov byte [cs:fdc_ph], PH_READCMD
+        mov bl, 0x46            ; READ DATA: MFM=1, MT=0, SK=0
+        call fdc_out
+        jc .ro_fail
+        mov bl, [cs:fdc_H]
+        shl bl, 2
+        or  bl, [cs:fdc_unit]
+        call fdc_out
+        jc .ro_fail
+        mov bl, [cs:fdc_C]
+        call fdc_out
+        jc .ro_fail
+        mov bl, [cs:fdc_H]
+        call fdc_out
+        jc .ro_fail
+        mov bl, [cs:fdc_R]
+        call fdc_out
+        jc .ro_fail
+        mov bl, 0x02            ; N=2: сектор 512 байт (9-байтовая
+        call fdc_out            ; команда READ DATA по 82077!)
+        jc .ro_fail
+        mov bl, [cs:fdc_R]      ; EOT = R: ровно один сектор
+        call fdc_out
+        jc .ro_fail
+        mov bl, 0x1B            ; GPL
+        call fdc_out
+        jc .ro_fail
+        mov bl, 0xFF            ; DTL
+        call fdc_out
+        jc .ro_fail
+
+        ; фаза данных: 512 байт прямо в приёмник (без DMA)
+        mov byte [cs:fdc_ph], PH_DATA
+        mov es, [cs:fdc_dst_seg]
+        mov di, [cs:fdc_dst_off]
+        mov cx, 512
+.ro_data:
+        push cx
+        mov al, 0xC0
+        mov ah, 0xC0
+        mov cx, TMO_BYTED
+        call fdc_wait_msr
+        pop cx
+        jc .ro_fail
+        mov dx, FDC_FIFO
+        in  al, dx
+        mov [es:di], al
+        inc di
+        loop .ro_data
+
+        ; фаза результатов: ровно 7 байт ST0 ST1 ST2 C H R N
+        mov byte [cs:fdc_ph], PH_RESULT
+        call fdc_in
+        jc .ro_fail
+        mov [cs:fdc_st0], bl
+        call fdc_in
+        jc .ro_fail
+        mov [cs:fdc_st1], bl
+        call fdc_in
+        jc .ro_fail
+        mov [cs:fdc_st2], bl
+        call fdc_in
+        jc .ro_fail
+        mov [cs:fdc_rc], bl     ; C
+        call fdc_in
+        jc .ro_fail             ; H — не нужен
+        call fdc_in
+        jc .ro_fail
+        mov [cs:fdc_rr], bl     ; R
+        call fdc_in
+        jc .ro_fail             ; N — не нужен
+
+        ; проверка результатов
+        mov byte [cs:fdc_ph], PH_VERIFY
+        mov al, [cs:fdc_st0]
+        test al, 0xC0
+        jnz .ro_fail            ; IC != 00 (нормальное завершение)
+        cmp byte [cs:fdc_st1], 0
+        jne .ro_fail
+        cmp byte [cs:fdc_st2], 0
+        jne .ro_fail
+        mov al, [cs:fdc_rc]
+        cmp al, [cs:fdc_C]
+        jne .ro_fail            ; головка не там
+        mov al, [cs:fdc_rr]
+        cmp al, [cs:fdc_R]
+        jne .ro_fail
+        mov al, [cs:fdc_C]
+        mov [cs:fdc_cyl_cur], al
+        clc
+        ret
+.ro_fail:
+        stc
+        ret
+
+; ------------------------------------------------------------
+; fdc_wait_msr: ждать, пока (MSR & AH) == AL.
+; CX = таймаут в единицах. CF=0: успех (raw MSR в BL),
+; CF=1: таймаут.
+; ------------------------------------------------------------
+fdc_wait_msr:
+        push di
+        push si
+        mov dx, FDC_MSR
+        mov si, cx              ; ВАЖНО: таймаут сначала (целый CX),
+        mov ch, al              ; и только потом ожидаемое значение в
+                                ; CH — иначе SI получит (expect<<8)|tmo
+.wm_outer:
+        mov di, 0xFFFF
+.wm_inner:
+        in  al, dx
+        mov bl, al
+        and al, ah
+        cmp al, ch
+        je  .wm_ok
+        dec di
+        jnz .wm_inner
+        dec si
+        jnz .wm_outer
+        stc
+        jmp .wm_ret
+.wm_ok:
+        clc
+.wm_ret:
+        pop si
+        pop di
+        ret
+
+; ------------------------------------------------------------
+; fdc_out: отправить байт BL в FIFO (ждёт RQM=1, DIO=0)
+; ------------------------------------------------------------
+fdc_out:
+        push bx
+        mov bh, bl
+        mov al, 0x80
+        mov ah, 0xC0
+        mov cx, TMO_BYTEC
+        call fdc_wait_msr
+        jc .ou_ret
+        mov al, bh
+        mov dx, FDC_FIFO
+        out dx, al
+.ou_ret:
+        pop bx
+        ret
+
+; ------------------------------------------------------------
+; fdc_in: принять байт из FIFO в BL (ждёт RQM=1, DIO=1)
+; ------------------------------------------------------------
+fdc_in:
+        push cx
+        mov al, 0xC0
+        mov ah, 0xC0
+        mov cx, TMO_BYTEC
+        call fdc_wait_msr
+        jc .in_ret
+        mov dx, FDC_FIFO
+        in  al, dx
+        mov bl, al
+.in_ret:
+        pop cx
+        ret
+
+; ------------------------------------------------------------
+; fdc_sense_int: SENSE INTERRUPT STATUS.
+; Выход: BL = ST0, BH = PCN. CF=1 при таймауте.
+; ------------------------------------------------------------
+fdc_sense_int:
+        push cx
+        mov bl, 0x08
+        call fdc_out
+        jc .sn_ret
+        call fdc_in
+        jc .sn_ret
+        mov al, bl
+        mov [cs:fdc_st0], al
+        call fdc_in
+        jc .sn_ret
+        mov bh, bl              ; PCN
+        mov bl, [cs:fdc_st0]    ; ST0
+.sn_ret:
+        pop cx
+        ret
+
+; ------------------------------------------------------------
+; fdc_dor_motor: AL = значение DOR (unit, RESET=1, IRQ/DMA=1,
+; мотор юнита).
+; ------------------------------------------------------------
+fdc_dor_motor:
+        push cx
+        mov al, [cs:fdc_unit]
+        or  al, 0x0C
+        mov cl, [cs:fdc_unit]
+        mov ch, 0x10
+        shl ch, cl
+        or  al, ch
+        pop cx
+        ret
+
+; ------------------------------------------------------------
+; Программные задержки (без опоры на прерывания/таймер BIOS).
+; ------------------------------------------------------------
+fdc_delay_2ms:                  ; ~2-3 мс @100МГц
+        push ax
+        push dx
+        mov dx, 2
+.d2a:   mov ax, 0xFFFF
+.d2b:   dec ax
+        jnz .d2b
+        dec dx
+        jnz .d2a
+        pop dx
+        pop ax
+        ret
+
+fdc_spinup:                     ; ~2.5 c @100МГц / ~0.9 c @300МГц
+        push ax
+        push dx
+        mov dx, 2000
+.spa:   mov ax, 0xFFFF
+.spb:   dec ax
+        jnz .spb
+        dec dx
+        jnz .spa
+        pop dx
+        pop ax
+        ret
+
+fdc_settle:                     ; ~25-30 мс @100МГц: установление
+        push ax                 ; головки после seek
+        push dx
+        mov dx, 20
+.sta:   mov ax, 0xFFFF
+.stb:   dec ax
+        jnz .stb
+        dec dx
+        jnz .sta
+        pop dx
+        pop ax
+        ret

@@ -18,53 +18,6 @@
 KERNEL_SEG   equ 0x2000
 INDIRECT_SEG equ 0x1800
 
-;Ожидание AX тиков BIOS (ячейка 0x0040:0x006C, ~18.2 Гц, ~55 мс на тик).
-;Время НЕ зависит от частоты процессора, в отличие от пустых циклов
-;(на Geode GX1 300 МГц они втрое короче, чем на 100 МГц).
-;Требует включённых прерываний (sti), все регистры сохраняет
-wait_ticks:
-    push ax
-    push bx
-    push cx
-    push ds
-    mov cx, ax          ;сколько тиков ждать
-    mov bx, 0x0040
-    mov ds, bx
-    mov bx, [0x006C]    ;стартовый тик
-.wt_loop:
-    mov ax, [0x006C]
-    sub ax, bx          ;Word-арифметика: перенос через 0xFFFF не страшен
-    cmp ax, cx
-    jb .wt_loop
-    pop ds
-    pop cx
-    pop bx
-    pop ax
-    ret
-
-;Жёсткий сброс FDC через DOR:/assert RESET#, снять, включить мотор,
-;затем штатный BIOS-сброс. Вылечивает залипшие состояния контроллера
-;(CS5530 и иные чипсеты) после таймаутов AH=0x80, когда обычный
-;int 13h AH=00 уже не помогает. Все регистры сохраняет
-fdc_hard_reset:
-    push ax
-    push dx
-    mov dx, 0x3F2
-    mov al, 0x08            ;RESET#=0: контроллер в сбросе, моторы выкл, drive 0
-    out dx, al
-    mov ax, 1
-    call wait_ticks         ;контроллеру нужно ≥ несколько мкс — даём тик с запасом
-    mov al, 0x1C            ;снять сброс, drive 0, DMA+IRQ разрешены, мотор0
-    out dx, al
-    mov ax, 6
-    call wait_ticks         ;~330 мс на повторную раскрутку мотора
-    mov ah, 0x00
-    mov dl, [cs:drive]
-    int 0x13
-    pop dx
-    pop ax
-    ret
-
 ;--- вставить вместо существующего disk_read_sectors ---
 disk_read_sectors:
     push bx
@@ -90,121 +43,11 @@ disk_read_sectors:
 
 
 disk_read_sector:
-    push ax
-    push bx
-    push cx
-    push dx
-    push si
-    push di
-    push es
-    push ds
-    push bp
-    mov bp, sp
-
-    ; Сохранить destination (ES:BX), куда потом копировать
-    mov [cs:fdc_dest_es], es
-    mov [cs:fdc_dest_bx], bx
-    ; LBA сохраняем: CHS пересчитывается заново на КАЖДОЙ попытке
-    ; (int 13h портит CX/DX, а после сбросов полагаться на них нельзя)
-    mov [cs:fdc_lba], ax
-
-    ;До 5 попыток: 3 обычных + 2 после жёсткого сброса FDC через DOR.
-    ;Одиночная попытка на реальном FDC ненадёжна: разовый AH=0x80
-    ;("привод не отвечает") при живом диске — норма для части BIOS/чипсетов
-    mov si, 5
-.try:
-    ; LBA -> CHS
-    mov ax, [cs:fdc_lba]
-    xor dx, dx
-    div word [cs:spt]
-    inc dx
-    mov cl, dl
-    xor dx, dx
-    div word [cs:heads]
-    mov ch, al
-    mov dh, dl
-    mov al, ah
-    and al, 0x03
-    shl al, 6
-    or cl, al
-
-    ; Читаем всегда в 0x0000:0x1000 — фиксированный bounce,
-    ; в первом 64KB, никакой границы не пересекает
-    xor ax, ax
-    mov es, ax
-    mov bx, 0x1000
-    mov dl, [cs:drive]
-    mov ah, 0x02
-    mov al, 1
-    int 0x13
-    jnc .copy
-
-    ;--- неудача: диагностика '!'+код AH+' ' и лестница восстановления ---
-    pusha
-    mov al, '!'
-    call debug_char
-    mov al, ah
-    call screen_hex_byte
-    mov al, ' '
-    call debug_char
-    popa
-
-    dec si
-    jz .fail
-
-    cmp si, 2
-    ja .soft_reset
-
-    ;Последние 2 попытки: жёсткий сброс контроллера через DOR
-    call fdc_hard_reset
-    jmp .try
-
-.soft_reset:
-    ;Пауза ~55 мс (мотор/механика) + штатный BIOS-сброс диска
-    mov ax, 1
-    call wait_ticks
-    mov ah, 0x00
-    mov dl, [cs:drive]
-    int 0x13
-    jmp .try
-
-.copy:
-    ; Копируем 512 байт из 0x1000 в ES:BX
-    xor ax, ax
-    mov ds, ax
-    mov si, 0x1000
-    mov ax, [cs:fdc_dest_es]
-    mov es, ax
-    mov di, [cs:fdc_dest_bx]
-    mov cx, 256
-    cld
-    rep movsw
-
-    mov sp, bp
-    pop bp
-    pop ds
-    pop es
-    pop di
-    pop si
-    pop dx
-    pop cx
-    pop bx
-    pop ax
-    clc
-    ret
-.fail:
-    mov sp, bp
-    pop bp
-    pop ds
-    pop es
-    pop di
-    pop si
-    pop dx
-    pop cx
-    pop bx
-    pop ax
-    stc
-    ret
+    ;AX = LBA, ES:BX = приёмник, все регистры сохраняются, CF = ошибка.
+    ;Реализация — поллинговый FDC-драйвер (fdc_pio.inc): BIOS int 13h
+    ;на TA-NC529/CS5530 внутри себя ждёт IRQ6 без таймаута и зависает.
+    ;Поллинг пишет данные прямо в ES:BX, bounce-буфер не нужен.
+    jmp fdc_read_lba
 
 
 
@@ -751,6 +594,3 @@ load_cluster dw 0
 ;kernel_size    dd 0
 current_file_size dd 0
 kernel_load_offset dd 0
-fdc_dest_es     dw 0
-fdc_dest_bx     dw 0
-fdc_lba         dw 0

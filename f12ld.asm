@@ -31,17 +31,10 @@ start:
 
     mov [cs:drive], dl
 
-    ;Свежее состояние контроллера перед первой работой stage2: BIOS-сброс
-    ;+ пауза на мотор по тикам BIOS. Stage1 до этого трогал DOR (0x3F2)
-    ;напрямую, а на реальном FDC (в отличие от USB-FDD и эмуляторов)
-    ;контроллер может оказаться в не самом чистом состоянии
-    mov ah, 0x00
-    mov dl, [cs:drive]
-    int 0x13
-    mov ax, 5
-    call wait_ticks
-
-    ;call fdc_init
+    ;Инициализация поллингового FDC-драйвера (include/fdc_pio.inc).
+    ;BIOS int 13h на TA-NC529/CS5530 зависает в ожидании IRQ6,
+    ;поэтому все чтения stage2 идёт мимо BIOS.
+    call fdc_drv_init
 
     ;pusha
     ;mov al, 'T'
@@ -366,31 +359,15 @@ bpb_init:
     call debug_char
     popa
 
-    ; === Boot sector via BIOS int 13h ===
-    ; BIOS уже работал с этой дискетой в stage1, но на реальном FDC разовый
-    ; таймаут — норма, поэтому до 3 попыток с паузой и сбросом между ними.
-    mov si, 3               ;счётчик попыток
-.bb_try:
+    ; === Boot sector: свой FDC-драйвер вместо BIOS int 13h ===
+    ; BIOS TA-NC529/CS5530 внутри int 13h ждёт IRQ6 без таймаута
+    ; и зависает навсегда. disk_read_sector теперь поллинговый.
     xor ax, ax
     mov es, ax
     mov bx, 0x0600
-    mov dl, [cs:drive]
-    mov dh, 0               ; head 0
-    mov ch, 0               ; cyl 0
-    mov cl, 1               ; sector 1
-    mov ah, 0x02
-    mov al, 1
-    int 0x13
-    jnc .bb_ok
-    dec si
-    jz .fail
-    mov ax, 1               ;пауза ~55 мс + BIOS-сброс + повтор
-    call wait_ticks
-    mov ah, 0x00
-    mov dl, [cs:drive]
-    int 0x13
-    jmp .bb_try
-.bb_ok:
+    xor ax, ax              ; LBA 0
+    call disk_read_sector
+    jc .fail
 
     mov si, 0x0600
     mov ax, [cs:si+11]
@@ -579,6 +556,7 @@ msg_delimiter   db " : ", 0
 
 %include "include/bootinfo_builder.inc"
 %include "include/debug.inc"
+%include "include/fdc_pio.inc"
 %include "include/fat12_stage2.inc"
 %include "include/vbe.inc"
 %include "include/a20.inc"
