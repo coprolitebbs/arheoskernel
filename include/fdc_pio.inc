@@ -556,6 +556,53 @@ fdc_reset:
         ret
 
 ; ------------------------------------------------------------
+; fdc_wait_seek_done: дождаться завершения RECALIBRATE/SEEK.
+;
+; ПОЧЕМУ ТАК: SEEK/RECALIBRATE — команды БЕЗ фазы результата;
+; сразу после приёма байт интерфейс возвращается в покой, и
+; MSR = 0x8n (RQM=1 + бит busy юнита n, бит 0-3). Старый код
+; ждал (MSR & 0xD0)==0x80 — это условие истинно УЖЕ ВО ВРЕМЯ
+; движения головы, после чего ОДИН SENSE INTERRUPT возвращал
+; INVALID (ST0=0x80, без PCN): прерывание seek-end ещё не
+; наступило. На реальном CS5530 recal РЕАЛЬНО двигает голову
+; (stage1/BIOS оставляют её на цилиндрах 1-13+, шаг ~6мс —
+; до сотен мс), поэтому ВСЕ PIO-попытки падали как
+; 'f4' + 'F4 800000 M81' (ph=RECAL, ST0=0x80 INVALID,
+; MSR=0x81 = RQM|DR0busy). QEMU/86Box завершают recal/seek
+; мгновенно, поэтому ошибка воспроизводилась только на железе.
+;
+; РЕШЕНИЕ (стандартное для поллингового драйвера): опрашивать
+; SENSE INTERRUPT в цикле, пока он не вернёт ВАЛИДНЫЙ ST0
+; (INVALID = recal/seek ещё выполняется; команда безопасна в
+; любой момент и состояние контроллера не меняет).
+; Выход: CF=0 — валидный ST0 (BL=ST0, BH=PCN, как у sense_int);
+; CF=1 — таймаут (голова не пришла за TMO_CMD опросов).
+; ------------------------------------------------------------
+fdc_wait_seek_done:
+        push cx
+        mov cx, TMO_CMD
+.wsd_poll:
+        push cx
+        call fdc_sense_int
+        pop cx
+        jc .wsd_fail
+        mov al, [cs:fdc_st0]
+        mov ah, al
+        and ah, 0xC0
+        cmp ah, 0x80            ; INVALID = recal/seek ещё идёт
+        je .wsd_again
+        clc                     ; валидный ST0: BL/BH уже от sense_int
+        jmp .wsd_ret
+.wsd_again:
+        FDC_IOWAIT              ; пауза между опросами
+        loop .wsd_poll
+.wsd_fail:
+        stc
+.wsd_ret:
+        pop cx
+        ret
+
+; ------------------------------------------------------------
 ; fdc_recal: RECALIBRATE (головка на цилиндр 0). CF=0 при успехе.
 ; ------------------------------------------------------------
 fdc_recal:
@@ -567,13 +614,10 @@ fdc_recal:
         mov bl, [cs:fdc_unit]
         call fdc_out
         jc .rc_fail
-        ; ждать завершения команды (RQM=1, DIO=0, CB=0)
-        mov al, 0x80
-        mov ah, 0xD0
-        mov cx, TMO_CMD
-        call fdc_wait_msr
-        jc .rc_fail
-        call fdc_sense_int
+        ; ждать ЗАВЕРШЕНИЯ recal (опрос SENSE INTERRUPT до валидного
+        ; ST0 — см. fdc_wait_seek_done; старое (MSR&0xD0)==0x80
+        ; выполнялось мгновенно и ловило recal посередине движения)
+        call fdc_wait_seek_done
         jc .rc_fail
         mov al, [cs:fdc_st0]
         test al, 0xC0
@@ -613,12 +657,9 @@ fdc_seek:
         mov bl, [cs:fdc_stmp]
         call fdc_out
         jc .sk_fail
-        mov al, 0x80
-        mov ah, 0xD0
-        mov cx, TMO_CMD
-        call fdc_wait_msr
-        jc .sk_fail
-        call fdc_sense_int
+        ; ждать ЗАВЕРШЕНИЯ seek (опрос SENSE INTERRUPT до валидного
+        ; ST0 — та же проблема, что у recal: см. fdc_wait_seek_done)
+        call fdc_wait_seek_done
         jc .sk_fail
         mov al, [cs:fdc_st0]
         test al, 0xC0
