@@ -52,6 +52,24 @@ FDC_MSR     equ 0x3F4           ; Main Status Register
 FDC_FIFO    equ 0x3F5           ; FIFO / данные
 FDC_CCR     equ 0x3F7           ; скорость передачи (запись)
 
+; ============================================================
+; FDC_IOWAIT — задержка восстановления шины I/O (~1-2 мкс).
+; ПОЧЕМУ НУЖНА: на реальном железе (Geode GX1 300МГц + CS5530)
+; чтение MSR СРАЗУ после записи в FIFO возвращает СТАРОЕ
+; значение RQM (чип ещё не успел сбросить бит) — драйвер считал
+; порт готовым и писал следующий байт, который FDC молча
+; терял. RECALIBRATE (2 байта) после этого вечно ждал второй:
+; в логе 'f4 81' / 'F4 800000 M81' (MSR застрял на 0x81 —
+; командная фаза, ждёт байт). На QEMU/86Box циклы I/O
+; синхронны, поэтому там ошибки не было.
+; Запись в порт 0x80 (POST) безвредна и занимает полный цикл
+; ISA-шины на классических чипсетах.
+; ============================================================
+%macro FDC_IOWAIT 0
+    out 0x80, al
+    out 0x80, al
+%endmacro
+
 MSR_RQM     equ 0x80            ; готов к обмену байтом
 MSR_DIO     equ 0x40            ; 1 = FDC -> CPU
 
@@ -417,12 +435,14 @@ fdc_reset:
         or  al, 0x08
         mov dx, FDC_DOR
         out dx, al
+        FDC_IOWAIT
         call fdc_delay_2ms
 
         ; RESET=1 + мотор юнита
         call fdc_dor_motor
         mov dx, FDC_DOR
         out dx, al
+        FDC_IOWAIT
         call fdc_spinup
         mov byte [cs:fdc_motor_up], 1
 
@@ -458,6 +478,7 @@ fdc_reset:
         mov dx, FDC_CCR
         mov al, [cs:fdc_ccr]
         out dx, al
+        FDC_IOWAIT
 .rs_noccr:
 
         ; осушить очередь SENSE INTERRUPT (после reset)
@@ -623,6 +644,7 @@ fdc_read_op:
         jc .ro_fail
         mov dx, FDC_FIFO
         in  al, dx
+        FDC_IOWAIT             ; следующий байт данных: RQM обновится с задержкой
         mov [es:di], al
         inc di
         loop .ro_data
@@ -720,6 +742,7 @@ fdc_out:
         mov al, bh
         mov dx, FDC_FIFO
         out dx, al
+        FDC_IOWAIT             ; байт принят: RQM обновится не мгновенно
 .ou_ret:
         pop bx
         ret
@@ -736,6 +759,7 @@ fdc_in:
         jc .in_ret
         mov dx, FDC_FIFO
         in  al, dx
+        FDC_IOWAIT             ; байт прочитан: дать чипу снять RQM
         mov bl, al
 .in_ret:
         pop cx
@@ -776,6 +800,7 @@ fdc_sense_int:
         jc  .sn_got
         mov dx, FDC_FIFO
         in  al, dx
+        FDC_IOWAIT             ; PCN: байт вычитан, дать чипу уйти в покой
         mov bh, al              ; PCN
 .sn_got:
         mov bl, [cs:fdc_st0]    ; BL = ST0 (контракт функции)

@@ -31,6 +31,31 @@ start:
 
     mov [cs:drive], dl
 
+    ; ============================================================
+    ; ПРОВЕРКА ЦЕЛОСТНОСТИ: stage2 занимает 63 сектора (32256 байт)
+    ; и обязан быть загружен ЦЕЛИКОМ (boot-сектор грузит 63 сектора
+    ; в 0x7E00). Старые boot-секторы грузили только 16 секторов
+    ; (8 КБ): всё выше 0x9E00 оставалось нулями, и выполнение
+    ; после первых 8 КБ проваливалось в нули — «вис» после
+    ; загрузки драйверов (после маркера '01234', на входе в
+    ; e820_detect). Здесь ловим это сразу: маркер в КОНЦЕ образа.
+    ; ============================================================
+    mov si, stage2_end_marker
+    mov di, .mkref
+    mov cx, 6
+    cld
+.mk_loop:
+    cmpsb
+    jne .truncated
+    loop .mk_loop
+    jmp .mk_cont
+.truncated:
+    mov si, msg_truncated
+    call print_string
+    jmp halt
+.mk_cont:
+.mkref db "S2*63*"          ; эталон маркера, 6 байт
+
     ;Инициализация поллингового FDC-драйвера (include/fdc_pio.inc).
     ;BIOS int 13h на TA-NC529/CS5530 зависает в ожидании IRQ6,
     ;поэтому все чтения stage2 идёт мимо BIOS.
@@ -597,6 +622,7 @@ data_start  dw 0
 ;Сообщения отладки
 msg_not_found   db "KERNEL not found", 0
 msg_error       db "Disk error", 0
+msg_truncated   db "S2 TRUNC (old boot sector: 16 of 63 sectors!)", 0
 msg_found_name  db "Found: ", 0
 msg_kcp         db "Kernel copied", 0
 msg_bpb         db "BPB: ", 0
@@ -619,5 +645,10 @@ msg_delimiter   db " : ", 0
 %if ($-$$) > 32256
     %error "Ошибка! OSDev: Код hddld.asm превысил лимит 63 секторов!"
 %endif
+
+;Маркер целостности в КОНЦЕ образа (за пределами первых 8 КБ —
+;старые boot-секторы грузили только 16 секторов, и маркер не
+;попадал в память, что и ловит проверка на старте)
+stage2_end_marker db "S2*63*", 0
 
 times 32256-($-$$) db 0
