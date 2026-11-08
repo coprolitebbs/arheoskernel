@@ -165,12 +165,16 @@ found:
     add ax, 21              ; data_start = 1 + 2*3 + 14
     mov [sector], ax
 
-    ; ---- Загрузка F12.LD (16 секторов = 8192 байт) в 0x7E00 ----
+    ; ---- Загрузка F12.LD (63 сектора = 32256 байт) в 0x7E00 ----
+    ; stage2 паддится до 32256 байт (times 32256-($-$$) в f12ld.asm):
+    ; грузить 16 секторов нельзя — функции за границей 8 КБ (e820_detect
+    ; и далее) останутся незагруженными, выполнение провалится в нули.
+    ; boot_hdd.asm грузит 63, дискетные stage1 должны так же.
     xor ax, ax
     mov es, ax
     mov bx, 0x7E00
     mov ax, [sector]
-    mov cx, 16
+    mov cx, 63
     call disk_read_sectors
     jc disk_error
     DEBUG 'L'

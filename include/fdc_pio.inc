@@ -317,19 +317,80 @@ fdc_bios_read:
         push cx
         push dx
         push es
-        mov cl, [cs:fdc_R]          ; сектор (1-based)
+        push di
+        push si
+        push ds
+        ; Не даём BIOS погасить мотор по своему таймеру: после
+        ; PIO-неудачи все чтения идут через int 13h, серия может
+        ; длиться дольше стандартных 2 с мотора. Без этого BIOS
+        ; в середине загрузки гасит мотор и ближайшее чтение
+        ; возвращается ошибку (на Geode падало чтение корня).
+        push ds
+        mov ax, 0x0040
+        mov ds, ax
+        mov byte [0x0040], 0xFF     ; счётчик motor-off = макс
+        pop ds
+        mov cl, [cs:fdc_R]          ; сектор (1-based), биты 0-5 CL
         mov al, [cs:fdc_C]
         mov ch, al                  ; младшие 8 бит цилиндра
-        shr al, 2
-        and al, 3
-        shl al, 6
-        or  cl, al                  ; старшие 2 бита цилиндра -> биты 6-7 CL
-        mov dh, [cs:fdc_H]
-        mov dl, [cs:drive]
+        ; Старшие биты цилиндра (CL бит 6-7): fdc_C — БАЙТ, у НГМД
+        ; цилиндр <= 79, поэтому биты 8-9 всегда нулевые и в CL ничего
+        ; до-упаковывать НЕ нужно. Раньше здесь стояло
+        ; "shr al,2/and al,3/shl al,6/or cl,al" — это тащило в CL
+        ; биты 2-3 цилиндра (скопировано из disk.inc, где AL берётся
+        ; из AH после 16-битного div). Для C>=4 CL получал мусор,
+        ; BIOS возвращал AH=01 (invalid parameter) — из-за этого
+        ; BIOS-fallback падал ровно на первой загрузке драйвера
+        ; ('e' после BWXY на 86box/Geode), а FAT/корень (C0..C1)
+        ; читались нормально.
         mov ax, 0x0201              ; AH=02 read, AL=1 сектор
+
+        ; ГРАНИЦА 64К ДЛЯ DMA: BIOS читает дискету через контроллер
+        ; DMA, который не умеет пересекать 64К-границу. SeaBIOS (и
+        ; реальные BIOS) в этом случае возвращают AH=09. Приёмник
+        ; двигается по ES:BX вместе с кластерами, поэтому рано или
+        ; поздно ES:BX+511 пересекает границу. Если так — читаем в
+        ; bounce-буфер 0000:7C00 (труп stage1, больше никем не
+        ; используется) и копируем на место.
+        ; ВНИМАНИЕ: проверка портит DX, поэтому DH/DL (головка/диск)
+        ; выставляются в каждой ветке ПОСЛЕ неё, заново.
+        mov di, es
+        mov dx, di
+        shl dx, 4                   ; DX = (ES*16) & 0xFFFF (= addr mod 64К)
+        add dx, bx                  ; + смещение приёмника
+        add dx, 0x1FF               ; + последний байт сектора
+        jc  .br_bounce              ; перенос через 0x10000 = пересечение
         mov es, [cs:fdc_dst_seg]
         mov bx, [cs:fdc_dst_off]
+        mov dh, [cs:fdc_H]
+        mov dl, [cs:drive]
         int 0x13
+        jmp .br_ret
+.br_bounce:
+        ; чтение в bounce 0000:7C00 (труп stage1), затем копия на место
+        xor ax, ax
+        mov es, ax
+        mov bx, 0x7C00
+        mov ax, 0x0201
+        mov dh, [cs:fdc_H]
+        mov dl, [cs:drive]
+        int 0x13
+        jc .br_ret
+        push ds
+        xor ax, ax
+        mov ds, ax
+        mov si, 0x7C00
+        mov es, [cs:fdc_dst_seg]
+        mov di, [cs:fdc_dst_off]
+        mov cx, 256
+        cld
+        rep movsw
+        pop ds
+        clc
+.br_ret:
+        pop ds
+        pop si
+        pop di
         pop es
         pop dx
         pop cx
@@ -683,6 +744,14 @@ fdc_in:
 ; ------------------------------------------------------------
 ; fdc_sense_int: SENSE INTERRUPT STATUS.
 ; Выход: BL = ST0, BH = PCN. CF=1 при таймауте.
+;
+; ВАЖНО: часть контроллеров/эмуляторов (86box в частности) на SENSE
+; INTERRUPT без ожидающегося прерывания отдают ТОЛЬКО ST0=0x8x
+; (INVALID) и НЕ выдают второй байт (PCN) — контроллер возвращается
+; в покой (MSR=0x80). Раньше это ловилось как таймаут и заваливало
+; весь fdc_reset (в логе: 'f3'/'F3 800000 M80' при живом контроллере).
+; Поэтому второй байт ждём с коротким таймаутом и считаем PCN=0,
+; если он не пришёл: INVALID-ответ без PCN — легитимный.
 ; ------------------------------------------------------------
 fdc_sense_int:
         push cx
@@ -693,10 +762,24 @@ fdc_sense_int:
         jc .sn_ret
         mov al, bl
         mov [cs:fdc_st0], al
-        call fdc_in
-        jc .sn_ret
-        mov bh, bl              ; PCN
-        mov bl, [cs:fdc_st0]    ; ST0
+        ; PCN: второй байт есть не всегда (86box на INVALID отдаёт
+        ; только ST0). Ждём его КОРОтко и, если пришёл, читаем из FIFO
+        ; ВАЖНО: сам байт обязательно вычитать — fdc_wait_msr только
+        ; опрашивает MSR, и если байт оставить, контроллер застрянет
+        ; в фазе результата (MSR=0xD0) и следующий же fdc_out
+        ; затянется по таймауту.
+        mov al, 0xC0
+        mov ah, 0xC0
+        mov cx, 1               ; короткий таймаут (~1 единица)
+        call fdc_wait_msr
+        mov bh, 0               ; PCN по умолчанию: второго байта нет
+        jc  .sn_got
+        mov dx, FDC_FIFO
+        in  al, dx
+        mov bh, al              ; PCN
+.sn_got:
+        mov bl, [cs:fdc_st0]    ; BL = ST0 (контракт функции)
+        clc
 .sn_ret:
         pop cx
         ret
