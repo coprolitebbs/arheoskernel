@@ -161,6 +161,37 @@ start:
     xor bx, bx
     mov cx, 4
     call dbg_dump_esbx
+    ; --- ВЕРИФИКАЦИЯ FAT: FAT[0] (младший байт) обязан равняться
+    ; байту описателя среды из BPB (сектор 0 всё ещё в 0:0x0600,
+    ; media byte по смещению 0x15 -> 0x0615). Не совпал = FAT пришла
+    ; мусором при честном CF=0: перечитываем ('x') и проверяем снова.
+    xor bx, bx
+    mov al, [es:bx]
+    cmp al, [cs:0x0615]
+    je  .fat_ok
+    pusha
+    mov al, 'x'
+    call debug_char
+    popa
+    mov ax, [cs:rsvd]
+    mov cx, [cs:fatsz]
+    mov bx, 0x9000
+    mov es, bx
+    xor bx, bx
+    call disk_read_sectors
+    jc  .fat_dead
+    mov bx, 0x9000
+    mov es, bx
+    xor bx, bx
+    mov al, [es:bx]
+    cmp al, [cs:0x0615]
+    je  .fat_ok
+.fat_dead:
+    pop cx
+    pop bx
+    pop es
+    jmp error
+.fat_ok:
     pop cx
     pop bx
     pop es
@@ -392,103 +423,56 @@ bpb_init:
     call debug_char
     popa
 
-    ; === Boot sector: свой FDC-драйвер вместо BIOS int 13h ===
-    ; BIOS TA-NC529/CS5530 внутри int 13h ждёт IRQ6 без таймаута
-    ; и зависает навсегда. disk_read_sector теперь поллинговый.
+    ; === Boot sector: через ЛЕСТНИЦУ fdc_read_lba ===
+    ; ОДНО чтение сектора 0: лестница сама начинает с BIOS-яруса
+    ; (тот же путь, что у stage1 — на TA-NC529/CS5530 читает диск
+    ; идеально; CP/M-дискеты грузятся им же «влёт»), а при неудаче
+    ; поднимается по шагам: восстановление, цикл мотора, PIO-ярус
+    ; с ротацией скоростей 500/250/300 (маркеры 'r0'/'r2'/'r3' —
+    ; теперь внутри fdc_pio_read).
     ;
-    ; Скорость данных до разбора BPB неизвестна, а чтение не на той
-    ; скорости даёт таймаут фазы данных (FDC не находит адресные
-    ; метки; 86box и реальное железо скорость учитывают, QEMU — нет).
-    ; Поэтому пробуем сектор 0 ПОСЛЕДОВАТЕЛЬНО на трёх скоростях:
-    ; 500 кбит/с (HD: 1.44M/1.2M) -> 250 (DD: 720K/360K) ->
-    ; 300 (привод 1.2М, 360 об/мин + дискета 720К — классический
-    ; «твист» 5.25": BIOS в этой конфигурации сам ставит 300).
-    ; КРИТИЧНО: во время щупа BIOS-фолбэк ЗАПРЕЩЁН (fdc_probe=1).
-    ; Раньше первая же BIOS-попытка на неверной скорости удавалась,
-    ; ставила fdc_use_bios=1 НАВСЕГДА — и весь диск шёл через
-    ; int 13h, который на TA-NC529/CS5530 зависает при seek:
-    ; загрузка умирала на чтении ядра после '01234'.
-    ; 'r0'/'r2'/'r3' — маркеры проб в отладке.
-    pusha
-    mov byte [cs:fdc_probe], 1
-    mov byte [cs:fdc_probe_ok], 0
-    popa
-    pusha
-    mov byte [cs:fdc_max_attempts], 1
-    mov al, 'r'
-    call debug_char
-    mov al, '0'
-    call debug_char
-    popa
-
+    ; СТАРЫЙ ЩУП (три PIO-пробы ДО первого BIOS-чтения) УДАЛЁН:
+    ; fdc_reset старого драйвера программировал SPECIFY с ND=1 до
+    ; recalibrate — на CS5530 RECALIBRATE с ND=1 не завершался
+    ; вовсе ('f4 81' по каждой пробе), а SPECIFY ND=0 из BIOS-
+    ; фолбэка выбрасывался занятым seek-ом контроллером. Итог:
+    ; контроллер оставался в ND=1, и ВСЕ последующие BIOS-чтения
+    ; возвращали CF=0 с порчей «первый байт верный, дальше мусор»
+    ; (F9 80 57 C0 / 46 20 45 20 45... вместо F9 FF FF 03 /
+    ; «F12    LD »), причём повторное чтение давало ДРУГОЙ мусор.
+    ; Теперь FDC не трогаем вовсе, пока BIOS справляется.
+    push es
     xor ax, ax
     mov es, ax
     mov bx, 0x0600
-    xor ax, ax              ; LBA 0, 500 кбит/с (fdc_ccr=0 по умолчанию)
+    xor ax, ax              ; LBA 0
     call disk_read_sector
-    jnc .probe_done
+    pop es
+    jc .fail
 
-    ; повтор на 250 кбит/с (DD-медиа: 720K/360K)
-    pusha
-    mov byte [cs:fdc_max_attempts], 1
-    mov al, 'r'
-    call debug_char
-    mov al, '2'
-    call debug_char
-    popa
-    mov byte [cs:fdc_ccr], 0x02
-    mov byte [cs:fdc_inited], 0     ; форсировать fdc_reset в чтении
-    xor ax, ax
-    mov es, ax
-    mov bx, 0x0600
-    xor ax, ax
-    call disk_read_sector
-    jnc .probe_done
-
-    ; повтор на 300 кбит/с: привод 1.2М (360 об/мин) читает
-    ; дискету 720К с потоком 250*360/300 = 300 кбит/с
-    pusha
-    mov byte [cs:fdc_max_attempts], 1
-    mov al, 'r'
-    call debug_char
-    mov al, '3'
-    call debug_char
-    popa
-    mov byte [cs:fdc_ccr], 0x01
-    mov byte [cs:fdc_inited], 0
-    xor ax, ax
-    mov es, ax
-    mov bx, 0x0600
-    xor ax, ax
-    call disk_read_sector
-    jnc .probe_done
-
-    ; Ни одна скорость PIO не подошла — FDC не декодируется или мёртв.
-    ; ТЕПЕРЬ можно подключать BIOS: фолбэк в .rl_final выставит
-    ; fdc_use_bios=1 и вернёт CF уже от BIOS-попытки.
-    pusha
-    mov byte [cs:fdc_probe], 0
-    popa
-    xor ax, ax
-    mov es, ax
-    mov bx, 0x0600
-    xor ax, ax
-    call disk_read_sector
-    jnc .rate_ok            ; BIOS спас: скорость ставим по BPB, как раньше
-    jmp .fail
-
-.probe_done:
-    pusha
-    mov byte [cs:fdc_probe_ok], 1   ; скорость доказана PIO — не переопределять по BPB
-    ; fdc_probe обязан сброситься и при УСПЕХЕ щупа: раньше он
-    ; оставался 1 на всю загрузку (сброс был только в ветке «все
-    ; пробы провалились»), из-за чего пошаговые маркеры щупа ('p')
-    ; сыпались на каждый сектор до конца загрузки.
-    mov byte [cs:fdc_probe], 0
-    popa
-
-.rate_ok:
-    mov byte [cs:fdc_max_attempts], 3
+    ; === ВАЛИДАЦИЯ СОДЕРЖИМОГО СЕКТОРА 0 ===
+    ; CF=0 НЕ означает «данные верны» (задокументированная порча
+    ; DMA с чистым CRC). Мусорный BPB = ложная геометрия = поздняя
+    ; гибель в случайном месте. Проверяем жёстко: любые сомнения —
+    ; трактуем как несостоявшееся чтение (лестница уже выжала всё,
+    ; что могла; дальше грузиться нельзя).
+    mov si, 0x0600
+    cmp byte [es:si+510], 0x55
+    jne .fail
+    cmp byte [es:si+511], 0xAA
+    jne .fail
+    cmp word [es:si+11], 512    ; bps: весь код считает 512
+    jne .fail
+    cmp byte [es:si+13], 0      ; spc != 0
+    je  .fail
+    cmp byte [es:si+16], 0      ; nfats != 0
+    je  .fail
+    cmp word [es:si+22], 0      ; fatsz != 0
+    je  .fail
+    cmp byte [es:si+24], 0      ; spt != 0
+    je  .fail
+    cmp byte [es:si+26], 0      ; heads != 0
+    je  .fail
 
     mov si, 0x0600
     mov ax, [cs:si+11]
@@ -531,10 +515,11 @@ bpb_init:
     ; авторитетная скорость по BPB: 9 секторов на дорожку и меньше —
     ; DD 250 кбит/с (CCR=2: 720K/360K), больше — HD 500 кбит/с
     ; (CCR=0: 1.2M/1.44M). Дальше все fdc_reset ставят её сами.
-    ; ЕСЛИ щуп уже доказал скорость PIO (fdc_probe_ok=1) — НЕ
-    ; переопределяем: у привода 1.2М с дискетой 720К рабочая
-    ; скорость 300 кбит/с (CCR=1), хотя BPB говорит 250.
-    cmp byte [cs:fdc_probe_ok], 0
+    ; НО: если PIO-ярус УЖЕ доказал свою скорость в лестнице
+    ; (fdc_pio_proven=1 — например привод 1.2М с дискетой 720К
+    ; читается только на 300 кбит/с, хотя BPB говорит 250) — НЕ
+    ; переопределяем: факт сильнее BPB.
+    cmp byte [cs:fdc_pio_proven], 0
     jne .ccr_set
     mov byte [cs:fdc_ccr_force], 1
     cmp word [cs:spt], 9
@@ -544,6 +529,8 @@ bpb_init:
 .ccr_250:
     mov byte [cs:fdc_ccr], 0x02
 .ccr_set:
+    mov byte [cs:fdc_ccr_known], 1
+    mov byte [cs:fdc_rate_idx], 0
     clc
     jmp .done
 .fail:

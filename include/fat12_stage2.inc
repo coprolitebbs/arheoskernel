@@ -271,6 +271,8 @@ fat12_load_file:
     push dx
     push si
     push ds
+    mov byte [cs:fdc_vdone], 0      ; верификация первого кластера —
+                                    ; заново для каждого файла
 ;ищем файл
     push cs
     pop ds
@@ -285,6 +287,7 @@ fat12_load_file:
     mov ax,[cs:load_cluster]
     ;cluster -> LBA
     call fat12_cluster_to_lba
+    mov [cs:fdc_vlba], ax           ; LBA кластера — для верификации
     ; --- debug ---
     ;push ax
     ;mov al, '['
@@ -302,6 +305,43 @@ fat12_load_file:
     mov cx,[cs:spc]
     call disk_read_sectors
     jc .error
+
+    ; === ВЕРИФИКАЦИЯ ПЕРВОГО КЛАСТЕРА ФАЙЛА ===
+    ; CF=0 НЕ означает «данные верны»: на реальном железе BIOS
+    ; возвращал успешный статус с порчей DMA («первый байт верный,
+    ; дальше мусор», чистый CRC). Защита, которую нельзя обмануть
+    ; статусом, — перечитать кластер и СРАВНИТЬ (fdc_verify_cluster,
+    ; fdc_pio.inc). Разные данные в двух чтениях = ПОРЧА ('V'):
+    ; кластер перечитывается на место, при повторной порче — ошибка.
+    cmp byte [cs:fdc_vdone], 0
+    jne .v_ok
+    mov byte [cs:fdc_vdone], 1
+    pusha
+    push es
+    call fdc_verify_cluster         ; ES = сегмент кластера
+    jnc .v_fine
+    pusha
+    mov al, 'V'
+    call debug_char
+    mov al, ' '
+    call debug_char
+    popa
+    ; повторное чтение кластера на место
+    mov ax, [cs:fdc_vlba]
+    mov cx, [cs:spc]
+    xor bx, bx
+    call disk_read_sectors
+    jc .v_bad
+    call fdc_verify_cluster
+    jnc .v_fine
+.v_bad:
+    pop es
+    popa
+    jmp .error
+.v_fine:
+    pop es
+    popa
+.v_ok:
 
     ; ---- прогресс: точка за кластер ----
     ;push ax
@@ -382,6 +422,7 @@ fat12_load_kernel_high:
     ;Инициализируем локальные переменные смещения
     mov dword [cs:kernel_load_offset], 0
     mov edi, 0x100000           ;Физический адрес назначения (1 МБ)
+    mov byte [cs:fdc_vdone], 0  ; верификация первого кластера — заново
 
 .cluster_loop:
     ;Проверяем, не прочитали ли мы весь файл ядра
@@ -396,6 +437,7 @@ fat12_load_kernel_high:
     ;Получаем текущий кластер ядра, переводим его в LBA-сектор диска
     mov ax, [cs:cluster]
     call fat12_cluster_to_lba
+    mov [cs:fdc_vlba], ax       ; LBA кластера — для верификации
 
     ;Настраиваем буфер реального режима ES:BX = KERNEL_SEG:0x0000 (0x20000 физ.)
     mov bx, KERNEL_SEG          ; 0x2000
@@ -408,6 +450,40 @@ fat12_load_kernel_high:
     mov cx, [cs:spc]
     call disk_read_sectors
     jc .error
+
+    ; === ВЕРИФИКАЦИЯ ПЕРВОГО КЛАСТЕРА ЯДРА ===
+    ; Та же защита, что в fat12_load_file: CF=0 с порчей буфера
+    ; нельзя отличить от честного успеха — перечитываем и сравниваем.
+    cmp byte [cs:fdc_vdone], 0
+    jne .v_ok
+    mov byte [cs:fdc_vdone], 1
+    pushad
+    call fdc_verify_cluster         ; ES = KERNEL_SEG (сегмент кластера)
+    jnc .v_kfine
+    pusha
+    mov al, 'V'
+    call debug_char
+    mov al, ' '
+    call debug_char
+    popa
+    ; повторное чтение кластера на место (KERNEL_SEG:0)
+    push es
+    mov ax, [cs:fdc_vlba]
+    mov cx, [cs:spc]
+    mov bx, KERNEL_SEG
+    mov es, bx
+    xor bx, bx
+    call disk_read_sectors
+    pop es
+    jc .v_kbad
+    call fdc_verify_cluster
+    jnc .v_kfine
+.v_kbad:
+    popad
+    jmp .error
+.v_kfine:
+    popad
+.v_ok:
 
     ; ---- прогресс ----
     ;push eax
@@ -645,6 +721,8 @@ dump_kernel:
 
 load_cluster dw 0
 root_reread  db 0            ; 1 = корень уже перечитан в этом поиске
+fdc_vdone    db 0            ; 1 = верификация первого кластера
+                             ;     текущего файла уже сделана
 ;kernel_size    dd 0
 current_file_size dd 0
 kernel_load_offset dd 0
