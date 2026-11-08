@@ -391,10 +391,20 @@ bpb_init:
     ; Скорость данных до разбора BPB неизвестна, а чтение не на той
     ; скорости даёт таймаут фазы данных (FDC не находит адресные
     ; метки; 86box и реальное железо скорость учитывают, QEMU — нет).
-    ; Поэтому пробуем сектор 0 на 500 кбит/с (HD: 1.44M/1.2M), при
-    ; неудаче — на 250 кбит/с (DD: 720K/360K). По одной попытке на
-    ; скорость: полные три повтора на заведомо неверной скорости
-    ; не нужны. 'r0'/'r2' — маркеры проб в отладке.
+    ; Поэтому пробуем сектор 0 ПОСЛЕДОВАТЕЛЬНО на трёх скоростях:
+    ; 500 кбит/с (HD: 1.44M/1.2M) -> 250 (DD: 720K/360K) ->
+    ; 300 (привод 1.2М, 360 об/мин + дискета 720К — классический
+    ; «твист» 5.25": BIOS в этой конфигурации сам ставит 300).
+    ; КРИТИЧНО: во время щупа BIOS-фолбэк ЗАПРЕЩЁН (fdc_probe=1).
+    ; Раньше первая же BIOS-попытка на неверной скорости удавалась,
+    ; ставила fdc_use_bios=1 НАВСЕГДА — и весь диск шёл через
+    ; int 13h, который на TA-NC529/CS5530 зависает при seek:
+    ; загрузка умирала на чтении ядра после '01234'.
+    ; 'r0'/'r2'/'r3' — маркеры проб в отладке.
+    pusha
+    mov byte [cs:fdc_probe], 1
+    mov byte [cs:fdc_probe_ok], 0
+    popa
     pusha
     mov byte [cs:fdc_max_attempts], 1
     mov al, 'r'
@@ -406,9 +416,9 @@ bpb_init:
     xor ax, ax
     mov es, ax
     mov bx, 0x0600
-    xor ax, ax              ; LBA 0
+    xor ax, ax              ; LBA 0, 500 кбит/с (fdc_ccr=0 по умолчанию)
     call disk_read_sector
-    jnc .rate_ok
+    jnc .probe_done
 
     ; повтор на 250 кбит/с (DD-медиа: 720K/360K)
     pusha
@@ -425,7 +435,44 @@ bpb_init:
     mov bx, 0x0600
     xor ax, ax
     call disk_read_sector
-    jc .fail
+    jnc .probe_done
+
+    ; повтор на 300 кбит/с: привод 1.2М (360 об/мин) читает
+    ; дискету 720К с потоком 250*360/300 = 300 кбит/с
+    pusha
+    mov byte [cs:fdc_max_attempts], 1
+    mov al, 'r'
+    call debug_char
+    mov al, '3'
+    call debug_char
+    popa
+    mov byte [cs:fdc_ccr], 0x01
+    mov byte [cs:fdc_inited], 0
+    xor ax, ax
+    mov es, ax
+    mov bx, 0x0600
+    xor ax, ax
+    call disk_read_sector
+    jnc .probe_done
+
+    ; Ни одна скорость PIO не подошла — FDC не декодируется или мёртв.
+    ; ТЕПЕРЬ можно подключать BIOS: фолбэк в .rl_final выставит
+    ; fdc_use_bios=1 и вернёт CF уже от BIOS-попытки.
+    pusha
+    mov byte [cs:fdc_probe], 0
+    popa
+    xor ax, ax
+    mov es, ax
+    mov bx, 0x0600
+    xor ax, ax
+    call disk_read_sector
+    jnc .rate_ok            ; BIOS спас: скорость ставим по BPB, как раньше
+    jmp .fail
+
+.probe_done:
+    pusha
+    mov byte [cs:fdc_probe_ok], 1   ; скорость доказана PIO — не переопределять по BPB
+    popa
 
 .rate_ok:
     mov byte [cs:fdc_max_attempts], 3
@@ -471,6 +518,11 @@ bpb_init:
     ; авторитетная скорость по BPB: 9 секторов на дорожку и меньше —
     ; DD 250 кбит/с (CCR=2: 720K/360K), больше — HD 500 кбит/с
     ; (CCR=0: 1.2M/1.44M). Дальше все fdc_reset ставят её сами.
+    ; ЕСЛИ щуп уже доказал скорость PIO (fdc_probe_ok=1) — НЕ
+    ; переопределяем: у привода 1.2М с дискетой 720К рабочая
+    ; скорость 300 кбит/с (CCR=1), хотя BPB говорит 250.
+    cmp byte [cs:fdc_probe_ok], 0
+    jne .ccr_set
     mov byte [cs:fdc_ccr_force], 1
     cmp word [cs:spt], 9
     jbe .ccr_250
