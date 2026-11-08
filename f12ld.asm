@@ -149,6 +149,22 @@ start:
     call debug_char
     popa
 
+    ; --- ДИАГНОСТИКА: первые 4 байта FAT (0x9000:0). На 720K-дискете
+    ; должно быть F9 FF FF 03 (медиа-дескриптор 0xF9 + конец цепочки).
+    ; Иные байты = чтение FAT вернуло мусор (BIOS/дискета), поиск
+    ; кластеров пойдёт по ложной таблице.
+    push es
+    push bx
+    push cx
+    mov bx, 0x9000
+    mov es, bx
+    xor bx, bx
+    mov cx, 4
+    call dbg_dump_esbx
+    pop cx
+    pop bx
+    pop es
+
     ;Чтение корневого каталога (в буфер 0x8000:0x0000)
     push es
     mov ax, [cs:root_start]
@@ -164,6 +180,22 @@ start:
     mov al, 'Y'
     call debug_char
     popa
+
+    ; --- ДИАГНОСТИКА: первые 11 байт корня (0x8000:0) — на дискете
+    ; это имя "F12    LD " (46 31 32 20 20 20 20 20 4C 44 20).
+    ; Сверка с дискетой: иные байты = чтение корня вернуло мусор —
+    ; дальнейшие поиски файлов пойдут по пустому буферу.
+    push es
+    push bx
+    push cx
+    mov bx, 0x8000
+    mov es, bx
+    xor bx, bx
+    mov cx, 11
+    call dbg_dump_esbx
+    pop cx
+    pop bx
+    pop es
 
     ;call disk_reset
 
@@ -275,53 +307,29 @@ start:
     pop di
     pop es
 
-    ;Поиск ядра в корневом каталоге
+    ;Поиск ядра в корневом каталоге — через fat12_find_file: он даёт
+    ;диагностику ('N' + офсет остановки скана + дамп начала корня) и
+    ;ПОВТОРНОЕ чтение корня при сбое — то же, что и для драйверов.
+    ;DS=0=CS (stage2 в 0:0x7E00), поэтому имя ядра по DS:SI совпадает
+    ;с CS-относительным kernel_name.
     push es
-    mov bx, 0x8000
-    mov es, bx
-    xor bx, bx
-    mov cx, [cs:root_ent]
-
-.search_loop:
-    test cx, cx
-    jz .nf
-    mov al, [es:bx]
-    test al, al
-    jz .nf
-    cmp al, 0xE5
-    jz .next
-
-    push cx
-    push si
-    push di
+    push ds
     mov si, kernel_name
-    mov di, bx
-    mov cx, 11
-    cld
-    repe cmpsb
-    pop di
-    pop si
-    pop cx
-    jz .found
-
-.next:
-    add bx, 32
-    dec cx
-    jmp .search_loop
-
-.nf:
-    jmp not_found
-
-.found:
-    mov ax, [es:bx + 26]
+    call fat12_find_file
+    pop ds
+    jc .nf
     mov [cs:cluster], ax
-    mov eax, [es:bx + 28]
-    mov [cs:kernel_size_pm], eax
+    mov [cs:kernel_size_pm], cx
+    mov [cs:kernel_size_pm+2], dx
     pop es
 
     ;Загрузка ядра прямо в 0x100000
     call fat12_load_kernel_high
     jc error
+    jmp .kern_ok
+.nf:
+    jmp not_found
+.kern_ok:
 
     pusha
     mov al, '$'
@@ -593,6 +601,28 @@ halt:
 .loop:
     hlt
     jmp .loop
+
+; ------------------------------------------------------------
+; dbg_dump_esbx: печать CX байтов из ES:BX в hex на консоль
+; (2 символа + пробел на байт). Используется для верификационных
+; дампов FAT/корня: байты сравниваются с эталоном с дискеты.
+; Все регистры сохраняет.
+; ------------------------------------------------------------
+dbg_dump_esbx:
+    push ax
+    push bx
+    push cx
+.dd_loop:
+    mov al, [es:bx]
+    call screen_hex_byte
+    mov al, ' '
+    call debug_char
+    inc bx
+    loop .dd_loop
+    pop cx
+    pop bx
+    pop ax
+    ret
 
 ; Продвигает module_next_segment на ceil(current_file_size/16) + 16 параграфов
 ; (16 параграфов = 256 байт padding). Проверяет, что не въехали в область FSINFO.

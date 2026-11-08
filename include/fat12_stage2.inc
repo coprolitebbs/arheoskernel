@@ -66,6 +66,9 @@ fat12_find_file:
     ;push dx
     push di
     push es
+    push si                  ; SI (имя) нужен для повторного скана
+    ; флаг повторного чтения корня — по одному на вызов
+    mov byte [cs:root_reread], 0
 ; root dir
     mov bx,0x8000
     mov es,bx
@@ -93,6 +96,55 @@ fat12_find_file:
     jnz .search
 
 .not_found:
+    ; ДИАГНОСТИКА: 'N' + офсет остановки скана (bx = 32*индекс
+    ; записи; 0xE00 = просмотрены все 224 записи, имя не совпало;
+    ; МЕНЬШЕЕ значение = скан остановился на записи, у которой
+    ; первый байт 0x00 — хвост буфера корня пуст или испорчен).
+    pusha
+    mov al, 'N'
+    call debug_char
+    mov ax, bx
+    call screen_hex_word
+    mov al, ' '
+    call debug_char
+    popa
+    ; === ПОВТОРНОЕ ЧТЕНИЕ КОРНЯ (один раз на вызов) ===
+    ; На реальном железе (Geode) буфер корня после BIOS-чтения
+    ; содержал байты, которых на дискете НЕТ: часть секторов корня
+    ; прочиталась мусором без ошибки. Свежее чтение даёт второй
+    ; шанс найти файл и заодно чинит буфер для последующего поиска
+    ; ядра. На QEMU/86Box ветка не выполняется (первый скан всегда
+    ; находит файл).
+    cmp byte [cs:root_reread], 0
+    jne .give_up
+    mov byte [cs:root_reread], 1
+    pusha
+    mov al, 'Z'
+    call debug_char
+    popa
+    push ax
+    push cx
+    push es
+    mov ax, [cs:root_start]
+    mov cx, [cs:root_size]
+    mov bx, 0x8000
+    mov es, bx
+    xor bx, bx
+    call disk_read_sectors
+    pop es
+    pop cx
+    pop ax
+    jnc .reread_ok
+    ; перечитать не удалось — сдаёмся с дампом
+    jmp .give_up
+.reread_ok:
+    mov bx, 0x8000
+    mov es, bx
+    xor bx, bx
+    mov dx, [cs:root_ent]
+    jmp .search
+
+.give_up:
     pusha
     push es
     mov bx, 0x8000
@@ -108,6 +160,7 @@ fat12_find_file:
     loop .dbg_loop
     pop es
     popa
+    pop si
     pop es
     pop di
     pop bx
@@ -121,9 +174,9 @@ fat12_find_file:
 ; size DWORD
     mov cx,[es:bx+28]
     mov dx,[es:bx+30]
+    pop si
     pop es
     pop di
-    ;pop dx
     pop bx
     clc
 
@@ -591,6 +644,7 @@ dump_kernel:
 ; Variables
 
 load_cluster dw 0
+root_reread  db 0            ; 1 = корень уже перечитан в этом поиске
 ;kernel_size    dd 0
 current_file_size dd 0
 kernel_load_offset dd 0
