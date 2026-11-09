@@ -24,6 +24,7 @@
 #include "include-kernel/pmm.h"
 #include "include-kernel/vmm.h"
 #include "include-kernel/comdebug.h"
+#include "include-kernel/graphic_layer.h"
 
 
 unsigned int lfb_addr;
@@ -381,6 +382,11 @@ void kernel_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t c
     {
         fb->fill_rect((int)x, (int)y, (int)w, (int)h, color);
     }
+    /*else if(gr_active){
+
+
+
+    }*/
     else
     {
         _fill_rect_raw(x, y, w, h, color);

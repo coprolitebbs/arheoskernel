@@ -18,6 +18,7 @@
 #ifndef KLOAD_SCREEN_H
 #define KLOAD_SCREEN_H
 
+#include <stdbool.h>
 
 //Ретро палитра в стиле  SGI / SunOS
 

@@ -36,6 +36,8 @@
 #include "include-kernel/elf32.h"
 #include "include-kernel/font_vga.h"
 #include "include-kernel/kload_screen.h"
+#include "include-kernel/graphic_layer.h"
+#include "include-kernel/sound_layer.h"
 
 static spinlock_t sched_spinlock = {0};
 
@@ -1323,6 +1325,8 @@ static void vmm_stress_test_cross_pde(void)
 void kernel_init_thread(void)
 {
     drivers_init();
+    init_graphic_layer();
+
     /*
         com_puts("[CFG] fb_phys=");  com_puthex(boot_info->framebuffer);
         com_puts(" fb_size=");       com_puthex(boot_info->pitch * boot_info->height);

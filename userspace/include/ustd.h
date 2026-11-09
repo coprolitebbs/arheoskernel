@@ -22,6 +22,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include "fileattrs.h"
 #include "mount_structures.h"
 #include "../../include-kernel/locale_types.h"

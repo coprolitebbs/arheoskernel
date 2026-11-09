@@ -18,6 +18,7 @@
 #ifndef LOCALE_H
 #define LOCALE_H
 
+#include <stdbool.h>
 #include "locale_types.h"
 #include "font.h"
 

@@ -20,6 +20,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "../../include-kernel/bootinfo.h"
 #include "../../include-kernel/block.h"
 #include "../../userspace/include/fileattrs.h"
@@ -295,6 +296,7 @@ typedef struct
     uint32_t (*get_ticks)(void);
 
     void (*load_screen_add_string)(const char *fmt, ...);
+    void (*fake_load_screen_add_string)(const char *fmt, ...);
 
 
 } usb_stack_driver_api_t;

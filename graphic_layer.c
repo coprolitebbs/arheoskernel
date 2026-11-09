@@ -368,7 +368,7 @@ static void fb_compat_setup(void)
 
     gr_mode_info_t *m = &fb_compat_ctx.mode;
     uint32_t bpp = boot_info->bpp;
-    if (bpp == 15) bpp = 16;   /* так же, как в fb_driver.c */
+    if (bpp == 15) bpp = 16;   //так же, как в fb_driver.c
 
     m->index = 0;
     strcpy(m->name, "boot");
@@ -420,7 +420,7 @@ static void fb_compat_setup(void)
     fb_compat_driver.priv = &fb_compat_ctx;
 }
 
-/* ==================== реестр драйверов ==================== */
+//==================== реестр драйверов ====================
 
 static void gr_inject_runtime(gr_driver_t *drv)
 {
@@ -449,7 +449,7 @@ int graphic_layer_register_driver(gr_driver_t *drv)
     gr_inject_runtime(drv);
     gr_registry[gr_driver_count++] = drv;
 
-    /* автопереключение: нет активного или новый не менее приоритетный */
+    //Автопереключение: нет активного или новый не менее приоритетный
     if (!gr_active || drv->priority >= gr_active->priority)
     {
         gr_active = drv;
@@ -522,7 +522,10 @@ void init_graphic_layer(void)
 
     /* Никакого иного драйвера не загружено — подключаем штатный fb_driver */
     fb_compat_setup();
-    graphic_layer_register_driver(&fb_compat_driver);
+    if(graphic_layer_register_driver(&fb_compat_driver) == GR_OK){
+        //Подключим заодно стандартные функции обычного драйвера фреймбуффера, для совместимости
+        gr_active->native_driver_api = (void *)fb;
+    };
     if (boot_info)
         load_screen_add_string("GFX layer: fbdrv fallback %dx%dx%d",
                                (int)boot_info->width, (int)boot_info->height,

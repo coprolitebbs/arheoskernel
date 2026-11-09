@@ -635,6 +635,15 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
         fb->fill_rect(current_tty->cursor_x, current_tty->cursor_y,
                       current_tty->cell_w, current_tty->cell_h, cell_bg);
     }
+    else if (fb && fb->clear_tile)
+    {
+        //Прозрачный фон (обои): глиф печатается без заливки и ложится поверх
+        //старых пикселей ячейки. Сперва возвращаем ячейке исходный вид
+        //(пиксели обоев или цвет фона), и только потом рисуем глиф — иначе
+        //при перерисовке строки (история команд, backspace) новый текст
+        //печатается поверх старого и остается грязь из символов
+        fb->clear_tile(current_tty->cursor_x, current_tty->cursor_y, console_bgcolor);
+    }
 
     if (fb && fb->draw_codepoint)
     {
