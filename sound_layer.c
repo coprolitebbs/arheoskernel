@@ -38,7 +38,7 @@
 #include "include-kernel/kconsole.h"
 #include "include-kernel/use_drivers.h"
 
-/* ---------------- реестр драйверов ---------------- */
+//---------------- реестр драйверов ----------------
 #define SND_DRIVERS_MAX 8
 
 static snd_driver_t *snd_registry[SND_DRIVERS_MAX];
@@ -46,11 +46,11 @@ static uint32_t snd_driver_count = 0;
 static snd_driver_t *snd_active = 0;
 static int snd_initialized = 0;
 
-/* Кэш параметров открытых потоков (заполняется snd_pcm_set_params) */
+//Кэш параметров открытых потоков (заполняется snd_pcm_set_params)
 static snd_pcm_params_t snd_cur_params[SND_STREAM_COUNT];
 static uint8_t snd_stream_open[SND_STREAM_COUNT];
 
-/* Тики ядра (PIT 100 Гц) для драйверов — как kernel_get_ticks в usb-api */
+//Тики ядра (PIT 100 Гц) для драйверов — как kernel_get_ticks в usb-api
 static uint32_t snd_layer_get_ticks(void)
 {
     return tick_count;

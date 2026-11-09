@@ -376,17 +376,14 @@ static void _fill_rect_raw(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint3
 
 //Публичная заливка - через fb-драйвер, если он есть, иначе — через raw LFB.
 //Цвет в формате 0x00RRGGBB, как у fb->fill_rect.
+//После init_graphic_layer() fb указывает на универсальную таблицу слоя
+//графики, поэтому отдельная ветка для gr_active не нужна
 void kernel_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color)
 {
     if (fb && fb->fill_rect)
     {
         fb->fill_rect((int)x, (int)y, (int)w, (int)h, color);
     }
-    /*else if(gr_active){
-
-
-
-    }*/
     else
     {
         _fill_rect_raw(x, y, w, h, color);

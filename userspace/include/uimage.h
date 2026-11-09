@@ -63,7 +63,7 @@ uint8_t* load_tga_to_buffer(const char *path, uint32_t target_w, uint32_t target
 //Загрузка PNG, аналог load_tga_to_buffer(): те же режимы,
 //те же целевые форматы (32/24/16/8 бит) и те же колбэки прогресса.
 //Поддерживаются: цветовые типы 0/2/3/4/6, глубины 1/2/4/8/16 бит,
-//фильтры строк 0..4, Adam7-интерлейс, tRNS-прозрачность.
+//фильтры строк 0..4, Adam7-интерлейс, tRNS-прозрачность
 //inflate реализован
 uint8_t* load_png_to_buffer(const char *path, uint32_t target_w, uint32_t target_h, uint32_t target_bpp, uint32_t target_pitch, uint32_t mode, img_loading_struct_t *loading_struct);
 

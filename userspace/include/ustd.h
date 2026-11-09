@@ -39,7 +39,6 @@
 #define INPUT_MODE_COOKED 1
 
 
-//Копия структуры dirent из вашего ядра для Ring 3
 typedef struct
 {
     char name[256];

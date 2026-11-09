@@ -118,7 +118,6 @@ void systemcall_draw_char(struct regs *r)
     if(r->ebx >= boot_info->width || r->ecx >=boot_info->height) return;
     if(fb && fb->draw_codepoint)
     {
-        //fb->draw_char(r->ebx,r->ecx,(unsigned char)r->edx,r->esi);
         fb->draw_codepoint(r->ebx, r->ecx, r->edx, r->esi);
     }
 

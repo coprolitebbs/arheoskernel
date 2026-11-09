@@ -15,17 +15,20 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-/*
- * graphic_layer.c — реализация высокоуровневого слоя графики (Ring 0).
- * API описан в drivers/include_drivers/kernel_graphic_layer.h.
- *
- * Что здесь есть:
- *   - реестр gr_driver_t с автопереключением активного драйвера по priority;
- *   - init_graphic_layer(): если внешних драйверов нет — fb-совместимый
- *     fallback поверх штатного fb_driver (legacy LFB из boot_info);
- *   - программные реализации всех примитивов через LFB текущего режима:
- *     если у драйвера какая-то операция отсутствует, слой подставляет свою.
- */
+//graphic_layer.c — реализация высокоуровневого слоя графики (Ring 0).
+//API описан в drivers/include_drivers/driver_graphic_layer.h.
+//
+//Что здесь есть:
+//  - реестр gr_driver_t с автопереключением активного драйвера по priority;
+//  - init_graphic_layer(): если внешних драйверов нет — fb-совместимый
+//    fallback поверх штатного fb_driver (legacy LFB из boot_info);
+//  - программные реализации всех примитивов через LFB текущего режима:
+//    если у драйвера какая-то операция отсутствует, слой подставляет свою;
+//  - универсальный консольный API (текст/тайлы/обои/скролл): реализация
+//    «солянки» fb_driver_api_t поверх примитивов слоя. После
+//    init_graphic_layer() глобальный fb из use_drivers.c указывает на
+//    эту таблицу, поэтому всё ядро рисует через слой при любом активном
+//    драйвере — отдельных проверок gr_active в вызывающем коде не нужно.
 
 #include <stdint.h>
 #include <stddef.h>
@@ -41,9 +44,11 @@
 #include "include-kernel/lib.h"
 #include "include-kernel/kconsole.h"
 #include "include-kernel/kload_screen.h"
+#include "include-kernel/locale.h"
+#include "include-kernel/font_data.h"
 #include "include-kernel/use_drivers.h"
 
-/* ---------------- реестр драйверов ---------------- */
+//---------------- реестр драйверов ----------------
 #define GR_DRIVERS_MAX 8
 
 static gr_driver_t *gr_registry[GR_DRIVERS_MAX];
@@ -55,6 +60,9 @@ static int gr_initialized = 0;
  * Нужен программным реализациям примитивов (LFB-доступ). */
 static gr_mode_info_t gr_cur_mode;
 static gr_fix_info_t gr_cur_fix;
+
+//Валидация хранилища обоев (реализация в разделе универсального консольного API)
+static void gr_wallpaper_validate(void);
 
 /* ==================== программные реализации ==================== */
 
@@ -288,6 +296,11 @@ static int gr_cache_current_mode(void)
                                                         : GR_VISUAL_TRUECOLOR;
         gr_cur_fix.line_length = gr_cur_mode.pitch;
     }
+
+    //Обои привязаны к размеру и формату конкретного режима: если режим
+    //сменён (другой драйвер, другое разрешение) — сбрасываем несовпадающий
+    //буфер, чтобы не вернуть на экран чужие пиксели
+    gr_wallpaper_validate();
     return GR_OK;
 }
 
@@ -305,6 +318,12 @@ typedef struct fb_compat_ctx
 
 static fb_compat_ctx_t fb_compat_ctx;
 static gr_driver_t     fb_compat_driver;
+
+//Нативная таблица fb_driver, захваченная ДО перепривязки глобального fb
+//на универсальную таблицу слоя. Обёртки fbw_* обязаны звать именно её:
+//вызов через глобальный fb после перепривязки дал бы бесконечную
+//рекурсию (обёртка -> gr_* -> обёртка -> ...).
+static fb_driver_api_t *fb_native = 0;
 
 static int fbw_get_mode_count(void *priv) { (void)priv; return 1; }
 
@@ -336,24 +355,24 @@ static int fbw_get_fix(void *priv, gr_fix_info_t *out)
 static int fbw_put_pixel(void *priv, int x, int y, uint32_t color)
 {
     (void)priv;
-    if (!fb || !fb->put_pixel) return GR_ERR_NODEV;
-    fb->put_pixel(x, y, color);
+    if (!fb_native || !fb_native->put_pixel) return GR_ERR_NODEV;
+    fb_native->put_pixel(x, y, color);
     return GR_OK;
 }
 
 static int fbw_fill_rect(void *priv, int x, int y, int w, int h, uint32_t color)
 {
     (void)priv;
-    if (!fb || !fb->fill_rect) return GR_ERR_NODEV;
-    fb->fill_rect(x, y, w, h, color);
+    if (!fb_native || !fb_native->fill_rect) return GR_ERR_NODEV;
+    fb_native->fill_rect(x, y, w, h, color);
     return GR_OK;
 }
 
 static int fbw_blit(void *priv, int x, int y, int w, int h, const void *src)
 {
     (void)priv;
-    if (!fb || !fb->blit) return GR_ERR_UNSUPPORTED;
-    return (fb->blit(x, y, w, h, src) == 0) ? GR_OK : GR_ERR_IO;
+    if (!fb_native || !fb_native->blit) return GR_ERR_UNSUPPORTED;
+    return (fb_native->blit(x, y, w, h, src) == 0) ? GR_OK : GR_ERR_IO;
 }
 
 /* set_mode/get_pixel/copy_area/pan/blank/vsync/palette сознательно NULL:
@@ -418,6 +437,309 @@ static void fb_compat_setup(void)
     fb_compat_driver.mode_count = 1;
     fb_compat_driver.ops = &fb_compat_ctx.ops;
     fb_compat_driver.priv = &fb_compat_ctx;
+
+    //Захватываем нативную таблицу fb_driver. Сразу кладём её и в
+    //native_driver_api: это «люк» в специфичные функции конкретного
+    //драйвера, не попавшие в gr_ops_t. Каналом совместимости ядра с
+    //fb_driver он не является — для этого служит универсальная таблица
+    //слоя (см. gr_universal_api).
+    fb_native = fb;
+    fb_compat_driver.native_driver_api = (void *)fb_native;
+}
+
+//==================== универсальный консольный API ====================
+//Текст, тайлы, обои и скролл — это политика консоли, а не работа железа,
+//поэтому они НЕ входят в контракт драйвера (gr_ops_t) и реализуются здесь
+//один раз, поверх примитивов слоя (gr_*). Любой драйвер — fb_driver,
+//будущие VESA/Geode — получает их бесплатно, как fbcon поверх fbdev в
+//Linux. Драйвер не должен уметь рисовать символы и хранить обои.
+
+//Состояние цветов слоя: единый источник для uni_scroll_up и get_fg/get_bg
+static uint32_t gr_fg_color = 0x00FFFFFF;
+static uint32_t gr_bg_color = 0x00000000;
+
+//Хранилище обоев слоя: полная копия экрана в формате текущего режима.
+//Сменой режимов и валидацией размера ведает сам слой, драйверу знать
+//об обоях не нужно
+static uint8_t  *gr_wallpaper_raw = 0;
+static uint32_t  gr_wallpaper_size = 0;
+static bool      gr_wallpaper_present = false;
+
+static uint32_t gr_screen_bytes(void)
+{
+    return gr_cur_mode.pitch * gr_cur_mode.yres;
+}
+
+//Сброс обоев, не соответствующих текущему режиму (после смены режима)
+static void gr_wallpaper_validate(void)
+{
+    if (gr_wallpaper_present && gr_wallpaper_size != gr_screen_bytes())
+    {
+        if (gr_wallpaper_raw) kfree(gr_wallpaper_raw);
+        gr_wallpaper_raw = 0;
+        gr_wallpaper_size = 0;
+        gr_wallpaper_present = false;
+    }
+}
+
+//Декодирует один кодпойнт UTF-8, возвращает число потреблённых байт (>=1).
+//Некорректные последовательности читаются как одиночный байт, как в fb_driver
+static uint32_t gr_utf8_decode(const char *s, int *consumed)
+{
+    const uint8_t *p = (const uint8_t *)s;
+    uint32_t cp = p[0];
+    int n = 1;
+    if ((p[0] & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80)
+    {
+        cp = ((uint32_t)(p[0] & 0x1F) << 6) | (uint32_t)(p[1] & 0x3F);
+        n = 2;
+    }
+    else if ((p[0] & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80)
+    {
+        cp = ((uint32_t)(p[0] & 0x0F) << 12) | ((uint32_t)(p[1] & 0x3F) << 6)
+           | (uint32_t)(p[2] & 0x3F);
+        n = 3;
+    }
+    else if ((p[0] & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 &&
+             (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80)
+    {
+        cp = ((uint32_t)(p[0] & 0x07) << 18) | ((uint32_t)(p[1] & 0x3F) << 12)
+           | ((uint32_t)(p[2] & 0x3F) << 6) | (uint32_t)(p[3] & 0x3F);
+        n = 4;
+    }
+    *consumed = n;
+    return cp;
+}
+
+//Обёртка для таблицы: активная локаль ядра (тот же источник, что получает fb_driver)
+static const void *gr_kernel_active_locale(void)
+{
+    return (const void *)locale_get_active();
+}
+
+//Рисование одного кодпойнта активной локали через примитивы слоя
+static void uni_draw_codepoint(uint32_t x, uint32_t y, uint32_t cp, uint32_t color)
+{
+    const locale_t *loc = locale_get_active();
+    if (!loc || !loc->font) return;
+    const font_glyph_t *g = font_lookup(loc->font, cp);
+    if (!g) return;
+    if (x + g->width  > gr_cur_mode.xres) return;
+    if (y + g->height > gr_cur_mode.yres) return;
+
+    uint8_t bytes_per_row = (uint8_t)((g->width + 7) / 8);
+    for (uint32_t row = 0; row < g->height; row++)
+    {
+        const uint8_t *src = g->rows + row * bytes_per_row;
+        for (uint32_t col = 0; col < g->width; col++)
+        {
+            if (src[col >> 3] & (0x80 >> (col & 7)))
+                gr_put_pixel((int)(x + col), (int)(y + row), color);
+        }
+    }
+}
+
+static void uni_draw_char(uint32_t x, uint32_t y, unsigned char c, uint32_t color)
+{
+    //То же, что в fb_driver: байт трактуется как кодпойнт активной локали
+    uni_draw_codepoint(x, y, (uint32_t)c, color);
+}
+
+static void uni_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t color)
+{
+    if (!str) return;
+    while (*str)
+    {
+        int consumed = 1;
+        uint32_t cp = gr_utf8_decode(str, &consumed);
+        uni_draw_codepoint(x, y, cp, color);
+        x += 8;   //моноширинный шаг, как в fb_driver
+        str += consumed;
+    }
+}
+
+static void uni_draw_hex(uint32_t value, int x, int y)
+{
+    static const char hexdigits[] = "0123456789ABCDEF";
+    for (int i = 0; i < 8; i++)
+    {
+        uint32_t v = (value >> ((7 - i) * 4)) & 0xF;
+        uni_draw_codepoint((uint32_t)(x + i * 8), (uint32_t)y,
+                           (uint32_t)hexdigits[v], 0x00FFFFFF);
+    }
+}
+
+//«Очистить» с обоями = вернуть обои на весь экран, как в fb_driver.fb_clear
+static void uni_clear(uint32_t color)
+{
+    if (gr_wallpaper_present && gr_wallpaper_raw &&
+        gr_wallpaper_size >= gr_screen_bytes())
+    {
+        //Построчно: буфер обоев хранится с шагом pitch, а gr_blit ждёт
+        //упакованные строки без padding
+        for (uint32_t row = 0; row < gr_cur_mode.yres; row++)
+            gr_blit(0, (int)row, (int)gr_cur_mode.xres, 1,
+                    gr_wallpaper_raw + row * gr_cur_mode.pitch);
+        return;
+    }
+    gr_clear(color);
+}
+
+static void uni_put_pixel(int x, int y, uint32_t color)
+{
+    gr_put_pixel(x, y, color);
+}
+
+static void uni_fill_rect(int x, int y, int w, int h, uint32_t color)
+{
+    gr_fill_rect(x, y, w, h, color);
+}
+
+static int uni_blit(int x, int y, int w, int h, const void *src)
+{
+    return (gr_blit(x, y, w, h, src) == GR_OK) ? 0 : -1;
+}
+
+//Обои принимает как есть: приходят из userspace уже в формате экрана
+//(setbg декодирует PNG/TGA в raw фреймбуфера)
+static void uni_set_wallpaper(const void *src, uint32_t size)
+{
+    if (!src || size == 0) return;
+    if (size > (4 * 1024 * 1024)) return;   //тот же лимит, что в fb_driver
+    if (gr_wallpaper_raw)
+    {
+        kfree(gr_wallpaper_raw);
+        gr_wallpaper_raw = 0;
+    }
+    gr_wallpaper_raw = (uint8_t *)kmalloc(size);
+    if (!gr_wallpaper_raw)
+    {
+        gr_wallpaper_size = 0;
+        gr_wallpaper_present = false;
+        return;
+    }
+    memcpy(gr_wallpaper_raw, src, size);
+    gr_wallpaper_size = size;
+    gr_wallpaper_present = true;
+}
+
+static bool uni_has_wallpaper(void)
+{
+    return gr_wallpaper_present;
+}
+
+//Тайл 8x8, как в fb_driver: с обоями возвращаем пиксели обоев,
+//без — заливаем цветом фона консоли
+static void uni_clear_tile(int x, int y, uint32_t fallback_color)
+{
+    if (x < 0 || y < 0 ||
+        (uint32_t)x + 8 > gr_cur_mode.xres || (uint32_t)y + 8 > gr_cur_mode.yres)
+        return;
+    if (gr_wallpaper_present && gr_wallpaper_raw &&
+        gr_wallpaper_size >= gr_screen_bytes())
+    {
+        for (int row = 0; row < 8; row++)
+            gr_blit(x, y + row, 8, 1,
+                    gr_wallpaper_raw + (uint32_t)(y + row) * gr_cur_mode.pitch
+                    + (uint32_t)x * (gr_cur_mode.bpp / 8));
+    }
+    else
+    {
+        gr_fill_rect(x, y, 8, 8, fallback_color);
+    }
+}
+
+//Сдвиг экрана вверх на line_height в диапазоне [start_y, end_y);
+//нижняя полоса заливается текущим цветом фона слоя
+static void uni_scroll_up(uint32_t start_y, uint32_t end_y, uint32_t line_height)
+{
+    if (start_y + line_height >= end_y || end_y > gr_cur_mode.yres) return;
+    if (start_y >= end_y) return;
+
+    uint32_t move_h = (end_y - line_height) - start_y;
+    if (move_h)
+        gr_copy_area(0, (int)(start_y + line_height), (int)gr_cur_mode.xres,
+                     (int)move_h, 0, (int)start_y);
+    gr_fill_rect(0, (int)(end_y - line_height), (int)gr_cur_mode.xres,
+                 (int)line_height, gr_bg_color);
+}
+
+//Сдвиг прямоугольника по вертикали: dy > 0 — вверх, dy < 0 — вниз;
+//освободившаяся полоса заливается цветом fill. Контракт как в fb_driver
+static int uni_scroll_rect(int x, int y, int w, int h, int dy, uint32_t fill)
+{
+    if (x < 0 || y < 0 || w <= 0 || h <= 0) return -1;
+    if (x + w > (int)gr_cur_mode.xres || y + h > (int)gr_cur_mode.yres) return -1;
+    if (dy == 0) return 0;
+    if (dy >= h || dy <= -h)
+    {
+        gr_fill_rect(x, y, w, h, fill);
+        return 0;
+    }
+    if (dy > 0)
+    {
+        int move_h = h - dy;
+        gr_copy_area(x, y + dy, w, move_h, x, y);
+        gr_fill_rect(x, y + move_h, w, dy, fill);
+    }
+    else
+    {
+        int ady = -dy;
+        int move_h = h - ady;
+        gr_copy_area(x, y, w, move_h, x, y + ady);
+        gr_fill_rect(x, y, w, ady, fill);
+    }
+    return 0;
+}
+
+static void uni_set_fg(uint32_t color) { gr_fg_color = color; }
+static void uni_set_bg(uint32_t color) { gr_bg_color = color; }
+static uint32_t uni_get_fg(void) { return gr_fg_color; }
+static uint32_t uni_get_bg(void) { return gr_bg_color; }
+
+//Универсальная таблица вида fb_driver_api_t: ЕДИНАЯ точка диспетчеризации
+//всего рисования ядра. После init_graphic_layer() глобальный fb из
+//use_drivers.c указывает сюда: примитивы уходят в gr_* (нативные операции
+//активного драйвера или программные реализации через LFB), текст/тайлы/
+//обои/скролл — в универсальные реализации выше. Когда завтра активируется
+//VESA или Geode, ядро и эта таблица не меняются — под драйвером меняется
+//только gr_active.
+static fb_driver_api_t gr_universal_api;
+
+static void gr_universal_api_setup(void)
+{
+    memset(&gr_universal_api, 0, sizeof(gr_universal_api));
+
+    gr_universal_api.put_pixel      = uni_put_pixel;
+    gr_universal_api.fill_rect      = uni_fill_rect;
+    gr_universal_api.clear          = uni_clear;
+    gr_universal_api.draw_char      = uni_draw_char;
+    gr_universal_api.draw_string    = uni_draw_string;
+    gr_universal_api.draw_hex       = uni_draw_hex;
+    gr_universal_api.draw_codepoint = uni_draw_codepoint;
+
+    gr_universal_api.set_fg = uni_set_fg;
+    gr_universal_api.set_bg = uni_set_bg;
+    gr_universal_api.get_fg = uni_get_fg;
+    gr_universal_api.get_bg = uni_get_bg;
+
+    gr_universal_api.scroll_up    = uni_scroll_up;
+    gr_universal_api.scroll_rect  = uni_scroll_rect;
+    gr_universal_api.blit         = uni_blit;
+
+    gr_universal_api.set_wallpaper = uni_set_wallpaper;
+    gr_universal_api.clear_tile    = uni_clear_tile;
+    gr_universal_api.has_wallpaper = uni_has_wallpaper;
+
+    gr_universal_api.malloc_ptr = kmalloc;
+    gr_universal_api.free_ptr   = kfree;
+
+    //Шрифтовая подсистема: те же источники, что инжектируются в fb_driver,
+    //но слой берёт их напрямую из ядра, без обратных вызовов через драйвер
+    gr_universal_api.font = (const uint8_t (*)[8])font_data;
+    gr_universal_api.get_active_locale_ptr = gr_kernel_active_locale;
+    gr_universal_api.font_lookup_ptr =
+        (const void *(*)(const void *, uint32_t))font_lookup;
 }
 
 //==================== реестр драйверов ====================
@@ -506,7 +828,7 @@ void init_graphic_layer(void)
     if (gr_initialized) return;
     gr_initialized = 1;
 
-    /* Внешние драйверы могли зарегистрироваться раньше нас. */
+    //Внешние драйверы могли зарегистрироваться раньше нас.
     gr_driver_t *best = 0;
     for (uint32_t i = 0; i < gr_driver_count; i++)
         if (!best || gr_registry[i]->priority > best->priority)
@@ -517,21 +839,29 @@ void init_graphic_layer(void)
         gr_active = best;
         gr_cache_current_mode();
         load_screen_add_string("GFX layer: active '%s'", best->name);
-        return;
+    }
+    else
+    {
+        //Никакого иного драйвера не загружено — подключаем штатный fb_driver.
+        //native_driver_api с нативной таблицей fb_driver выставляется внутри
+        //fb_compat_setup() до перепривязки fb.
+        fb_compat_setup();
+        graphic_layer_register_driver(&fb_compat_driver);
+        if (boot_info)
+            load_screen_add_string("GFX layer: fbdrv fallback %dx%dx%d",
+                                   (int)boot_info->width, (int)boot_info->height,
+                                   (int)boot_info->bpp);
+        else
+            load_screen_add_string("GFX layer: fbdrv fallback (no bootinfo)");
     }
 
-    /* Никакого иного драйвера не загружено — подключаем штатный fb_driver */
-    fb_compat_setup();
-    if(graphic_layer_register_driver(&fb_compat_driver) == GR_OK){
-        //Подключим заодно стандартные функции обычного драйвера фреймбуффера, для совместимости
-        gr_active->native_driver_api = (void *)fb;
-    };
-    if (boot_info)
-        load_screen_add_string("GFX layer: fbdrv fallback %dx%dx%d",
-                               (int)boot_info->width, (int)boot_info->height,
-                               (int)boot_info->bpp);
-    else
-        load_screen_add_string("GFX layer: fbdrv fallback (no bootinfo)");
+    //Единая точка диспетчеризации: перенаправляем глобальный fb на
+    //универсальную таблицу слоя. Все вызовы fb->... в ядре с этого
+    //момента идут через слой при любом активном драйвере, проверки
+    //gr_active в вызывающем коде не нужны. Нативная таблица fb_driver
+    //уже захвачена в fb_native и доступна через native_driver_api.
+    gr_universal_api_setup();
+    fb = &gr_universal_api;
 }
 
 /* ==================== API режимов ==================== */
@@ -570,7 +900,7 @@ int gr_set_mode(uint32_t index)
     }
     else
     {
-        /* драйвер не умеет менять режим — разрешаем только текущий */
+        //драйвер не умеет менять режим — разрешаем только текущий
         if (index != gr_active->current_mode) return GR_ERR_UNSUPPORTED;
     }
     gr_active->current_mode = index;

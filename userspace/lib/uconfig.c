@@ -107,8 +107,8 @@ cfg_file_t *cfg_open(const char *path, uint32_t flags, bool use_bufferisation){
 
                     while (total_bytes_read < st.size) {
                         uint32_t bytes_to_read = st.size - total_bytes_read;
-                        if (bytes_to_read > 256) {
-                            bytes_to_read = 256;
+                        if (bytes_to_read > 32768) {
+                            bytes_to_read = 32768;
                         }
                         int r = u_read(fd, dst_ptr + total_bytes_read, bytes_to_read);
                         if (r <= 0) {

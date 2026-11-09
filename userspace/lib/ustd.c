@@ -574,7 +574,7 @@ int u_read(int fd, void *buf, uint32_t count)
                 {
                     got--;                                              // снимаем последний байт
                     while (got > 0 && ((uint8_t)dst[got] & 0xC0) == 0x80) got--;  // снимаем continuation
-                    if (got > 0 && ((uint8_t)dst[got] & 0xC0) == 0xC0)   /* двухбайтовый: 1 оставшийся байт это lead, снимаем его */
+                    if (got > 0 && ((uint8_t)dst[got] & 0xC0) == 0xC0) //двухбайтовый: 1 оставшийся байт это lead, снимаем его
                     {
                         got--;
                     }
