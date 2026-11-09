@@ -150,10 +150,13 @@ static int vs_set_mode(void *priv, uint32_t index)
     regs.bx = r->mode_number | 0x4000;
     if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0) return GR_ERR_IO;
 
-    //4F01: перечитываем параметры — pitch/bpp/PhysBasePtr могли смениться
+    //4F01: перечитываем параметры — pitch/bpp/PhysBasePtr могли смениться.
+    //номер режима обязан быть чистым: биты 14-15 некоторые BIOS считают
+    //за неизвестный режим (тот же грабель, что в stage2, см. vbe.inc),
+    //а в таблице номера хранятся уже с битом 0x4000
     memset(&regs, 0, sizeof(regs));
     regs.ax = 0x4F01;
-    regs.cx = r->mode_number | 0x4000;
+    regs.cx = r->mode_number & 0x3FFF;
     regs.es = VBE_RM_INFO_ADDR >> 4;
     regs.di = VBE_RM_INFO_ADDR & 0xF;
     if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0) return GR_ERR_IO;

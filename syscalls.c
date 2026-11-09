@@ -2232,6 +2232,10 @@ void systemcall_graph_info(struct regs *r)
         //менять режим" (-3, fbdrv-fallback) и "ошибка ввода-вывода" (-7)
         case GRAPH_INFO_SET_MODE:
         {
+            //трасса: syscall дошел до ядра с нужным индексом
+            com_puts("[GINFO] set_mode idx=");
+            com_puthex(r->ecx);
+            com_puts("\n");
             int rc = gr_set_mode(r->ecx);
             if (rc != GR_OK)
             {

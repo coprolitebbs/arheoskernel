@@ -48,6 +48,7 @@
 #include "include-kernel/font_data.h"
 #include "include-kernel/use_drivers.h"
 #include "include-kernel/vbe_rm.h"
+#include "include-kernel/comdebug.h"
 
 //---------------- реестр драйверов ----------------
 #define GR_DRIVERS_MAX 8
@@ -897,14 +898,22 @@ int gr_enum_mode(uint32_t index, gr_mode_info_t *out)
 int gr_set_mode(uint32_t index)
 {
     if (!gr_active) return GR_ERR_NODEV;
+    //трасса смены режима: видно, дошел ли вызов до драйвера и с каким кодом
+    //вышел; тишина после этой строки означает зависание внутри set_mode
+    com_puts("[GR] set_mode idx=");
+    com_puthex(index);
     if (gr_active->ops && gr_active->ops->set_mode)
     {
         int rc = gr_active->ops->set_mode(gr_active->priv, index);
+        com_puts(" rc=");
+        com_puthex((uint32_t)rc);
+        com_puts("\n");
         if (rc != GR_OK) return rc;
     }
     else
     {
         //драйвер не умеет менять режим — разрешаем только текущий
+        com_puts(" no set_mode op\n");
         if (index != gr_active->current_mode) return GR_ERR_UNSUPPORTED;
     }
     gr_active->current_mode = index;

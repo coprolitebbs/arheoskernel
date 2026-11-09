@@ -20,6 +20,7 @@
 #include <stddef.h>
 #include "include-kernel/draw.h"
 #include "include-kernel/debug.h"
+#include "include-kernel/comdebug.h"
 #include "include-kernel/use_drivers.h"
 #include "include-kernel/graphic_layer.h"
 #include "include-kernel/syscalls.h"
@@ -1136,6 +1137,14 @@ void kconsole_mode_changed(void)
     }
     if (w == 0 || h == 0) return;
 
+    //трасса: дошли до переконфигурации консолей; тишина дальше означает
+    //проблемы уже после смены режима (перерисовка/заливка экрана)
+    com_puts("[KCON] mode changed to ");
+    com_puthex(w);
+    com_puts("x");
+    com_puthex(h);
+    com_puts("\n");
+
     for (int t = 0; t < TTY_TERMINALS_COUNT; t++)
     {
         //размер ячейки берется из шрифта активной локали, проставленный
@@ -1163,7 +1172,9 @@ void kconsole_mode_changed(void)
         tty_terminals[t].kernel_line_active = false;
     }
 
+    com_puts("[KCON] clearing screen\n");
     kconsole_clear_screen();
+    com_puts("[KCON] mode change done\n");
 }
 
 

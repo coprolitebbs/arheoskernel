@@ -25,14 +25,22 @@
 #include "drivers/include_drivers/drv_format.h"
 #include "drivers/include_drivers/driver_graphic_layer.h"
 #include "include-kernel/lib.h"
-
+#include "include-kernel/comdebug.h"
 
 //блоб собирается nasm-ом и попадает в .rodata ядра
 extern const uint8_t vbe_rm_blob_start[];
 extern const uint8_t vbe_rm_blob_end[];
 
+//метка целостности лежит в зарезервированной зоне блоба (0x4000..0x41ff):
+//блоб сам заканчивается на ~0x41aa, служебные ячейки 0x41c0..0x41cf, так
+//что 0x41e0 никем не трогается. если младшую память кто-то затер, метка
+//исчезнет и vbe_rm_exec откажется прыгать в чужой код
+#define VBE_RM_MAGIC_ADDR 0x41E0
+#define VBE_RM_MAGIC      0x5652454Du
+
 static int vbe_rm_ready = 0;
 static volatile int vbe_rm_busy = 0;
+static uint32_t vbe_rm_blob_size = 0;
 
 void vbe_rm_init(void)
 {
@@ -42,7 +50,13 @@ void vbe_rm_init(void)
     //на момент вызова пейджинг ещё выключен: linear == physical,
     //пишем машинный код прямо на физический 0x4000
     memcpy((void *)VBE_RM_BLOB_ADDR, (const void *)vbe_rm_blob_start, blob_size);
+    //метка целостности — за концом блоба, сам блоб ее не трогает
+    *(volatile uint32_t *)VBE_RM_MAGIC_ADDR = VBE_RM_MAGIC;
+    vbe_rm_blob_size = blob_size;
     vbe_rm_ready = 1;
+    com_puts("[VBE_RM] blob copied to 0x4000, size=");
+    com_puthex(blob_size);
+    com_puts("\n");
 }
 
 int vbe_rm_exec(vbe_rm_regs_t *regs)
@@ -53,6 +67,18 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
     //до конца; реентерабельность не нужна, из IRQ вызывать запрещено
     while (vbe_rm_busy) { }
     vbe_rm_busy = 1;
+
+    //проверка целостности тримплина до прыжка: метка 0x41e0 и весь код
+    //блоба обязаны совпадать с тем, что скопировал vbe_rm_init.
+    //расхождение — младшую память кто-то затер, lcall ушел бы в чужой
+    //код и выглядел бы снаружи как "просто виснет"
+    if (*(volatile uint32_t *)VBE_RM_MAGIC_ADDR != VBE_RM_MAGIC ||
+        memcmp((const void *)VBE_RM_BLOB_ADDR, vbe_rm_blob_start, vbe_rm_blob_size) != 0)
+    {
+        com_puts("[VBE_RM] trampoline trashed at 0x4000, refusing to jump\n");
+        vbe_rm_busy = 0;
+        return -1;
+    }
 
     volatile vbe_rm_regs_t *req = (volatile vbe_rm_regs_t *)VBE_RM_REQ_ADDR;
     volatile vbe_rm_regs_t *res = (volatile vbe_rm_regs_t *)VBE_RM_RES_ADDR;
@@ -67,6 +93,24 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
     req->si = regs->si;
     req->es = regs->es;
 
+    //трасса вызова: если после этой строки "back" нет — CPU не вернулся
+    //из блоба (реальный режим/BIOS); если есть — смотрим на res->ax
+    com_puts("[VBE_RM] exec ax=");
+    com_puthex(req->ax);
+    com_puts(" bx=");
+    com_puthex(req->bx);
+    com_puts(" cx=");
+    com_puthex(req->cx);
+    com_puts(" dx=");
+    com_puthex(req->dx);
+    com_puts(" di=");
+    com_puthex(req->di);
+    com_puts(" si=");
+    com_puthex(req->si);
+    com_puts(" es=");
+    com_puthex(req->es);
+    com_puts("\n");
+
     //вход в блоб: CS остаётся flat 0x08, EIP = 0x4000. Блоб сам сохраняет
     //GPR/сегменты/флаги и стек, поэтому клоббер-список — перестраховка
     __asm__ __volatile__(
@@ -75,6 +119,12 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
         :
         : "memory", "eax", "ebx", "ecx", "edx", "esi", "edi", "cc"
     );
+
+    com_puts("[VBE_RM] back, res ax=");
+    com_puthex(res->ax);
+    com_puts(" bx=");
+    com_puthex(res->bx);
+    com_puts("\n");
 
     regs->ax = res->ax;
     regs->bx = res->bx;
