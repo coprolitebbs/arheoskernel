@@ -47,6 +47,7 @@ best_mode:      dw 0
 best_bpp:       db 0
 best_index:     dw 0            ;индекс выбранного режима в таблице, 0xFFFF = нет
 mode_count:     dw 0            ;сколько записей собрал vbe_enum_modes
+enum_cnt:       dw 0            ;рабочий счётчик записей перечисления
 
 ;Порядок приоритета bpp при выборе режима загрузки: 24 > 16 > 32 > 8
 bpp_prio:       db 24, 16, 32, 8
@@ -68,6 +69,7 @@ vbe_init:
     mov byte [best_bpp], 0
     mov word [best_index], 0xFFFF
     mov word [mode_count], 0
+    mov word [enum_cnt], 0
 
     ;Отладка: старт
     mov al, 'v'
@@ -77,6 +79,10 @@ vbe_init:
     mov ax, cs
     mov es, ax
     mov di, vbe_ctrl_info
+    ;Сигнатура VBE2 обязана лежать в буфере ДО вызова: без неё BIOS имеет
+    ;право ответить структурой VBE 1.x без полного списка режимов
+    mov word [es:di], 0x4256             ;"VB"
+    mov word [es:di+2], 0x3245           ;"E2"
     mov ax, 0x4F00
     int 0x10
     cmp ax, 0x004F
@@ -84,6 +90,12 @@ vbe_init:
 
     mov al, 'O'                 ;OK Controller
     call debug_char
+
+    ;Отсутствие списка режимов (битый BIOS) — сразу в fallback-перебор,
+    ;иначе vbe_enum_modes пойдёт lodsw-ом с указателем 0:0 по IVT
+    mov eax, [cs:vbe_ctrl_info+0x0E]
+    test eax, eax
+    jz .fallback_scan
 
     ;Полное перечисление LFB-режимов в таблицу 0x5400
     call vbe_enum_modes
@@ -106,7 +118,7 @@ vbe_init:
     ;пробуем банковский режим (vesa-драйвер в ядре тогда не включится,
     ;сработает штатный fbdrv поверх boot-режима)
     mov bx, [best_mode]
-    and bx, 0x7FFF
+    and bx, 0x3FFF
     mov ax, 0x4F02
     int 0x10
     cmp ax, 0x004F
@@ -218,7 +230,7 @@ vbe_init:
 
     ;Без флага LFB — банковский режим
     mov bx, [best_mode]
-    and bx, 0x7FFF
+    and bx, 0x3FFF
     mov ax, 0x4F02
     int 0x10
     cmp ax, 0x004F
@@ -233,12 +245,15 @@ vbe_init:
     mov dword [graphics_flags], 1
 
 .fill_vars:
-    ;Запрос mode_info реально выставленного режима
+    ;Запрос mode_info реально выставленного режима.
+    ;4F01 принимает ЧИСТЫЙ номер режима: флаги LFB/очистки экрана
+    ;(биты 14-15) некоторые BIOS считают за неизвестный режим
     mov ax, cs
     mov es, ax
     mov di, mode_info
     mov ax, 0x4F01
     mov cx, bx
+    and cx, 0x3FFF
     int 0x10
     cmp ax, 0x004F
     jne .vbe_fail_info
@@ -363,14 +378,20 @@ vbe_init:
 ;через 4F01: поддерживается + графический + цветной + bpp 8/16/24/32 +
 ;PhysBasePtr != 0. Годные записи пишет в таблицу 0x5400 с флагом LFB,
 ;номер режима сохраняется уже с битом 0x4000.
-;Портит: CX (число записей). Все регистры и сегменты сохраняет.
+;Счётчик ведётся в переменной enum_cnt (cs-относительной): регистр CX
+;в цикле занят под номер режима для 4F01, и push/pop вокруг int 0x10
+;молча откатывали бы inc обратно — таблица всегда оставалась бы пустой.
+;DS внутри равен сегменту списка режимов (у реальных BIOS это ROM 0xC000),
+;поэтому перед записями шапки/счётчика DS принудительно возвращается в 0:
+;иначе слово счётчика уходит в тень VGA BIOS и портит чужой код.
+;Все регистры и сегменты сохраняет.
 ;---------------------------------------------------------------
 vbe_enum_modes:
     pusha
     push es
     push ds
 
-    ;Шапка таблицы
+    ;Шапка таблицы (DS ещё равен 0 — как на входе)
     mov word [VBE_MODES_ADDR+VBE_TBL_MAGIC], (VBE_TABLE_MAGIC & 0xFFFF)
     mov word [VBE_MODES_ADDR+VBE_TBL_MAGIC+2], (VBE_TABLE_MAGIC >> 16)
     mov ax, [cs:vbe_ctrl_info+4]        ;VbeVersion (BCD)
@@ -378,15 +399,16 @@ vbe_enum_modes:
     mov word [VBE_MODES_ADDR+VBE_TBL_COUNT], 0
     mov word [VBE_MODES_ADDR+VBE_TBL_CURRENT], 0xFFFF
     mov word [VBE_MODES_ADDR+VBE_TBL_RESERVED], 0
+    mov word [cs:enum_cnt], 0
 
     ;DS:SI -> список режимов контроллера (VideoModePtr, offset:segment)
     mov si, [cs:vbe_ctrl_info+0x0E]     ;offset
     mov ax, [cs:vbe_ctrl_info+0x10]     ;segment
     mov ds, ax
-    xor cx, cx                          ;счётчик записей
     cld
 
 .next_mode:
+    mov cx, [cs:enum_cnt]
     cmp cx, VBE_MODES_MAX
     jae .enum_done
     lodsw
@@ -395,7 +417,6 @@ vbe_enum_modes:
     mov dx, ax                          ;DX = номер режима
 
     ;4F01 по режиму: буфер в CS:mode_info
-    push cx
     push si
     push ds
     mov ax, cs
@@ -437,7 +458,7 @@ vbe_enum_modes:
     ;Запись в таблицу (ES=0, DI = 0x540C + номер*16)
     xor ax, ax
     mov es, ax
-    mov di, cx
+    mov di, [cs:enum_cnt]
     shl di, 4
     add di, VBE_MODES_ADDR+VBE_TBL_RECORDS
     mov ax, dx
@@ -455,15 +476,20 @@ vbe_enum_modes:
     mov word [es:di+VBE_REC_RESERVED], 0
     mov eax, [cs:mode_info+0x28]
     mov [es:di+VBE_REC_PHYS], eax
-    inc cx
+    inc word [cs:enum_cnt]
 
 .enum_skip:
     pop ds
     pop si
-    pop cx
     jmp .next_mode
 
 .enum_done:
+    ;Записи шапки идут через DS=0: на момент выхода DS равен сегменту
+    ;списка режимов (на реальных BIOS — ROM 0xC000), и запись слова
+    ;счётчика попала бы в тень VGA BIOS вместо таблицы 0x5400
+    xor ax, ax
+    mov ds, ax
+    mov cx, [cs:enum_cnt]
     mov [cs:mode_count], cx
     mov [VBE_MODES_ADDR+VBE_TBL_COUNT], cx
 

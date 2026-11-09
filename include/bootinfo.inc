@@ -24,7 +24,7 @@ BOOTINFO_ADDR      equ 0x5000
 FSINFO_ADDR        equ 0x5100
 MODULES_ADDR       equ 0x5200
 
-BOOTINFO_VERSION   equ 1
+BOOTINFO_VERSION   equ 2
 BOOTINFO_MAGIC     equ 0x4F4F4249       ;"IBOO"
 
 ;Filesystem types
