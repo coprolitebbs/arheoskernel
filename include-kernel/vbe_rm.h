@@ -23,20 +23,7 @@
 #include "../drivers/include_drivers/driver_graphic_layer.h"
 
 
-//Область тримплина в младшей памяти. Адреса обязаны совпадать с
-//vbe_rm_blob.asm и gdt.c (дескрипторы с базой 0x4000 на индексах 128/129).
-//Зона 0x4000..0x47FF не занята никем: BDA заканчивается на 0x4FF,
-//bootinfo с 0x5000, stage2 с 0x7E00, pmm никогда не раздаёт память ниже 1 МБ.
-#define VBE_RM_BLOB_ADDR 0x4000
-#define VBE_RM_BLOB_MAX  0x200
-#define VBE_RM_REQ_ADDR  0x4200
-#define VBE_RM_RES_ADDR  0x4220
-#define VBE_RM_INFO_ADDR 0x4300
-#define VBE_RM_INFO_SIZE 0x400
 
-//Набор регистров для вызова BIOS int 10h через тримплин.
-//es на входе - СЕГМЕНТНЫЙ адрес буфера структуры (phys >> 4), 0 если не нужен;
-//на выходе - фактический ES после BIOS-вызова.
 
 //Копирование машинного блоба на VBE_RM_BLOB_ADDR. Вызывается ядром один раз
 //на старте (до включения пейджинга - запись идёт по физическим адресам).

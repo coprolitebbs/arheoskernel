@@ -34,14 +34,14 @@
 #include "../../include-kernel/lib.h"
 #include "../../include-kernel/ports_io.h"
 
-#define USB_MAX_MSC_DEVS  4
-
 usb_stack_driver_api_t api;
 usb_stack_driver_api_t *api_ptr;
 description_driver_api_t descr_api;
 
 uhci_hc_t uhci0;
 static usb_msc_dev_t g_msc[USB_MAX_MSC_DEVS];
+
+
 
 static usb_msc_dev_t *usb_alloc_msc_slot(void)
 {

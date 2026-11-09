@@ -21,6 +21,8 @@
 #include "../../../include-kernel/bootinfo.h"
 #include "../../include_drivers/drv_format.h"
 
+#define USB_MAX_MSC_DEVS  4
+
 extern usb_stack_driver_api_t *api_ptr;
 
 void *usb_dma_alloc(uint32_t size, uint32_t *phys_out);

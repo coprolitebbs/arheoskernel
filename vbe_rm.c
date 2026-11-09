@@ -22,7 +22,10 @@
 //в реальном режиме, а графический слой (gr_ops_t.set_mode) живёт в ядре.
 
 #include "include-kernel/vbe_rm.h"
+#include "drivers/include_drivers/drv_format.h"
+#include "drivers/include_drivers/driver_graphic_layer.h"
 #include "include-kernel/lib.h"
+
 
 //блоб собирается nasm-ом и попадает в .rodata ядра
 extern const uint8_t vbe_rm_blob_start[];

@@ -32,7 +32,6 @@
 #include "../../include-kernel/bootinfo.h"
 #include "../../include-kernel/lib.h"
 //#include "../../include-kernel/vbe_rm.h"
-#include "../../include_drivers/drv_format.h"
 #include "../include_drivers/drv_format.h"
 #include "../include_drivers/driver_graphic_layer.h"
 
@@ -47,6 +46,12 @@ static int            vesa_ready = 0;
 static description_driver_api_t descr_api;
 static gr_ops_t       vesa_ops;
 static gr_driver_t    vesa_driver;
+
+
+static uint8_t *vbe_rm_info_buf(void)
+{
+    return (uint8_t *)VBE_RM_INFO_ADDR;
+}
 
 //имя режима вида "1024x768x24"
 static void vesa_mode_name(uint32_t x, uint32_t y, uint32_t bpp, char *out)
