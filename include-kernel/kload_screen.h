@@ -75,5 +75,8 @@ void kernel_load_animation_next_step(void);
 void kernel_load_animation_stop_nohide(void);
 void kernel_load_animation_stop(void);
 void load_screen_add_string(const char *fmt, ...);
+//Для случаев, когда надо не добавлять запись в лог, но, подождать примерно то же время
+void fake_load_screen_add_string(const char *fmt, ...);
+
 
 #endif

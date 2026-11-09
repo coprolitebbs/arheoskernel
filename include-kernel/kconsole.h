@@ -136,6 +136,8 @@ typedef struct tty
 
     //PID процесса, владеющего вводом на этом терминале (foreground процесс)
     uint32_t foreground_pid;
+
+    uint32_t cooked_reader_pid;
 } tty_t;
 
 

@@ -31,7 +31,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#include "drivers/include_drivers/kernel_graphic_layer.h"
+#include "drivers/include_drivers/driver_graphic_layer.h"
+#include "include-kernel/graphic_layer.h"
 #include "drivers/include_drivers/drv_format.h"
 #include "include-kernel/bootinfo.h"
 #include "include-kernel/kernel_heap.h"

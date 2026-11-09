@@ -29,7 +29,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#include "drivers/include_drivers/kernel_sound_layer.h"
+#include "drivers/include_drivers/driver_sound_layer.h"
+#include "include-kernel/sound_layer.h"
 #include "drivers/include_drivers/drv_format.h"
 #include "include-kernel/kernel_heap.h"
 #include "include-kernel/isr.h"

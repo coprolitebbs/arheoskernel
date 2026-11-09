@@ -29,8 +29,10 @@
 #include "include-kernel/kconsole.h"
 #include "drivers/include_drivers/drv_format.h"
 #include "include-kernel/config.h"
-#include "drivers/include_drivers/kernel_graphic_layer.h"
-#include "drivers/include_drivers/kernel_sound_layer.h"
+#include "drivers/include_drivers/driver_graphic_layer.h"
+#include "drivers/include_drivers/driver_sound_layer.h"
+#include "include-kernel/graphic_layer.h"
+#include "include-kernel/sound_layer.h"
 #include "include-kernel/kconsole.h"
 #include "include-kernel/font_data.h"
 #include "include-kernel/locale.h"
@@ -181,6 +183,7 @@ void drivers_init(void){
         //usb_driver_api->debug8 = 0;
         //usb_driver_api->debug9 = 0;
         usb_driver_api->load_screen_add_string = load_screen_add_string;
+        usb_driver_api->fake_load_screen_add_string = fake_load_screen_add_string;
         usb_driver_api->dma_alloc_ptr = kernel_usb_dma_alloc;
         usb_driver_api->dma_free_ptr = kernel_usb_dma_free;
         usb_driver_api->get_ticks = kernel_get_ticks;
@@ -271,7 +274,7 @@ void drivers_init(void){
 
     //Инициализация высокоуровневых слоёв графики и звука.
     //Графика: внешние драйверы ещё не подгружены (они грузятся позже из
-    ///adrv/ по boot.cfg), поэтому активируется fb-совместимый fallback
+    //adrv/ по boot.cfg), поэтому активируется fb-совместимый fallback
     //поверх штатного fb_driver. Позже graphic_layer_register_driver() сам
     //переключит активный драйвер, если у него приоритет не ниже.
     init_graphic_layer();

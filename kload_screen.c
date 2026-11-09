@@ -55,6 +55,8 @@
 #include "include-kernel/vmm.h"
 #include "include-kernel/task.h"
 #include "include-kernel/kconsole.h"
+#include "include-kernel/kernel.h"
+
 
 
 //Положение отдельных модулей
@@ -82,6 +84,19 @@ static uint32_t log_count = 0;   //сколько записей реально 
 
 
 //Хелперы
+
+
+//Пауза на n тиков (1 тик PIT = 10 мс, pit_init: 1193180/100 = 100 Гц).
+//Тики не зависят от частоты CPU. Safety-net по итерациям pause — если
+//тики ещё не тикают (PIT/IRQ0 не готовы), выходим по счётчику.
+static void _msleep(uint32_t ticks)
+{
+    if (ticks == 0) return;
+    uint32_t t0 = tick_count;
+    uint32_t safety = 300000u * ticks;
+    while (((tick_count - t0) < ticks) && (safety-- > 0))
+        __asm__ __volatile__("pause");
+}
 
 //Цветной символ(RGB = 0x00RRGGBB, прозрачный фон)
 static void color_char(uint32_t x, uint32_t y, uint8_t ch, uint32_t rgb)
@@ -300,7 +315,7 @@ static void draw_static(void)
     {
         uint32_t fy = panel_y + ph + 18 + 400;
         color_string_centered(fy,"ARHeOS (c) 2026  -  \x8D\xA0\xA2\xA5\xEF\xAD\xAE \xE1\xE2\xA0\xE0\xEB\xAC\xA8 \x8E\x91", C_TEXT_DIM);
-        color_string_centered(fy + 14, "\x87\xA0\xA3\xE0\xE3\xA7\xAA\xA0, ожидайте...", C_TEXT_DIM);
+        color_string_centered(fy + 14, "\x87\xA0\xA3\xE0\xE3\xA7\xAA\xA0, \xAE\xA6\xA8\xA4\xA0\xA9\xE2\xA5...", C_TEXT_DIM);
     }
 
     //Лог поверх статики, в свою область
@@ -729,6 +744,13 @@ void load_screen_add_string(const char *fmt, ...)
     {
         redraw_log();
     }
+}
+
+
+void fake_load_screen_add_string(const char *fmt, ...){
+    _msleep((1 + strlen(fmt)) * 30);
+
+
 }
 
 
