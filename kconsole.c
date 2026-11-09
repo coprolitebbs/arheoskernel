@@ -21,6 +21,7 @@
 #include "include-kernel/draw.h"
 #include "include-kernel/debug.h"
 #include "include-kernel/use_drivers.h"
+#include "include-kernel/graphic_layer.h"
 #include "include-kernel/syscalls.h"
 #include "include-kernel/config.h"
 #include "include-kernel/locale.h"
@@ -864,7 +865,18 @@ void kconsole_clear_screen(void)
 
     if (console_bg_active && fb->fill_rect)
     {
-        fb->fill_rect(0, 0, boot_info->width, boot_info->height, console_bgcolor);
+        //заливаем по фактическим размерам текущего режима графического
+        //слоя: bootinfo описывает только загрузочный режим и после смены
+        //разрешения на ходу (SYS_GRAPH_INFO, GRAPH_INFO_SET_MODE) устаревает
+        uint32_t w = boot_info ? boot_info->width : 0;
+        uint32_t h = boot_info ? boot_info->height : 0;
+        gr_mode_info_t m;
+        if (gr_get_current_mode(&m) == GR_OK)
+        {
+            w = m.xres;
+            h = m.yres;
+        }
+        fb->fill_rect(0, 0, w, h, console_bgcolor);
     }
     else
     {
@@ -1102,6 +1114,56 @@ void kconsole_reconfigure(cfg_file_t *cfg)
         kconsole_clear_screen();
         //kprintf("[ACPI] Display reconfigured dynamically. Theme applied successfully.\n");
     }
+}
+
+
+//Пересчет геометрии консолей под текущий режим графического слоя.
+//Вызывается после успешной смены видеорежима на ходу (SYS_GRAPH_INFO,
+//op GRAPH_INFO_SET_MODE). Размеры окна считаются из gr_cur_mode, а не из
+//bootinfo: bootinfo описывает только загрузочный режим, который после
+//смены разрешения уже не соответствует реальности. Матрицы очищаются,
+//курсоры и редакторы строк сбрасываются — старые координаты могли выйти
+//за пределы новой геометрии
+void kconsole_mode_changed(void)
+{
+    uint32_t w = boot_info ? boot_info->width : 0;
+    uint32_t h = boot_info ? boot_info->height : 0;
+    gr_mode_info_t m;
+    if (gr_get_current_mode(&m) == GR_OK)
+    {
+        w = m.xres;
+        h = m.yres;
+    }
+    if (w == 0 || h == 0) return;
+
+    for (int t = 0; t < TTY_TERMINALS_COUNT; t++)
+    {
+        //размер ячейки берется из шрифта активной локали, проставленный
+        //при инициализации/переконфигурации; нули подменяем безопасными
+        uint32_t cw = (tty_terminals[t].cell_w != 0) ? tty_terminals[t].cell_w : 8;
+        uint32_t ch = (tty_terminals[t].cell_h != 0) ? tty_terminals[t].cell_h : LINE_HEIGHT;
+        uint32_t cols = w / cw;
+        uint32_t rows = h / ch;
+        if (cols > CONSOLE_COLS) cols = CONSOLE_COLS;
+        if (rows > CONSOLE_ROWS) rows = CONSOLE_ROWS;
+        if (cols == 0) cols = 1;
+        if (rows == 0) rows = 1;
+        tty_terminals[t].console_cols = cols;
+        tty_terminals[t].console_rows = rows;
+
+        //сброс позиций вывода и редакторов строк: содержимое набранных
+        //строк не сохраняем, после смены разрешения экран все равно чист
+        tty_terminals[t].cursor_x = 0;
+        tty_terminals[t].cursor_y = 0;
+        tty_terminals[t].input_start_x = 0;
+        tty_terminals[t].input_start_y = 0;
+        tty_terminals[t].line_cursor_pos = 0;
+        tty_terminals[t].line_edit_active = false;
+        tty_terminals[t].line_cursor_drawn = false;
+        tty_terminals[t].kernel_line_active = false;
+    }
+
+    kconsole_clear_screen();
 }
 
 

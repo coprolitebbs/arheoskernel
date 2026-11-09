@@ -115,6 +115,14 @@ int u_gr_current_mode(u_gr_mode_info_t *out);
 //Fix-информация активного драйвера
 int u_gr_fix_info(u_gr_fix_info_t *out);
 
+//Смена режима активного драйвера по индексу (0 .. mode_count-1).
+//Возвращает 0 при успехе, иначе отрицательный код GR_ERR_* ядра:
+//-2 нет активного драйвера, -3 драйвер не умеет менять режим
+//(fbdrv-fallback), -7 ошибка ввода-вывода при modeset, -9 нет такого
+//индекса. После успешной смены ядро само пересчитывает геометрию консолей
+//и очищает экран
+int u_gr_set_mode(uint32_t index);
+
 //Утилиты: строковые имена полей fix-информации (без malloc)
 const char *u_gr_visual_name(uint32_t visual);
 const char *u_gr_type_name(uint32_t type);

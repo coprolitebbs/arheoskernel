@@ -55,6 +55,14 @@ int u_gr_fix_info(u_gr_fix_info_t *out)
     return ret;
 }
 
+int u_gr_set_mode(uint32_t index)
+{
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret)
+                         : "a"(SYS_GRAPH_INFO), "b"(GRAPH_INFO_SET_MODE), "c"(index) : "memory");
+    return ret;
+}
+
 const char *u_gr_visual_name(uint32_t visual)
 {
     switch (visual)

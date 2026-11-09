@@ -172,6 +172,11 @@ void kprintf(const char *format, ...);
 void kconsole_init(void);
 void kconsole_reconfigure(cfg_file_t *cfg);
 
+//Пересчет геометрии консолей под текущий режим графического слоя и очистка
+//экрана. Вызывается после успешной смены видеорежима на ходу
+//(SYS_GRAPH_INFO, op GRAPH_INFO_SET_MODE)
+void kconsole_mode_changed(void);
+
 void kconsole_reset_utf8_state(void);
 
 void kernel_clipboard_set(const uint8_t *src, uint32_t size);

@@ -2134,7 +2134,9 @@ _Static_assert(sizeof(u_gr_fix_info_t) == sizeof(gr_fix_info_t),
 
 //SYS_GRAPH_INFO: информация об активном видеодрайвере графического слоя.
 //ebx = op-код GRAPH_INFO_*; ecx = указатель Ring 3 (для GRAPH_INFO_MODE
-//ecx = индекс режима, а указатель лежит в edx). Возврат: eax = 0/-1.
+//ecx = индекс режима, а указатель лежит в edx; для GRAPH_INFO_SET_MODE
+//ecx = индекс целевого режима). Возврат: eax = 0/-1, для SET_MODE —
+//отрицательный код GR_ERR_*.
 //Источник данных — активный драйвер реестра graphic_layer.c: для
 //fbdrv-fallback это boot-режим из bootinfo, для vesa_fb — вся таблица
 //VBE-режимов, собранная загрузчиком, с возможной сменой режима на ходу
@@ -2142,10 +2144,14 @@ void systemcall_graph_info(struct regs *r)
 {
     uint32_t op = r->ebx;
 
-    //Указатель Ring 3 обязан лежать в пользовательском диапазоне VA
-    //(процессы с 0x40000000, ядро с 0xC0000000)
     uint32_t user_ptr = (op == GRAPH_INFO_MODE) ? r->edx : r->ecx;
-    if (user_ptr < 0x40000000 || user_ptr >= 0xC0000000)
+
+    //Указатель Ring 3 обязан лежать в пользовательском диапазоне VA
+    //(процессы с 0x40000000, ядро с 0xC0000000). SET_MODE указателя не
+    //передает: в ecx лежит индекс целевого режима, проверка диапазона
+    //к нему не применяется
+    if (op != GRAPH_INFO_SET_MODE &&
+        (user_ptr < 0x40000000 || user_ptr >= 0xC0000000))
     {
         r->eax = -1;
         return;
@@ -2215,6 +2221,26 @@ void systemcall_graph_info(struct regs *r)
                 return;
             }
             memcpy((void *)user_ptr, &fix, sizeof(gr_fix_info_t));
+            r->eax = 0;
+            break;
+        }
+
+        //Смена режима активного драйвера на ходу: ecx = индекс режима
+        //(0 .. mode_count-1). Указателя нет — операция только переключает
+        //режим. Возврат не -1, а сам отрицательный код GR_ERR_*: Ring 3
+        //может отличить "нет такого режима" (-9) от "драйвер не умеет
+        //менять режим" (-3, fbdrv-fallback) и "ошибка ввода-вывода" (-7)
+        case GRAPH_INFO_SET_MODE:
+        {
+            int rc = gr_set_mode(r->ecx);
+            if (rc != GR_OK)
+            {
+                r->eax = (uint32_t)rc;
+                return;
+            }
+            //геометрия консолей привязана к разрешению: пересчитываем окна
+            //TTY под новый режим и очищаем экран
+            kconsole_mode_changed();
             r->eax = 0;
             break;
         }

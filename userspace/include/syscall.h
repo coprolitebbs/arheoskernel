@@ -91,6 +91,7 @@
 #define GRAPH_INFO_MODE     1   //ecx = индекс режима, edx = u_gr_mode_info_t*
 #define GRAPH_INFO_CURRENT  2   //ecx = u_gr_mode_info_t* — текущий режим
 #define GRAPH_INFO_FIX      3   //ecx = u_gr_fix_info_t* — fix-информация
+#define GRAPH_INFO_SET_MODE 4   //ecx = индекс режима; возврат 0 или код GR_ERR_*
 
 #define SYS_HALT_OS               99
 
