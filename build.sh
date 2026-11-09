@@ -214,6 +214,9 @@ $CC $USER_CCFLAGS_ELF -c userspace/lib/uimage.c -o bin/u_uimage_elf.o
 #Библиотечка работы с устройствами
 $CC $USER_CCFLAGS -c userspace/lib/udevices.c -o bin/u_udevices.o
 $CC $USER_CCFLAGS_ELF -c userspace/lib/udevices.c -o bin/u_udevices_elf.o
+#Библиотечка графической информации (SYS_GRAPH_INFO)
+$CC $USER_CCFLAGS -c userspace/lib/ugraph.c -o bin/u_ugraph.o
+$CC $USER_CCFLAGS_ELF -c userspace/lib/ugraph.c -o bin/u_ugraph_elf.o
 
 # Тестовые программы
 # hello.c
@@ -263,6 +266,8 @@ $CC $USER_CCFLAGS_ELF -c "userspace/system procs/thoth/platform_arheos.c" -o bin
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/lsusb/lsusb.c" -o bin/u_lsusb.o
 #arfetch
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/arfetch/arfetch.c" -o bin/u_arfetch.o
+#graphinfo — отчет о видеодрайвере и режимах
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/graphinfo/graphinfo.c" -o bin/u_graphinfo.o
 #df
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/df/df.c" -o bin/u_df.o
 #arcom
@@ -303,6 +308,7 @@ $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_u
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_thoth.o bin/u_thoth_platform.o -o bin/thoth.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lsusb.o -o bin/lsusb.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_uimage_elf.o bin/u_arfetch.o -o bin/arfetch.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_ugraph_elf.o bin/u_graphinfo.o -o bin/graphinfo.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_lib_elf.o bin/u_df.o -o bin/df.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_arcom_ui.o bin/u_arcom_core.o bin/u_arcom_ah.o bin/u_arcom_am.o -o bin/arcom.elf
 
@@ -364,6 +370,7 @@ create_fat_image() {
     mcopy -i "$IMG" bin/arfetch.elf ::/BIN/
     mcopy -i "$IMG" bin/df.elf ::/BIN/
     mcopy -i "$IMG" bin/arcom.elf ::/BIN/
+    mcopy -i "$IMG" bin/graphinfo.elf ::/BIN/
 
     mmd -i "$IMG" ::/CONFIG
     mmd -i "$IMG" ::/CONFIG/BOOT
@@ -473,6 +480,7 @@ e2cp bin/lsusb.elf tmp_ext2.img:/bin/lsusb.elf
 e2cp bin/arfetch.elf tmp_ext2.img:/bin/arfetch.elf
 e2cp bin/df.elf tmp_ext2.img:/bin/df.elf
 e2cp bin/arcom.elf tmp_ext2.img:/bin/arcom.elf
+e2cp bin/graphinfo.elf tmp_ext2.img:/bin/graphinfo.elf
 
 e2mkdir tmp_ext2.img:/config
 e2mkdir tmp_ext2.img:/config/boot

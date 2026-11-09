@@ -37,6 +37,8 @@
 #include "include-kernel/usb_registry.h"
 #include "userspace/include/udevices_struct.h"
 #include "userspace/include/mount_structures.h"
+#include "include-kernel/graphic_layer.h"
+#include "userspace/include/ugraph.h"
 
 // Состояние модификаторов клавиатуры в ядре
 bool shift_pressed = false;
@@ -2123,6 +2125,107 @@ void systemcall_get_mount_info(struct regs *r)
 }
 
 
+//Стражи совпадения layout пользовательских зеркал ugraph.h со структурами
+//графического слоя: маршалинг в systemcall_graph_info идет побайтово
+_Static_assert(sizeof(u_gr_mode_info_t) == sizeof(gr_mode_info_t),
+               "u_gr_mode_info_t layout mismatch");
+_Static_assert(sizeof(u_gr_fix_info_t) == sizeof(gr_fix_info_t),
+               "u_gr_fix_info_t layout mismatch");
+
+//SYS_GRAPH_INFO: информация об активном видеодрайвере графического слоя.
+//ebx = op-код GRAPH_INFO_*; ecx = указатель Ring 3 (для GRAPH_INFO_MODE
+//ecx = индекс режима, а указатель лежит в edx). Возврат: eax = 0/-1.
+//Источник данных — активный драйвер реестра graphic_layer.c: для
+//fbdrv-fallback это boot-режим из bootinfo, для vesa_fb — вся таблица
+//VBE-режимов, собранная загрузчиком, с возможной сменой режима на ходу
+void systemcall_graph_info(struct regs *r)
+{
+    uint32_t op = r->ebx;
+
+    //Указатель Ring 3 обязан лежать в пользовательском диапазоне VA
+    //(процессы с 0x40000000, ядро с 0xC0000000)
+    uint32_t user_ptr = (op == GRAPH_INFO_MODE) ? r->edx : r->ecx;
+    if (user_ptr < 0x40000000 || user_ptr >= 0xC0000000)
+    {
+        r->eax = -1;
+        return;
+    }
+
+    switch (op)
+    {
+        //Карточка активного драйвера
+        case GRAPH_INFO_DRIVER:
+        {
+            gr_driver_t *drv = graphic_layer_get_active();
+            u_gr_driver_info_t *out = (u_gr_driver_info_t *)user_ptr;
+            if (!drv)
+            {
+                r->eax = -1;
+                return;
+            }
+            memset(out, 0, sizeof(u_gr_driver_info_t));
+            out->abi_version  = drv->version;
+            out->priority     = drv->priority;
+            out->current_mode = drv->current_mode;
+            out->mode_count   = (uint32_t)gr_get_mode_count();
+            out->driver_count = graphic_layer_get_driver_count();
+            for (uint32_t i = 0; i < sizeof(out->name); i++)
+                out->name[i] = drv->name[i];
+            for (uint32_t i = 0; i < sizeof(out->longname); i++)
+                out->longname[i] = drv->longname[i];
+            r->eax = 0;
+            break;
+        }
+
+        //Режим по индексу из списка драйвера
+        case GRAPH_INFO_MODE:
+        {
+            gr_mode_info_t mode;
+            if (gr_enum_mode(r->ecx, &mode) != GR_OK)
+            {
+                r->eax = -1;
+                return;
+            }
+            memcpy((void *)user_ptr, &mode, sizeof(gr_mode_info_t));
+            r->eax = 0;
+            break;
+        }
+
+        //Текущий режим (кэш слоя, валидируется при регистрации и смене)
+        case GRAPH_INFO_CURRENT:
+        {
+            gr_mode_info_t mode;
+            if (gr_get_current_mode(&mode) != GR_OK)
+            {
+                r->eax = -1;
+                return;
+            }
+            memcpy((void *)user_ptr, &mode, sizeof(gr_mode_info_t));
+            r->eax = 0;
+            break;
+        }
+
+        //Неизменяемая часть: имя, размеры видеопамяти, визуальный класс
+        case GRAPH_INFO_FIX:
+        {
+            gr_fix_info_t fix;
+            if (gr_get_fix_info(&fix) != GR_OK)
+            {
+                r->eax = -1;
+                return;
+            }
+            memcpy((void *)user_ptr, &fix, sizeof(gr_fix_info_t));
+            r->eax = 0;
+            break;
+        }
+
+        default:
+            r->eax = -1;
+            break;
+    }
+}
+
+
 void syscalls_table_init(void)
 {
     syscalls_table[SYS_FILL_SCREEN].func = &systemcall_fill_screen;
@@ -2175,5 +2278,6 @@ void syscalls_table_init(void)
     syscalls_table[SYS_TTY_LINE_EDIT].func = &systemcall_tty_line_edit;
     syscalls_table[SYS_GET_MOUNT_COUNT].func = &systemcall_get_mount_count;
     syscalls_table[SYS_GET_MOUNT_INFO].func = &systemcall_get_mount_info;
+    syscalls_table[SYS_GRAPH_INFO].func = &systemcall_graph_info;
 
 }

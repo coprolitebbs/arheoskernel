@@ -39,7 +39,7 @@ void __attribute__((naked)) _start(void)
         "pushl %%ebx\n\t"           //Вторым аргументом main заталкиваем argv
         "pushl %%eax\n\t"           //Первым аргументом main заталкиваем argc
 
-        "call main\n\t"            //Вызываем Си-функцию main! Результат (0) вернется в EAX
+        "call main\n\t"            //Вызываем Си-функцию main, Результат (0) вернется в EAX
 
         //Очищаем стек Ring 3 от двухpush-ей параметров main (восстанавливаем ESP на +8 байт)
         "addl $8, %%esp\n\t"

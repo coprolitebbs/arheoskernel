@@ -81,6 +81,17 @@
 //Управление курсором редактора строки из Ring-3 (см. systemcall_tty_line_edit)
 #define SYS_TTY_LINE_EDIT         65
 
+//Графическая подсистема: карточка активного видеодрайвера, его текущий
+//режим, fix-информация и список доступных разрешений (источник — реестр
+//graphic_layer.c: fbdrv-fallback или загруженный vesa_fb и т.п.)
+#define SYS_GRAPH_INFO            66
+
+//op-коды для SYS_GRAPH_INFO (ebx = op)
+#define GRAPH_INFO_DRIVER   0   //ecx = u_gr_driver_info_t*
+#define GRAPH_INFO_MODE     1   //ecx = индекс режима, edx = u_gr_mode_info_t*
+#define GRAPH_INFO_CURRENT  2   //ecx = u_gr_mode_info_t* — текущий режим
+#define GRAPH_INFO_FIX      3   //ecx = u_gr_fix_info_t* — fix-информация
+
 #define SYS_HALT_OS               99
 
 #define KBD_DRIVER_NOT_READY   -2
