@@ -20,6 +20,19 @@
 
 #include <stdint.h>
 
+//Размер GDT: 6 базовых дескрипторов (0..5) + дальние индексы 128/129 под
+//16-битные сегменты тримплина PM->RM (см. gdt.c / vbe_rm_blob.asm).
+//Пустые записи между 5 и 128 - нули, селекторы на них никогда не грузятся.
+#define GDT_ENTRIES       130
+#define GDT_IDX_RM_CODE16 128
+#define GDT_IDX_RM_DATA16 129
+
+//Селекторы (индекс<<3)
+#define GDT_SEL_KERNEL_CODE 0x08
+#define GDT_SEL_KERNEL_DATA 0x10
+#define GDT_SEL_RM_CODE16   0x0400
+#define GDT_SEL_RM_DATA16   0x0408
+
 void tss_init(void);
 void update_tss_esp0(uint32_t esp0);
 void gdt_init(void);
@@ -60,7 +73,7 @@ struct tss_entry
 } __attribute__((packed));
 
 //Объявления (extern)
-extern struct gdt_entry gdt[6];
+extern struct gdt_entry gdt[GDT_ENTRIES];
 extern struct gdt_ptr gp;
 extern struct tss_entry tss;
 

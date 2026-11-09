@@ -16,9 +16,10 @@
  */
 
 #include "include-kernel/gdt.h"
+#include "include-kernel/vbe_rm.h"
 #include <stdint.h>
 
-struct gdt_entry gdt[6];
+struct gdt_entry gdt[GDT_ENTRIES];
 struct gdt_ptr gp;
 struct tss_entry tss __attribute__((aligned(8)));
 
@@ -53,6 +54,14 @@ void gdt_init(void)
     gdt_set_gate(3, 0, 0xFFFFF, 0xFA, 0xCF); //код пользователя
     gdt_set_gate(4, 0, 0xFFFFF, 0xF2, 0xCF); //данные пользователя
     gdt_set_gate(5, (uint32_t)&tss, sizeof(tss)-1, 0x89, 0x00); // TSS
+
+    //16-битные дескрипторы для тримплина PM->RM (vbe_rm_blob.asm).
+    //База = адрес блоба: в реальном режиме база CS считается как
+    //видимое_значение<<4 = 0x400<<4 = 0x4000, поэтому в момент сброса PE
+    //выборка команд не разрывается. Индексы 128/129 выбраны так, чтобы
+    //селекторы (0x0400/0x0408) сразу годились для реального режима.
+    gdt_set_gate(GDT_IDX_RM_CODE16, VBE_RM_BLOB_ADDR, 0xFFFF, 0x9A, 0x00);
+    gdt_set_gate(GDT_IDX_RM_DATA16, VBE_RM_BLOB_ADDR, 0xFFFF, 0x92, 0x00);
 
     gp.limit = sizeof(gdt) - 1;
     gp.base = (uint32_t)&gdt;

@@ -40,6 +40,7 @@
 #include "include-kernel/locale.h"
 #include "include-kernel/font_vga.h"
 #include "include-kernel/kload_screen.h"
+#include "include-kernel/vbe_rm.h"
 
 
 
@@ -98,6 +99,13 @@ void _start(void)
     com_puts("[KERNEL] Starting...\n");
 
     bootinfo_init(info);
+
+    //Real-mode тримплин VBE: копия машинного блоба на физический 0x4000.
+    //Пейджинг ещё выключен, поэтому запись идёт напрямую в физическую память;
+    //позже identity-map накроет эту область, и тримплин станет доступен
+    //драйверам через gr_driver_t.vbe_rm_exec_ptr (смена режима на ходу).
+    vbe_rm_init();
+    com_puts("[VBE_RM] trampoline installed at 0x4000\n");
 
 
     if(boot_info)

@@ -15,8 +15,8 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#ifndef KERNEL_GRAPHIC_LAYER_H
-#define KERNEL_GRAPHIC_LAYER_H
+#ifndef DRIVER_GRAPHIC_LAYER_H
+#define DRIVER_GRAPHIC_LAYER_H
 
 /*
  * kernel_graphic_layer.h — высокоуровневый слой абстракции графики
@@ -45,6 +45,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "../../include-kernel/vbe_rm.h"
 
 //---------------- ABI ----------------
 #define GR_LAYER_ABI_VERSION 1
@@ -124,6 +125,19 @@ typedef struct gr_fix_info
     uint32_t ywrapstep;
 } gr_fix_info_t;
 
+//Структура регистров для VESA
+typedef struct vbe_rm_regs
+{
+    uint16_t ax;
+    uint16_t bx;
+    uint16_t cx;
+    uint16_t dx;
+    uint16_t di;
+    uint16_t si;
+    uint16_t es;
+} __attribute__((packed)) vbe_rm_regs_t;
+
+
 //---------------- операции драйвера (аналог fb_ops) ------------------
 //Все функции необязательны (NULL): слой подставит программную реализацию
 //через LFB текущего режима или вернёт GR_ERR_UNSUPPORTED.
@@ -181,6 +195,10 @@ typedef struct gr_driver
     void  (*vmm_map_pages_ptr)(uint32_t phys, uint32_t size);
     void  (*vmm_map_pages_uncached_ptr)(uint32_t phys, uint32_t size);
     void  (*printf_ptr)(const char *fmt, ...);   /* kprintf ядра */
+
+    //Вызов функций BIOS int 10h (VBE) через real-mode тримплин vbe_rm.c.
+    //Нужно драйверам, умеющим менять видеорежим на ходу (vesa_fb).
+    int (*vbe_rm_exec_ptr)(vbe_rm_regs_t *regs);
 
     void *native_driver_api;  //Адрес на структуру нативных функций драйвера (например, дополнительных) - это для совместимости с дефолтным драйвером фреймбуффера
 } gr_driver_t;

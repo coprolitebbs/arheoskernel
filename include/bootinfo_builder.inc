@@ -17,11 +17,11 @@
 
 build_boot_info:
 
-	push edi
-	push esi
-	push ecx
-	push edx
-	push eax
+        push edi
+        push esi
+        push ecx
+        push edx
+        push eax
 
     mov edi,BOOTINFO_ADDR
 
@@ -77,10 +77,22 @@ build_boot_info:
     mov al,[drive]
     mov [edi+BOOT_DRIVE],eax
 
-	pop eax
-	pop edx
-	pop ecx
-	pop esi
+    ;VBE: адрес таблицы режимов, собранной vbe.inc, и её шапка
+    mov dword [edi+BOOT_VBE_MODES],VBE_MODES_ADDR
+    xor eax,eax
+    mov ax,[VBE_MODES_ADDR+VBE_TBL_COUNT]
+    mov [edi+BOOT_VBE_MODE_COUNT],eax
+    xor eax,eax
+    mov ax,[VBE_MODES_ADDR+VBE_TBL_VERSION]
+    mov [edi+BOOT_VBE_VERSION],eax
+    xor eax,eax
+    mov ax,[VBE_MODES_ADDR+VBE_TBL_CURRENT]
+    mov [edi+BOOT_VBE_CURRENT],eax
+
+        pop eax
+        pop edx
+        pop ecx
+        pop esi
     pop edi
 
     ;mov eax,BOOTINFO_ADDR

@@ -47,6 +47,7 @@
 #include "include-kernel/locale.h"
 #include "include-kernel/font_data.h"
 #include "include-kernel/use_drivers.h"
+#include "include-kernel/vbe_rm.h"
 
 //---------------- реестр драйверов ----------------
 #define GR_DRIVERS_MAX 8
@@ -752,6 +753,9 @@ static void gr_inject_runtime(gr_driver_t *drv)
     if (!drv->vmm_map_pages_ptr)          drv->vmm_map_pages_ptr          = vmm_map_pages;
     if (!drv->vmm_map_pages_uncached_ptr) drv->vmm_map_pages_uncached_ptr = vmm_map_pages_uncached;
     if (!drv->printf_ptr) drv->printf_ptr = kprintf;
+    //Сервис вызова BIOS int 10h через real-mode тримплин: нужен драйверам
+    //со сменой видеорежима на ходу (vesa_fb -> 4F02); остальным не мешает
+    if (!drv->vbe_rm_exec_ptr) drv->vbe_rm_exec_ptr = vbe_rm_exec;
 }
 
 int graphic_layer_register_driver(gr_driver_t *drv)

@@ -60,7 +60,41 @@ BOOT_LOADER_NAME   equ 60
 
 BOOT_DRIVE         equ 64
 
-BOOT_TOTAL_SIZE    equ 68
+;VBE: таблица режимов (заполняется vbe.inc до сборки bootinfo)
+BOOT_VBE_MODES       equ 68
+BOOT_VBE_MODE_COUNT  equ 72
+BOOT_VBE_VERSION     equ 76
+BOOT_VBE_CURRENT     equ 80
+
+BOOT_TOTAL_SIZE      equ 84
+
+;================= таблица режимов VBE =================
+;Адрес и формат совпадают с include-kernel/bootinfo.h (vbe_table_hdr_t /
+;vbe_mode_rec_t). Таблица лежит в младшей памяти и переживает старт ядра.
+
+VBE_MODES_ADDR       equ 0x5400
+VBE_MODES_MAX        equ 64
+VBE_TABLE_MAGIC      equ 0x4D534256      ;"VBSM"
+
+;шапка таблицы
+VBE_TBL_MAGIC        equ 0
+VBE_TBL_VERSION      equ 4
+VBE_TBL_COUNT        equ 6
+VBE_TBL_CURRENT      equ 8
+VBE_TBL_RESERVED     equ 10
+VBE_TBL_RECORDS      equ 12
+
+;запись режима, 16 байт
+VBE_REC_MODE         equ 0
+VBE_REC_XRES         equ 2
+VBE_REC_YRES         equ 4
+VBE_REC_BPP          equ 6
+VBE_REC_FLAGS        equ 7
+VBE_REC_PITCH        equ 8
+VBE_REC_RESERVED     equ 10
+VBE_REC_PHYS         equ 12
+VBE_MODE_REC_SIZE    equ 16
+VBE_REC_FLAG_LFB     equ 1
 
 ;struct filesystem_info
 ;Универсальная часть

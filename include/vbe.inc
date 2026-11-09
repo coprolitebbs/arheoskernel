@@ -13,9 +13,20 @@
  ; You should have received a copy of the GNU General Public License
  ; along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+;vbe.inc — инициализация VESA VBE в stage2:
+;  1) 4F00 — информация о контроллере;
+;  2) vbe_enum_modes — перечисление ВСЕХ LFB-режимов в таблицу 0x5400
+;     (VBE_MODES_ADDR из bootinfo.inc; ядро читает её через bootinfo.h);
+;  3) vbe_pick_boot_mode — выбор режима загрузки (1024x768, приоритет bpp);
+;  4) установка режима и заполнение глобальных переменных для bootinfo.
+;Если список режимов контроллера не дал результата — включается старый
+;грубый перебор 0x0100..0x01FF с допущением банковского режима (S3 Trio64
+;в 86box и подобные BIOS без нормального списка). Найденный банковским
+;перебором LFB-режим дописывается в таблицу отдельной записью.
+
 BITS 16
 
-;Глобальные переменные
+;Глобальные переменные (совместимость со старым кодом и bootinfo_builder)
 lfb_addr:       dd 0
 pitch:          dd 0
 bytes_pp:       dd 0
@@ -24,24 +35,21 @@ bpp:            db 0
 screen_width:   dd 0
 screen_height:  dd 0
 
-;Флаги графики для передачи ядру
-;Бит 0: 1 = LFB активен, 0 = Банковский режим
-;Бит 1: 1 = VESA PMI доступен (есть функция переключения банков в PM)
+;Флаги графики: бит 0 = LFB активен (бит 1 PMI больше не используется —
+;банковский режим из PM всё равно не работает без тримплина)
 graphics_flags: dd 0
-
-;Переменные для PMI (если доступен)
-vesa_pmi_seg:   dw 0        ;Сегмент данных для вызова PMI
-vesa_pmi_off:   dd 0        ;Смещение (адрес) функции PMI
-vesa_pmi_len:   dw 0        ;Длина окна (обычно 64KB)
-
 
 vbe_ctrl_info:  times 512 db 0
 mode_info:      times 256 db 0
 msg_err:        db "VBE Error!", 0
-msg_pmi_ok:     db "PMI", 0 ; Отладка
 
 best_mode:      dw 0
 best_bpp:       db 0
+best_index:     dw 0            ;индекс выбранного режима в таблице, 0xFFFF = нет
+mode_count:     dw 0            ;сколько записей собрал vbe_enum_modes
+
+;Порядок приоритета bpp при выборе режима загрузки: 24 > 16 > 32 > 8
+bpp_prio:       db 24, 16, 32, 8
 
 ; VBE Init
 vbe_init:
@@ -49,37 +57,76 @@ vbe_init:
     push es
     push ds
 
-    ; Инициализация флагов и PMI
     mov dword [graphics_flags], 0
-    mov word [vesa_pmi_seg], 0
-    mov dword [vesa_pmi_off], 0
-    mov word [vesa_pmi_len], 0
+    mov dword [lfb_addr], 0
+    mov dword [pitch], 0
+    mov dword [bytes_pp], 0
+    mov dword [screen_width], 0
+    mov dword [screen_height], 0
+    mov byte [bpp], 0
+    mov word [best_mode], 0
+    mov byte [best_bpp], 0
+    mov word [best_index], 0xFFFF
+    mov word [mode_count], 0
 
-    ;Отладка: Старт
+    ;Отладка: старт
     mov al, 'v'
     call debug_char
 
     ;Получение информации о контроллере
     mov ax, cs
     mov es, ax
-    ;mov di, mode_info
     mov di, vbe_ctrl_info
     mov ax, 0x4F00
     int 0x10
     cmp ax, 0x004F
     jne .vbe_fail
 
-    mov al, 'O' ;OK Controller
+    mov al, 'O'                 ;OK Controller
     call debug_char
 
-    ;Перебор режимов
-    mov bx, 0x0100
-    mov word [best_mode], 0
-    mov byte [best_bpp], 0
+    ;Полное перечисление LFB-режимов в таблицу 0x5400
+    call vbe_enum_modes
 
-.scan_loop:
+    ;Выбор режима загрузки из таблицы: 1024x768 с наивысшим приоритетом bpp
+    call vbe_pick_boot_mode
+    cmp word [best_mode], 0
+    je .fallback_scan
+
+    ;Режим из таблицы — PhysBasePtr проверен при перечислении,
+    ;поэтому сначала ставим с LFB-флагом
+    mov bx, [best_mode]
+    or bx, 0x4000
+    mov ax, 0x4F02
+    int 0x10
+    cmp ax, 0x004F
+    je .table_lfb_ok
+
+    ;Подстраховка для VBE 1.x-подобных BIOS: LFB-установка не прошла —
+    ;пробуем банковский режим (vesa-драйвер в ядре тогда не включится,
+    ;сработает штатный fbdrv поверх boot-режима)
+    mov bx, [best_mode]
+    and bx, 0x7FFF
+    mov ax, 0x4F02
+    int 0x10
+    cmp ax, 0x004F
+    jne .vbe_fail
+    mov al, 'N'                 ;No LFB
+    call debug_char
+    mov dword [graphics_flags], 0
+    mov word [best_index], 0xFFFF
+    jmp .fill_vars
+
+.table_lfb_ok:
+    mov dword [graphics_flags], 1
+    jmp .fill_vars
+
+.fallback_scan:
+    ;Кривые BIOS без списка режимов: старый грубый перебор 0x0100..0x01FF
+    mov bx, 0x0100
+.fb_scan:
     cmp bx, 0x0200
-    jge .check_result
+    jge .fb_check
 
     ;Запрос информации о режиме BX
     mov ax, cs
@@ -88,200 +135,110 @@ vbe_init:
     mov ax, 0x4F01
     mov cx, bx
     int 0x10
-
     cmp ax, 0x004F
-    jne .next_scan
+    jne .fb_next
 
-    ;Проверка атрибутов: Графический?
+    ;Проверка атрибутов — логика старого кода сохранена
     mov ax, [cs:mode_info + 0]
     test ax, 0x0002
-    jz .next_scan
+    jz .fb_next
 
     ;Чтение параметров
-    mov ax, [cs:mode_info + 18] ; X
-    mov dx, [cs:mode_info + 20] ; Y
-    movzx cx, byte [cs:mode_info + 25] ;BPP
+    mov ax, [cs:mode_info + 18]         ;X
+    mov dx, [cs:mode_info + 20]         ;Y
+    movzx cx, byte [cs:mode_info + 25]  ;BPP
 
     ;Жесткая проверка 1024x768
     cmp ax, 1024
-    jne .next_scan
+    jne .fb_next
     cmp dx, 768
-    jne .next_scan
-
+    jne .fb_next
     cmp cx, 8
-    jl .next_scan
+    jl .fb_next
 
     ;Логика выбора приоритета цвета (24 > 16 > 32 > 8)
     cmp cx, 24
-    je .take_24
+    je .fb_take_24
     cmp cx, 16
-    je .take_16
+    je .fb_take_16
     cmp cx, 32
-    je .take_32
+    je .fb_take_32
     cmp cx, 8
-    je .take_8
-    jmp .next_scan
+    je .fb_take_8
+    jmp .fb_next
 
-.take_24:
+.fb_take_24:
     mov word [best_mode], bx
     mov byte [best_bpp], 24
-    jmp .do_set_mode
+    jmp .fb_set
 
-.take_16:
+.fb_take_16:
     cmp byte [best_bpp], 24
-    je .next_scan
+    je .fb_next
     mov word [best_mode], bx
     mov byte [best_bpp], 16
-    jmp .next_scan
+    jmp .fb_next
 
-.take_32:
+.fb_take_32:
     cmp byte [best_bpp], 24
-    je .next_scan
+    je .fb_next
     cmp byte [best_bpp], 16
-    je .next_scan
+    je .fb_next
     mov word [best_mode], bx
     mov byte [best_bpp], 32
-    jmp .next_scan
+    jmp .fb_next
 
-.take_8:
+.fb_take_8:
     cmp byte [best_bpp], 24
-    je .next_scan
+    je .fb_next
     cmp byte [best_bpp], 16
-    je .next_scan
+    je .fb_next
     cmp byte [best_bpp], 32
-    je .next_scan
+    je .fb_next
     mov word [best_mode], bx
     mov byte [best_bpp], 8
-    jmp .next_scan
+    jmp .fb_next
 
-.next_scan:
+.fb_next:
     inc bx
-    jmp .scan_loop
+    jmp .fb_scan
 
-.check_result:
+.fb_check:
     cmp word [best_mode], 0
     je .vbe_fail
 
-.do_set_mode:
-    mov bx, [best_mode]
-
+.fb_set:
     ;С флагом LFB (0x4000)
+    mov bx, [best_mode]
     or bx, 0x4000
     mov ax, 0x4F02
     int 0x10
-
     cmp ax, 0x004F
-    je .success_lfb
+    je .fb_lfb_ok
 
-    ;Без флага LFB
+    ;Без флага LFB — банковский режим
     mov bx, [best_mode]
-    and bx, 0xBFFF
+    and bx, 0x7FFF
     mov ax, 0x4F02
     int 0x10
-
     cmp ax, 0x004F
     jne .vbe_fail
 
-    ;Успех без LFB
-    mov al, 'N' ; No LFB
+    mov al, 'N'                 ;No LFB
     call debug_char
+    mov dword [graphics_flags], 0
+    jmp .fill_vars
 
-    jmp .success_fill_vars
-
-.success_lfb:
-    ;Успех с LFB
-    ;mov al, 'L' ; LFB OK
-    ;call debug_char
-    ;Устанавливаем бит 0 в graphics_flags
+.fb_lfb_ok:
     mov dword [graphics_flags], 1
-    jmp .success_fill_vars
 
-.success_fill_vars:
-    ;Проверка VESA PMI (Protected Mode Interface)
-    ;Вызываем только если мы в банковском режиме (бит 0 флагов = 0)
-    ;или всегда для получения адреса функции, если он нужен ядру.
-
-    mov ax, cs
-    mov es, ax
-    ;mov di, mode_info     ;Буфер для структуры PMI
-    mov di, vbe_ctrl_info
-    mov ax, 0x4F0A        ;Функция: Get Protected Mode Interface
-    mov bl, 0x00          ;Подфункция 0: Основной интерфейс (Bank Switching)
-    mov cx, 0             ;Очищаем регистр длины
-    int 0x10
-
-    cmp ax, 0x004F        ;Регистр AX = 0x004F — единственный признак успеха
-    jne .pmi_fail
-
-    mov [cs:vesa_pmi_len], cx
-
-    movzx eax, word [cs:mode_info + 0x00] ;Берем смещение к SetWindow
-    ;add eax, mode_info                    ;Прибавляем базовый адрес буфера
-    add eax, vbe_ctrl_info
-    mov [cs:vesa_pmi_off], eax
-
-    ;PMI найден
-    ;Структура PMI (VBE 2.0+):
-    ;00h: Return status (WORD) - уже проверили
-    ;02h: PM Code segment (WORD) - обычно сегмент кода
-    ;04h: PM Code offset (DWORD) - смещение функции
-    ;08h: PM Data segment (WORD) - сегмент данных
-    ;0Ah: PM Data offset (DWORD) - смещение данных (редко используется)
-
-    ;Сохраняем адрес функции переключения банков
-    ;mov ax, [cs:mode_info + 0x02] ; PM Code Segment
-    ;mov [vesa_pmi_seg], ax
-
-    ;mov eax, [cs:mode_info + 0x04] ; PM Code Offset
-    ;mov [vesa_pmi_off], eax
-
-    ; Длина окна (обычно 64KB, но можно прочитать из структуры, если она расширена)
-    ; В базовой структуре длины нет, предполагаем 64KB (0x10000)
-    ;mov word [vesa_pmi_len], 0x1000
-
-    ; Устанавливаем Бит 1 в graphics_flags
-    mov eax, [graphics_flags]
-    or eax, 2           ; 0b10
-    mov [graphics_flags], eax
-
-    ; Отладка
-    ;mov si, msg_pmi_ok
-    ;mov ah, 0x0E
-    ;mov bx, 0x0007
-    ;call .print_str_short
-
-    jmp .finish_vars
-
-.pmi_fail:
-    mov al, 'P'         ;PMI не найден
-    call debug_char
-
-.finish_vars:
-    mov bx, [best_mode]
-    or bx, 0x4000
-    mov ax, 0x4F02
-    int 0x10
-    cmp ax, 0x004F
-    je .finish_vars_lfb_ok
-
-    ; LFB не сработал повторно — возвращаемся в банковский режим
-
-
-    mov bx, [best_mode]
-    and bx, 0xBFFF
-    mov ax, 0x4F02
-    int 0x10
-    cmp ax, 0x004F
-    jne .vbe_fail_info
-    ; graphics_flags уже 0 (пришли из no-LFB пути), оставляем как есть
-
-.finish_vars_lfb_ok:
-    ; Дальше — запрос mode_info и заполнение переменных
+.fill_vars:
+    ;Запрос mode_info реально выставленного режима
     mov ax, cs
     mov es, ax
     mov di, mode_info
     mov ax, 0x4F01
-    mov cx, [best_mode]
+    mov cx, bx
     int 0x10
     cmp ax, 0x004F
     jne .vbe_fail_info
@@ -308,8 +265,60 @@ vbe_init:
     mov eax, [cs:mode_info + 0x28]
     mov [lfb_addr], eax
 
-    mov dword [cs:graphics_flags], 1
+    ;Если работаем LFB-режимом — фиксируем текущий режим в таблице.
+    ;Для банковского режима таблицу не трогаем: vesa-драйвер в ядре сам
+    ;откажется регистрироваться (нет LFB — нет и нашего пути)
+    cmp dword [graphics_flags], 1
+    jne .finish
+    mov eax, [cs:mode_info + 0x28]
+    test eax, eax
+    jz .finish
 
+    mov cx, [VBE_MODES_ADDR+VBE_TBL_COUNT]
+    test cx, cx
+    jnz .set_current
+
+    ;Таблица пуста (fallback нашёл режим без списка) — добавляем запись
+    cmp cx, VBE_MODES_MAX
+    jae .finish
+    xor ax, ax
+    mov es, ax
+    mov di, cx
+    shl di, 4
+    add di, VBE_MODES_ADDR+VBE_TBL_RECORDS
+    mov ax, [best_mode]
+    or ax, 0x4000
+    mov [es:di+VBE_REC_MODE], ax
+    mov ax, [cs:screen_width]
+    mov [es:di+VBE_REC_XRES], ax
+    mov ax, [cs:screen_height]
+    mov [es:di+VBE_REC_YRES], ax
+    mov al, [bpp]
+    mov [es:di+VBE_REC_BPP], al
+    mov byte [es:di+VBE_REC_FLAGS], VBE_REC_FLAG_LFB
+    mov ax, [pitch]
+    mov [es:di+VBE_REC_PITCH], ax
+    mov word [es:di+VBE_REC_RESERVED], 0
+    mov eax, [lfb_addr]
+    mov [es:di+VBE_REC_PHYS], eax
+    inc cx
+    mov [VBE_MODES_ADDR+VBE_TBL_COUNT], cx
+    mov [mode_count], cx
+    ;добавленная запись и есть текущий режим
+    mov ax, cx
+    dec ax
+    mov [best_index], ax
+
+.set_current:
+    ;Индекс текущего режима пишем только если он реально из таблицы:
+    ;табличный путь заполнил best_index, fallback в пустую таблицу — тоже,
+    ;а банковский/LFB-вне-таблицы случай оставляет 0xFFFF
+    mov ax, [best_index]
+    cmp ax, 0xFFFF
+    je .finish
+    mov [VBE_MODES_ADDR+VBE_TBL_CURRENT], ax
+
+.finish:
     pusha
     ;Отладка - Успешно
     mov al, 'S'
@@ -348,42 +357,180 @@ vbe_init:
     hlt
     jmp .hang
 
-.print_str_short:
-    lodsb
-    test al, al
-    jz .p_done
-    int 0x10
-    jmp .print_str_short
-.p_done:
-
-    ; Отладка VBE через порт 0xE9
+;---------------------------------------------------------------
+;vbe_enum_modes — перечисление всех LFB-режимов контроллера.
+;Идёт по списку режимов из VbeInfoBlock (VideoModePtr), каждый проверяет
+;через 4F01: поддерживается + графический + цветной + bpp 8/16/24/32 +
+;PhysBasePtr != 0. Годные записи пишет в таблицу 0x5400 с флагом LFB,
+;номер режима сохраняется уже с битом 0x4000.
+;Портит: CX (число записей). Все регистры и сегменты сохраняет.
+;---------------------------------------------------------------
+vbe_enum_modes:
     pusha
-    mov al, ' '
-    out 0xE9, al
-    mov al, 'W'
-    out 0xE9, al
-    mov eax, [screen_width]
-    call debug_hex_dword
-    mov al, 'H'
-    out 0xE9, al
-    mov eax, [screen_height]
-    call debug_hex_dword
-    mov al, 'P'
-    out 0xE9, al
-    mov eax, [pitch]
-    call debug_hex_dword
-    mov al, 'L'
-    out 0xE9, al
-    mov eax, [lfb_addr]
-    call debug_hex_dword
-    mov al, 'F'
-    out 0xE9, al
-    mov eax, [graphics_flags]
-    call debug_hex_dword
+    push es
+    push ds
+
+    ;Шапка таблицы
+    mov word [VBE_MODES_ADDR+VBE_TBL_MAGIC], (VBE_TABLE_MAGIC & 0xFFFF)
+    mov word [VBE_MODES_ADDR+VBE_TBL_MAGIC+2], (VBE_TABLE_MAGIC >> 16)
+    mov ax, [cs:vbe_ctrl_info+4]        ;VbeVersion (BCD)
+    mov [VBE_MODES_ADDR+VBE_TBL_VERSION], ax
+    mov word [VBE_MODES_ADDR+VBE_TBL_COUNT], 0
+    mov word [VBE_MODES_ADDR+VBE_TBL_CURRENT], 0xFFFF
+    mov word [VBE_MODES_ADDR+VBE_TBL_RESERVED], 0
+
+    ;DS:SI -> список режимов контроллера (VideoModePtr, offset:segment)
+    mov si, [cs:vbe_ctrl_info+0x0E]     ;offset
+    mov ax, [cs:vbe_ctrl_info+0x10]     ;segment
+    mov ds, ax
+    xor cx, cx                          ;счётчик записей
+    cld
+
+.next_mode:
+    cmp cx, VBE_MODES_MAX
+    jae .enum_done
+    lodsw
+    cmp ax, 0xFFFF                      ;терминатор списка
+    je .enum_done
+    mov dx, ax                          ;DX = номер режима
+
+    ;4F01 по режиму: буфер в CS:mode_info
+    push cx
+    push si
+    push ds
+    mov ax, cs
+    mov es, ax
+    mov di, mode_info
+    mov cx, dx
+    mov ax, 0x4F01
+    int 0x10
+    cmp ax, 0x004F
+    jne .enum_skip
+
+    ;Фильтры: режим поддерживается + графический + цветной
+    mov ax, [cs:mode_info+0]
+    test ax, 0x0001                     ;бит 0: supported in hardware
+    jz .enum_skip
+    test ax, 0x0010                     ;бит 4: graphics mode
+    jz .enum_skip
+    test ax, 0x0008                     ;бит 3: color mode
+    jz .enum_skip
+
+    ;Глубина цвета
+    mov al, [cs:mode_info+0x19]
+    cmp al, 8
+    je .enum_bpp_ok
+    cmp al, 16
+    je .enum_bpp_ok
+    cmp al, 24
+    je .enum_bpp_ok
+    cmp al, 32
+    je .enum_bpp_ok
+    jmp .enum_skip
+
+.enum_bpp_ok:
+    ;Только LFB: физический адрес фреймбуфера ненулевой
+    mov eax, [cs:mode_info+0x28]
+    test eax, eax
+    jz .enum_skip
+
+    ;Запись в таблицу (ES=0, DI = 0x540C + номер*16)
+    xor ax, ax
+    mov es, ax
+    mov di, cx
+    shl di, 4
+    add di, VBE_MODES_ADDR+VBE_TBL_RECORDS
+    mov ax, dx
+    or ax, 0x4000
+    mov [es:di+VBE_REC_MODE], ax
+    mov ax, [cs:mode_info+0x12]
+    mov [es:di+VBE_REC_XRES], ax
+    mov ax, [cs:mode_info+0x14]
+    mov [es:di+VBE_REC_YRES], ax
+    mov al, [cs:mode_info+0x19]
+    mov [es:di+VBE_REC_BPP], al
+    mov byte [es:di+VBE_REC_FLAGS], VBE_REC_FLAG_LFB
+    mov ax, [cs:mode_info+0x10]
+    mov [es:di+VBE_REC_PITCH], ax
+    mov word [es:di+VBE_REC_RESERVED], 0
+    mov eax, [cs:mode_info+0x28]
+    mov [es:di+VBE_REC_PHYS], eax
+    inc cx
+
+.enum_skip:
+    pop ds
+    pop si
+    pop cx
+    jmp .next_mode
+
+.enum_done:
+    mov [cs:mode_count], cx
+    mov [VBE_MODES_ADDR+VBE_TBL_COUNT], cx
+
+    pop ds
+    pop es
     popa
-
-
     ret
 
+;---------------------------------------------------------------
+;vbe_pick_boot_mode — выбор режима загрузки из таблицы.
+;Ищет 1024x768 в порядке приоритета bpp_prio (24 > 16 > 32 > 8).
+;Находит — заполняет best_mode/best_bpp/best_index и возвращается.
+;Не находит — best_mode остаётся 0 (включится fallback-перебор).
+;Требует DS=0. Все регистры сохраняет.
+;---------------------------------------------------------------
+vbe_pick_boot_mode:
+    pusha
+    mov cx, [VBE_MODES_ADDR+VBE_TBL_COUNT]
+    test cx, cx
+    jz .pick_none
 
+    mov si, 0                           ;индекс приоритета
+.prio_loop:
+    cmp si, 4
+    jae .pick_none
+    xor di, di                          ;индекс записи
+.rec_loop:
+    cmp di, cx
+    jae .pick_next_prio
+    mov ax, di
+    shl ax, 4
+    add ax, VBE_MODES_ADDR+VBE_TBL_RECORDS
+    mov bx, ax                          ;BX = смещение записи
+    cmp word [bx+VBE_REC_XRES], 1024
+    jne .pick_next_rec
+    cmp word [bx+VBE_REC_YRES], 768
+    jne .pick_next_rec
+    ;приоритетный bpp: 16-битная адресация не допускает base+index,
+    ;поэтому адрес bpp_prio+si берём через [bx] и возвращаем BX на запись
+    mov ax, bpp_prio
+    add ax, si
+    mov bx, ax
+    mov dl, [bx]                        ;DL = приоритетный bpp
+    mov ax, di
+    shl ax, 4
+    add ax, VBE_MODES_ADDR+VBE_TBL_RECORDS
+    mov bx, ax                          ;BX = смещение записи
+    cmp dl, [bx+VBE_REC_BPP]
+    jne .pick_next_rec
 
+    ;Найден режим с максимальным доступным приоритетом bpp
+    mov ax, [bx+VBE_REC_MODE]
+    mov [best_mode], ax
+    mov al, [bx+VBE_REC_BPP]
+    mov [best_bpp], al
+    mov [best_index], di
+    popa
+    ret
+
+.pick_next_rec:
+    inc di
+    jmp .rec_loop
+
+.pick_next_prio:
+    inc si
+    jmp .prio_loop
+
+.pick_none:
+    popa
+    ret

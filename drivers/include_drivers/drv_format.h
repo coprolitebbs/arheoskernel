@@ -308,4 +308,7 @@ typedef struct
     uint8_t type;     //1 - Нажата (Press), 0 - Отпущена (Release)
 } kbd_event_t;
 
+
+
+
 #endif

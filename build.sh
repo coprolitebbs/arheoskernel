@@ -89,8 +89,10 @@ $CC $KERNEL_CCFLAGS -Iinclude -c kload_screen.c -o bin/kload_screen.o
 $CC $KERNEL_CCFLAGS -Iinclude -c usb_registry.c -o bin/usb_registry.o
 $CC $KERNEL_CCFLAGS -Iinclude -c graphic_layer.c -o bin/graphic_layer.o
 $CC $KERNEL_CCFLAGS -Iinclude -c sound_layer.c -o bin/sound_layer.o
+$CC $KERNEL_CCFLAGS -Iinclude -c vbe_rm.c -o bin/vbe_rm.o
 
 nasm -f elf32 isr.asm -o bin/isr_asm.o
+nasm -f elf32 vbe_rm_blob.asm -o bin/vbe_rm_blob.o
 #nasm -f elf32 switch.asm -o bin/switch.o
 #nasm -f elf32 idle_loop.asm -o bin/idle_loop.o
 #nasm -f elf32 font_data.asm -o bin/font_data.o
@@ -123,6 +125,10 @@ nasm -f elf32 drivers/ext2_driver/ext2_start.asm -o bin/ext2_start.o
 $CC $DRVFLAGS -fno-pie -c drivers/kbd_driver/kbd_driver.c  -o bin/kbd_driver.o
 nasm -f elf32 drivers/kbd_driver/kbd_start.asm -o bin/kbd_start.o
 
+# vesa framebuffer driver (simplefb-модель: LFB из bootinfo + смена режима через vbe_rm)
+$CC $DRVFLAGS -fno-pie -c drivers/vesa_fb/vesa_fb.c  -o bin/vesa_fb.o
+nasm -f elf32 drivers/vesa_fb/vesa_start.asm -o bin/vesa_start.o
+
 # block device driver
 $CC $DRVFLAGS -fno-pie -c drivers/block_driver/block_driver.c  -o bin/block_driver.o
 nasm -f elf32 drivers/block_driver/block_start.asm -o bin/block_start.o
@@ -140,6 +146,9 @@ nasm -f elf32 drivers/usb_driver/usb_start.asm -o bin/usb_start.o
 #Линковка драйверов
 $LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld bin/fb_start.o \
 bin/fb_driver.o bin/dlib.o bin/d_font.o -o bin/fb_driver.elf
+
+$LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
+bin/vesa_start.o bin/vesa_fb.o bin/dlib.o -o bin/vesa_fb.elf
 
 $LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
 bin/fat12_start.o bin/fat12_driver.o bin/dlib.o bin/fat12_disk.o \
@@ -170,7 +179,7 @@ bin/pmm.o bin/vmm.o bin/isr.o bin/syscall.o bin/isr_asm.o bin/font_data.o bin/gd
 bin/task.o bin/debug.o bin/bootinfo.o bin/driver_elf.o bin/use_drivers.o bin/kernel_heap.o \
 bin/comdebug.o bin/ports_io.o bin/hardware.o bin/vfs.o bin/kconsole.o bin/config.o \
 bin/kbd_translate.o bin/font.o bin/locale.o bin/font_vga.o bin/kpanic.o bin/kload_screen.o \
-bin/usb_registry.o bin/graphic_layer.o bin/sound_layer.o
+bin/usb_registry.o bin/graphic_layer.o bin/sound_layer.o bin/vbe_rm.o bin/vbe_rm_blob.o
 
 #Сборка отладочного ELF-файла ядра для lldb
 $LD -m elf_i386 -T kernel_elf.ld -o bin/kernel.elf bin/kernel.o bin/lib.o bin/draw.o \
@@ -178,7 +187,7 @@ bin/pmm.o bin/vmm.o bin/isr.o bin/syscall.o bin/isr_asm.o bin/font_data.o bin/gd
 bin/task.o bin/debug.o bin/bootinfo.o bin/driver_elf.o bin/use_drivers.o bin/kernel_heap.o \
 bin/comdebug.o bin/ports_io.o bin/hardware.o bin/vfs.o bin/kconsole.o bin/config.o \
 bin/kbd_translate.o bin/font.o bin/locale.o bin/font_vga.o bin/kpanic.o bin/kload_screen.o \
-bin/usb_registry.o bin/graphic_layer.o bin/sound_layer.o
+bin/usb_registry.o bin/graphic_layer.o bin/sound_layer.o bin/vbe_rm.o bin/vbe_rm_blob.o
 
 
 # Сборка USERSPACE
@@ -311,11 +320,11 @@ create_fat_image() {
     echo -e "${GREEN}Creating FAT12 image: $IMG (${SIZE}K) with $BOOT_BIN${NC}"
 
     dd if=/dev/zero of="$IMG" bs=1024 count="$SIZE" 2>/dev/null
-	if [ "$SIZE" -eq 1440 ]; then
+        if [ "$SIZE" -eq 1440 ]; then
         mkfs.fat -F 12 -f 2 -s 1 -r 224 -R 1 -v "$IMG" 2>/dev/null
     else
-		mkfs.fat -F 12 -f 2 -s 2 -r 224 -R 1 -v "$IMG" 2>/dev/null
-	fi
+                mkfs.fat -F 12 -f 2 -s 2 -r 224 -R 1 -v "$IMG" 2>/dev/null
+        fi
     # Копируем файлы в образ
     #Загрузчик stage2
     mcopy -i "$IMG" bin/f12ld.bin ::/F12.LD
@@ -329,6 +338,7 @@ create_fat_image() {
     mcopy -i "$IMG" bin/ext2_driver.elf ::/EXT2_DR.DRV
     mmd -i "$IMG" ::/ADRV
     mcopy -i "$IMG" bin/kbd_driver.elf ::/ADRV/KBDPS2.DRV
+    mcopy -i "$IMG" bin/vesa_fb.elf ::/ADRV/VESA.DRV
     #пользовательские программы
     mmd -i "$IMG" ::/USBIN
     #mcopy -i "$IMG" bin/hello.bin ::/USBIN/
@@ -432,6 +442,7 @@ e2cp bin/ext2_driver.elf tmp_ext2.img:/ext2_dr.drv
 e2mkdir tmp_ext2.img:/adrv
 e2cp bin/kbd_driver.elf tmp_ext2.img:/adrv/kbdps2.drv
 e2cp bin/usb_driver.elf tmp_ext2.img:/adrv/usb.drv
+e2cp bin/vesa_fb.elf tmp_ext2.img:/adrv/vesa.drv
 
 
 e2mkdir tmp_ext2.img:/usbin
