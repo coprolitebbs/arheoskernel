@@ -48,6 +48,12 @@ extern kbd_driver_api_t *kbd_driver_api;
 
 extern block_driver_api_t *blockdevice_driver;
 
+//Универсальный DMA-аллокатор (uncached, физически непрерывный).
+//Используется USB-стеком; через sound_layer внедряется звуковым драйверам
+//под DMA-кольца (AC'97 BDL, SB16).
+void *kernel_usb_dma_alloc(uint32_t size, uint32_t *phys_out);
+void  kernel_usb_dma_free(void *virt, uint32_t size);
+
 //extern char* additional_drivers_list;
 
 void drivers_init(void);

@@ -41,6 +41,9 @@
 #define DESCR_KEYBOARD_DRIVER      3
 #define DESCR_BLOCKDEVICE_DRIVER   4
 #define DESCR_USB_DRIVER           5
+//Высокоуровневые слои графики/звука (kernel_graphic_layer.h / kernel_sound_layer.h)
+#define DESCR_GRAPHICS_DRIVER      6
+#define DESCR_SOUND_DRIVER         7
 
 
 #define BLK_REMOVABLE   0x0001

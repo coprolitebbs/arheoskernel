@@ -87,6 +87,8 @@ $CC $KERNEL_CCFLAGS -Iinclude -c font_vga.c -o bin/font_vga.o
 $CC $KERNEL_CCFLAGS -Iinclude -c kpanic.c -o bin/kpanic.o
 $CC $KERNEL_CCFLAGS -Iinclude -c kload_screen.c -o bin/kload_screen.o
 $CC $KERNEL_CCFLAGS -Iinclude -c usb_registry.c -o bin/usb_registry.o
+$CC $KERNEL_CCFLAGS -Iinclude -c graphic_layer.c -o bin/graphic_layer.o
+$CC $KERNEL_CCFLAGS -Iinclude -c sound_layer.c -o bin/sound_layer.o
 
 nasm -f elf32 isr.asm -o bin/isr_asm.o
 #nasm -f elf32 switch.asm -o bin/switch.o
@@ -168,7 +170,7 @@ bin/pmm.o bin/vmm.o bin/isr.o bin/syscall.o bin/isr_asm.o bin/font_data.o bin/gd
 bin/task.o bin/debug.o bin/bootinfo.o bin/driver_elf.o bin/use_drivers.o bin/kernel_heap.o \
 bin/comdebug.o bin/ports_io.o bin/hardware.o bin/vfs.o bin/kconsole.o bin/config.o \
 bin/kbd_translate.o bin/font.o bin/locale.o bin/font_vga.o bin/kpanic.o bin/kload_screen.o \
-bin/usb_registry.o
+bin/usb_registry.o bin/graphic_layer.o bin/sound_layer.o
 
 #Сборка отладочного ELF-файла ядра для lldb
 $LD -m elf_i386 -T kernel_elf.ld -o bin/kernel.elf bin/kernel.o bin/lib.o bin/draw.o \
@@ -176,7 +178,7 @@ bin/pmm.o bin/vmm.o bin/isr.o bin/syscall.o bin/isr_asm.o bin/font_data.o bin/gd
 bin/task.o bin/debug.o bin/bootinfo.o bin/driver_elf.o bin/use_drivers.o bin/kernel_heap.o \
 bin/comdebug.o bin/ports_io.o bin/hardware.o bin/vfs.o bin/kconsole.o bin/config.o \
 bin/kbd_translate.o bin/font.o bin/locale.o bin/font_vga.o bin/kpanic.o bin/kload_screen.o \
-bin/usb_registry.o
+bin/usb_registry.o bin/graphic_layer.o bin/sound_layer.o
 
 
 # Сборка USERSPACE

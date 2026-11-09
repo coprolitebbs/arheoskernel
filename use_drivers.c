@@ -29,6 +29,8 @@
 #include "include-kernel/kconsole.h"
 #include "drivers/include_drivers/drv_format.h"
 #include "include-kernel/config.h"
+#include "drivers/include_drivers/kernel_graphic_layer.h"
+#include "drivers/include_drivers/kernel_sound_layer.h"
 #include "include-kernel/kconsole.h"
 #include "include-kernel/font_data.h"
 #include "include-kernel/locale.h"
@@ -59,8 +61,10 @@ static const void *kernel_get_active_locale(void){
 //Универсальный USB DMA-аллокатор.
 //Возвращает физически непрерывный блок, identity-mapped в VA-пространство
 //ядра (а значит — и в адресное пространство драйвера, который живёт в
-//том же CR3). Используется драйвером для QH/TD и больших transfer-буферов
-static void *kernel_usb_dma_alloc(uint32_t size, uint32_t *phys_out){
+//том же CR3). Используется драйвером для QH/TD и больших transfer-буферов.
+//Прототип вынесен в use_drivers.h: через sound_layer его же получают
+//звуковые драйверы под DMA-кольца (AC'97 BDL, SB16)
+void *kernel_usb_dma_alloc(uint32_t size, uint32_t *phys_out){
     if (size == 0 || !phys_out) return NULL;
     uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     uint32_t phys  = (uint32_t)pmm_alloc_pages(pages);
@@ -85,7 +89,7 @@ static void *kernel_usb_dma_alloc(uint32_t size, uint32_t *phys_out){
     return (void*)phys;
 }
 
-static void kernel_usb_dma_free(void *virt, uint32_t size){
+void kernel_usb_dma_free(void *virt, uint32_t size){
     if (!virt || size == 0) return;
     uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     pmm_free_pages(virt, pages);
@@ -264,6 +268,14 @@ void drivers_init(void){
         }
     }
     //load_screen_add_string("FB & Block & USB & Fat12 & EXT2 drivers loaded");
+
+    //Инициализация высокоуровневых слоёв графики и звука.
+    //Графика: внешние драйверы ещё не подгружены (они грузятся позже из
+    ///adrv/ по boot.cfg), поэтому активируется fb-совместимый fallback
+    //поверх штатного fb_driver. Позже graphic_layer_register_driver() сам
+    //переключит активный драйвер, если у него приоритет не ниже.
+    init_graphic_layer();
+    init_sound_layer();
 }
 
 
@@ -358,6 +370,29 @@ int load_additional_drivers(cfg_file_t *cfg){
 
                     break;
                 }*/
+
+                case DESCR_GRAPHICS_DRIVER:{    //Графический драйвер (VESA, Geode и т.п.)
+                    gr_driver_t *gdrv = (gr_driver_t *)fb_descr->struct_ptr;
+                    if (!gdrv || !gdrv->ops){
+                        res = DRV_STATUS_LOAD_ERROR;
+                        load_screen_add_string("Graphics Driver load error");
+                    } else {
+                        int gr_reg = graphic_layer_register_driver(gdrv);
+                        load_screen_add_string("GFX: %s registered (res=%d)", drv_name, gr_reg);
+                    }
+                    break;
+                }
+                case DESCR_SOUND_DRIVER:{      //Звуковой драйвер (SB16, AC'97 и т.п.)
+                    snd_driver_t *sdrv = (snd_driver_t *)fb_descr->struct_ptr;
+                    if (!sdrv || (!sdrv->pcm && !sdrv->mixer)){
+                        res = DRV_STATUS_LOAD_ERROR;
+                        load_screen_add_string("Sound Driver load error");
+                    } else {
+                        int snd_reg = sound_layer_register_driver(sdrv);
+                        load_screen_add_string("SND: %s registered (res=%d)", drv_name, snd_reg);
+                    }
+                    break;
+                }
 
                 default:
                     kprintf("Driver %s skipped (type %d not supported yet)\n", drv_name, fb_descr->type);
