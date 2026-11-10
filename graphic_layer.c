@@ -570,7 +570,16 @@ static void gr_wallpaper_validate(void)
 {
     if (!gr_wallpaper_present || !gr_wallpaper_raw) return;
     uint32_t need = gr_screen_bytes();
-    if (gr_wallpaper_size == need) return;
+
+    //совпадение байтового размера не означает совпадения формата:
+    //1024x768x16 и 512x384x32 дают одинаковый размер буфера, но разную
+    //раскладку пикселей — blit чужого формата дал бы мусорную палитру.
+    //обои остаются без пересчета только при полном совпадении геометрии
+    //и формата с текущим режимом
+    if (gr_wallpaper_size == need &&
+        gr_wp_w == gr_cur_mode.xres && gr_wp_h == gr_cur_mode.yres &&
+        gr_wp_bpp == gr_cur_mode.bpp && gr_wp_pitch == gr_cur_mode.pitch)
+        return;
 
     bool can_remap = gr_wp_w != 0 && gr_wp_h != 0 &&
                      gr_wp_bpp >= 16 && gr_cur_mode.bpp >= 16 &&

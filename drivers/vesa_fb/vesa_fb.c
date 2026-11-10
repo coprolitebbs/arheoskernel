@@ -26,6 +26,10 @@
 //graphic_layer.c подставляет свои программные реализации поверх LFB
 //текущего режима. Поэтому драйверу безразличны bpp и pitch конкретного
 //режима: слой сам переупаковывает цвета и учитывает длину строки.
+//смена режима делается цепочкой 4F02 -> 4F03 -> 4F01: после успешного 4F02
+//железо уже в новом режиме, поэтому дальше ошибок не бывает — геометрия
+//берется либо из железа (реальный режим по 4F03 и ModeInfoBlock по 4F01),
+//либо из записи stage2-таблицы, проверенной этим же BIOS на буте.
 //Загружается как обычный ELF-модуль из /adrv (load_additional_drivers,
 //DESCR_GRAPHICS_DRIVER), как kbdps2.drv.
 
@@ -65,6 +69,33 @@ static description_driver_api_t descr_api;
 static gr_ops_t       vesa_ops;
 static gr_driver_t    vesa_driver;
 
+
+//локальный COM1-вывод: загрузчик модулей (driver_elf.c) не резолвит
+//внешние символы ядра, звать com_puts/com_puthex из драйвера нельзя —
+//неразрешенная релокация ушла бы в мусорный адрес. обвязка прямыми
+//записями в порт 0x3F8 с ожиданием готовности THR (LSR.5), как в блобе
+static void vcom_putc(char c)
+{
+    for (;;)
+    {
+        uint8_t lsr;
+        __asm__ __volatile__("inb %1, %0" : "=a"(lsr) : "Nd"((uint16_t)0x3FD));
+        if (lsr & 0x20) break;
+    }
+    __asm__ __volatile__("outb %0, %1" :: "a"(c), "Nd"((uint16_t)0x3F8));
+}
+
+static void vcom_puts(const char *s)
+{
+    while (*s) vcom_putc(*s++);
+}
+
+static void vcom_puthex(uint32_t v)
+{
+    static const char hx[] = "0123456789ABCDEF";
+    for (int i = 7; i >= 0; i--)
+        vcom_putc(hx[(v >> (i * 4)) & 0xF]);
+}
 
 static uint8_t *vbe_rm_info_buf(void)
 {
@@ -163,6 +194,12 @@ static int vs_get_fix(void *priv, gr_fix_info_t *out)
 
 //---- ops: смена режима на ходу через real-mode тримплин ----
 
+//ключевой принцип: после успешного 4F02 железо уже в новом режиме, и
+//возвращать ошибку нельзя — слой остался бы на старой геометрии и рисовал
+//бы мусор в чужой LFB (ровно те артефакты и расчетверивание, что наблюдали
+//на S3 Trio). поэтому после 4F02 любой сбор геометрии завершается либо
+//фактическими данными железа, либо записью stage2-таблицы, которую тот же
+//биос проверил при перечислении на буте
 static int vs_set_mode(void *priv, uint32_t index)
 {
     (void)priv;
@@ -170,76 +207,185 @@ static int vs_set_mode(void *priv, uint32_t index)
     if (index >= vbe_drawable) return GR_ERR_BADMODE;
     if (!vesa_driver.vbe_rm_exec_ptr) return GR_ERR_UNSUPPORTED;
 
-    const vbe_mode_rec_t *r = &vbe_recs[vbe_idx_map[index]];
+    vbe_mode_rec_t *rec = &vbe_recs[vbe_idx_map[index]];
+    uint16_t clean = (uint16_t)(rec->mode_number & 0x3FFF);
 
-    //4F02: установка режима с флагом LFB. vbe.inc пишет номер в таблицу
-    //уже с битом 0x4000, поэтому перед OR сбрасываем оба флаговых бита
-    //14-15: случайно выставленный бит 15 BIOS трактует как "не чистить
-    //экран", и в LFB остаются пиксели предыдущего режима — мусор на весь
-    //кадр до первой полной перерисовки
+    vcom_puts("[VESA] set idx=");
+    vcom_puthex(index);
+    vcom_puts(" mode=");
+    vcom_puthex(clean);
+    vcom_puts("\n");
+
+    //4F02: установка режима с флагом LFB. номер режима обязан быть чистым:
+    //биты 14-15 некоторые BIOS считают за неизвестный режим (тот же грабель,
+    //что в stage2, см. vbe.inc). бит 15 ("не чистить экран") тоже сбрасываем:
+    //случайно выставленный, он оставляет в LFB мусор предыдущего режима
     vbe_rm_regs_t regs;
     memset(&regs, 0, sizeof(regs));
     regs.ax = 0x4F02;
-    regs.bx = (uint16_t)((r->mode_number & 0x3FFF) | 0x4000);
-    if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0) return GR_ERR_IO;
-
-    //4F01: перечитываем параметры — pitch/bpp/PhysBasePtr могли смениться.
-    //номер режима обязан быть чистым: биты 14-15 некоторые BIOS считают
-    //за неизвестный режим (тот же грабель, что в stage2, см. vbe.inc)
-    memset(&regs, 0, sizeof(regs));
-    regs.ax = 0x4F01;
-    regs.cx = r->mode_number & 0x3FFF;
-    regs.es = VBE_RM_INFO_ADDR >> 4;
-    regs.di = VBE_RM_INFO_ADDR & 0xF;
-    if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0) return GR_ERR_IO;
-
-    const uint8_t *mi = vbe_rm_info_buf();
-    uint32_t xres  = (uint32_t)mi[0x12] | ((uint32_t)mi[0x13] << 8);
-    uint32_t yres  = (uint32_t)mi[0x14] | ((uint32_t)mi[0x15] << 8);
-    uint32_t bpp   = mi[0x19];
-    uint32_t pitch = (uint32_t)mi[0x10] | ((uint32_t)mi[0x11] << 8);
-    uint32_t phys  = (uint32_t)mi[0x28] | ((uint32_t)mi[0x29] << 8)
-                   | ((uint32_t)mi[0x2A] << 16) | ((uint32_t)mi[0x2B] << 24);
-    if (phys == 0 || pitch == 0) return GR_ERR_IO;
-
-    //раскладка цветовых масок конкретного BIOS (RedMaskSize/FieldPosition
-    //и соседи, смещения 0x1F..0x24); берем только если все три непустые
-    uint32_t bf_r_len = mi[0x1F], bf_r_off = mi[0x20];
-    uint32_t bf_g_len = mi[0x21], bf_g_off = mi[0x22];
-    uint32_t bf_b_len = mi[0x23], bf_b_off = mi[0x24];
-
-    //освежаем запись таблицы актуальными параметрами режима
-    vbe_mode_rec_t *rec = &vbe_recs[vbe_idx_map[index]];
-    rec->xres = (uint16_t)xres;
-    rec->yres = (uint16_t)yres;
-    rec->bpp = (uint8_t)bpp;
-    rec->pitch = (uint16_t)pitch;
-    rec->phys_base = phys;
-
-    if (bf_r_len && bf_g_len && bf_b_len)
+    regs.bx = (uint16_t)(clean | 0x4000);
+    if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0)
     {
-        vbe_bits[index].bf_r_len = (uint8_t)bf_r_len;
-        vbe_bits[index].bf_r_off = (uint8_t)bf_r_off;
-        vbe_bits[index].bf_g_len = (uint8_t)bf_g_len;
-        vbe_bits[index].bf_g_off = (uint8_t)bf_g_off;
-        vbe_bits[index].bf_b_len = (uint8_t)bf_b_len;
-        vbe_bits[index].bf_b_off = (uint8_t)bf_b_off;
+        //отказ ДО смены железа: экран и кэш слоя остаются согласованными,
+        //слой отрисует старый режим как ни в чем не бывало
+        vcom_puts("[VESA] 4F02 refused\n");
+        return GR_ERR_IO;
     }
+
+    //4F03: какой режим BIOS выставил реально. ряд BIOS (S3/Trident) молча
+    //подменяет запрошенный режим ближайшим поддержанным — без этой проверки
+    //успешный 4F01 мог бы описывать совсем не тот режим, что на экране
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x4F03;
+    uint32_t actual = clean;
+    if (vesa_driver.vbe_rm_exec_ptr(&regs) == 0)
+    {
+        actual = (uint32_t)(regs.bx & 0x3FFF);
+        if (actual != clean)
+        {
+            vcom_puts("[VESA] 4F03 substituted ");
+            vcom_puthex(clean);
+            vcom_puts(" -> ");
+            vcom_puthex(actual);
+            vcom_puts("\n");
+        }
+    }
+    else
+    {
+        vcom_puts("[VESA] 4F03 failed, assume requested\n");
+    }
+
+    //4F01: ModeInfoBlock активного режима. две попытки: сначала чистый CX
+    //(как читает stage2), затем CX с битом 14 — по спеке VBE он запрашивает
+    //параметры именно LFB-версии режима (PhysBasePtr отдают не все BIOS
+    //на чистый номер)
+    uint32_t attr = 0, xres = 0, yres = 0, bpp = 0, pitch = 0, phys = 0;
+    uint32_t bf_r_len = 0, bf_r_off = 0;
+    uint32_t bf_g_len = 0, bf_g_off = 0;
+    uint32_t bf_b_len = 0, bf_b_off = 0;
+    int mi_ok = 0;
+    for (int attempt = 0; attempt < 2 && !mi_ok; attempt++)
+    {
+        memset(&regs, 0, sizeof(regs));
+        regs.ax = 0x4F01;
+        regs.cx = (attempt == 0) ? (uint16_t)actual
+                                 : (uint16_t)(actual | 0x4000);
+        regs.es = VBE_RM_INFO_ADDR >> 4;
+        regs.di = VBE_RM_INFO_ADDR & 0xF;
+        if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0) continue;
+
+        const uint8_t *mi = vbe_rm_info_buf();
+        attr     = (uint32_t)mi[0x00] | ((uint32_t)mi[0x01] << 8);
+        pitch    = (uint32_t)mi[0x10] | ((uint32_t)mi[0x11] << 8);
+        xres     = (uint32_t)mi[0x12] | ((uint32_t)mi[0x13] << 8);
+        yres     = (uint32_t)mi[0x14] | ((uint32_t)mi[0x15] << 8);
+        bpp      = mi[0x19];
+        phys     = (uint32_t)mi[0x28] | ((uint32_t)mi[0x29] << 8)
+                 | ((uint32_t)mi[0x2A] << 16) | ((uint32_t)mi[0x2B] << 24);
+        bf_r_len = mi[0x1F]; bf_r_off = mi[0x20];
+        bf_g_len = mi[0x21]; bf_g_off = mi[0x22];
+        bf_b_len = mi[0x23]; bf_b_off = mi[0x24];
+
+        vcom_puts("[VESA] 4F01 try");
+        vcom_putc((char)('0' + attempt));
+        vcom_puts(" attr=");
+        vcom_puthex(attr);
+        vcom_puts(" mi=");
+        vcom_puthex(xres);
+        vcom_putc('x');
+        vcom_puthex(yres);
+        vcom_putc('x');
+        vcom_puthex(bpp);
+        vcom_puts(" pitch=");
+        vcom_puthex(pitch);
+        vcom_puts(" phys=");
+        vcom_puthex(phys);
+        vcom_puts("\n");
+
+        //sanity: нули и неадекватные значения — не доверять, пробуем
+        //следующую попытку, затем откат на запись таблицы
+        if (pitch == 0 || xres == 0 || yres == 0 || phys == 0) continue;
+        if (bpp != 16 && bpp != 24 && bpp != 32) continue;
+
+        //bitfields валидны, только если поля укладываются в bpp: часть BIOS
+        //отдает мусор в MaskSize/FieldPosition для нестандартных режимов
+        if (bf_r_len && bf_g_len && bf_b_len)
+        {
+            if (bf_r_off + bf_r_len > bpp ||
+                bf_g_off + bf_g_len > bpp ||
+                bf_b_off + bf_b_len > bpp)
+            {
+                vcom_puts("[VESA] bitfields insane, drop\n");
+                bf_r_len = bf_g_len = bf_b_len = 0;
+                bf_r_off = bf_g_off = bf_b_off = 0;
+            }
+        }
+        mi_ok = 1;
+    }
+
+    if (mi_ok)
+    {
+        //освежаем запись таблицы фактическими параметрами железа: pitch
+        //под виртуальную ширину, подмена режима и смена PhysBasePtr
+        //теперь доезжают до слоя и консоли автоматически
+        rec->xres = (uint16_t)xres;
+        rec->yres = (uint16_t)yres;
+        rec->bpp = (uint8_t)bpp;
+        rec->pitch = (uint16_t)pitch;
+        rec->phys_base = phys;
+
+        if (bf_r_len && bf_g_len && bf_b_len)
+        {
+            vbe_bits[index].bf_r_len = (uint8_t)bf_r_len;
+            vbe_bits[index].bf_r_off = (uint8_t)bf_r_off;
+            vbe_bits[index].bf_g_len = (uint8_t)bf_g_len;
+            vbe_bits[index].bf_g_off = (uint8_t)bf_g_off;
+            vbe_bits[index].bf_b_len = (uint8_t)bf_b_len;
+            vbe_bits[index].bf_b_off = (uint8_t)bf_b_off;
+        }
+        else
+        {
+            //раскладки нет — канонические дефолты слоя (565/888)
+            memset(&vbe_bits[index], 0, sizeof(vbe_bits[index]));
+        }
+    }
+    else
+    {
+        //обе попытки 4F01 сорвались — остаемся на записи stage2-таблицы:
+        //ее параметры тот же биос проверил при перечислении на буте, а
+        //раз мы дошли сюда, этот же номер режима успешно выставился и
+        //сейчас. рассинхрона нет, в отличие от возврата ошибки
+        vcom_puts("[VESA] 4F01 failed, fallback to stage2 record\n");
+        memset(&vbe_bits[index], 0, sizeof(vbe_bits[index]));
+    }
+
+    vcom_puts("[VESA] active ");
+    vcom_puthex(rec->xres);
+    vcom_putc('x');
+    vcom_puthex(rec->yres);
+    vcom_putc('x');
+    vcom_puthex(rec->bpp);
+    vcom_puts(" pitch=");
+    vcom_puthex(rec->pitch);
+    vcom_puts(" phys=");
+    vcom_puthex(rec->phys_base);
+    vcom_puts("\n");
 
     //новый LFB в identity-пространство ядра (старые отображения не мешают)
     if (vesa_driver.vmm_map_pages_ptr)
-        vesa_driver.vmm_map_pages_ptr(phys, pitch * yres);
+        vesa_driver.vmm_map_pages_ptr(rec->phys_base,
+                                      (uint32_t)rec->pitch * rec->yres);
 
     vesa_fill_mode(index, &vesa_cur_mode);
 
     memset(&vesa_fix, 0, sizeof(vesa_fix));
     strcpy(vesa_fix.id, "vesa");
     vesa_fix.smem_start = vesa_cur_mode.lfb;
-    vesa_fix.smem_len = pitch * yres;
+    vesa_fix.smem_len = (uint32_t)vesa_cur_mode.pitch * vesa_cur_mode.yres;
     vesa_fix.type = GR_TYPE_PACKED_PIXELS;
     vesa_fix.visual = (vesa_cur_mode.bpp == 8) ? GR_VISUAL_PSEUDOCOLOR
                                                : GR_VISUAL_TRUECOLOR;
-    vesa_fix.line_length = pitch;
+    vesa_fix.line_length = vesa_cur_mode.pitch;
     return GR_OK;
 }
 
@@ -279,6 +425,31 @@ void driver_main(struct boot_info *boot)
         vbe_idx_map[vbe_drawable++] = i;
     }
     if (vbe_drawable == 0) return;
+
+    //дамп drawable-таблицы в COM: сверка имен режимов в grinfo с реальными
+    //номерами BIOS делается по этому логу — расхождение видно сразу
+    //(в seavgabios, например, 0x115 — это 800x600x24, а не то, что ждёт
+    //выбравший его под другое разрешение)
+    vcom_puts("[VESA] modes table:\n");
+    for (uint32_t i = 0; i < vbe_drawable; i++)
+    {
+        const vbe_mode_rec_t *t = &vbe_recs[vbe_idx_map[i]];
+        vcom_puts("tbl[");
+        vcom_puthex(i);
+        vcom_puts("] mode ");
+        vcom_puthex(t->mode_number & 0x3FFF);
+        vcom_puts(" ");
+        vcom_puthex(t->xres);
+        vcom_putc('x');
+        vcom_puthex(t->yres);
+        vcom_putc('x');
+        vcom_puthex(t->bpp);
+        vcom_puts(" pitch ");
+        vcom_puthex(t->pitch);
+        vcom_puts(" phys ");
+        vcom_puthex(t->phys_base);
+        vcom_puts("\n");
+    }
 
     //формы bitfields сбрасываем: модуль мог грузиться повторно, старые
     //значения от прошлого режима недействительны

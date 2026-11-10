@@ -27,6 +27,7 @@
 #include "drivers/include_drivers/driver_graphic_layer.h"
 #include "include-kernel/lib.h"
 #include "include-kernel/comdebug.h"
+#include "include-kernel/ports_io.h"
 
 //блоб собирается nasm-ом и попадает в .rodata ядра
 extern const uint8_t vbe_rm_blob_start[];
@@ -165,6 +166,29 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
     //GPR/сегменты/флаги/стек, переключает IDTR на IVT и PIC на легаси-базу,
     //поэтому клоббер-список — перестраховка
     __asm__ __volatile__("lcall $0x08, $0x4000\n" : : : "memory", "eax", "ebx", "ecx", "edx", "esi", "edi", "cc");
+
+    //дренаж OBF 8042: скан-код, пришедший в RM-окно смены режима (IRQ1 был
+    //под маской), остается в выходном буфере непрочитанным, и контроллер
+    //не выдает новые байты, пока буфер полон — клавиатура умирает до
+    //перезагрузки (отпускание Enter, запустившего смену режима, попадает
+    //в окно почти всегда). читаем 0x60, пока статус 0x64 показывает OBF
+    //(бит 0); байты aux-канала (бит 5 статуса) тоже вычитываем — OBF
+    //чистится только чтением, но в счетчик клавиатурных байтов они не идут
+    uint8_t drained_kbd = 0;
+    for (uint32_t i = 0; i < 64; i++)
+    {
+        uint8_t st = inb(0x64);
+        if (!(st & 0x01)) break;
+        uint8_t d = inb(0x60);
+        (void)d;
+        if (!(st & 0x20)) drained_kbd++;
+    }
+    if (drained_kbd)
+    {
+        com_puts("[VBE_RM] drained stuck kbd bytes: ");
+        com_puthex(drained_kbd);
+        com_puts("\n");
+    }
 
     com_puts("[VBE_RM] back, res ax=");
     com_puthex(res->ax);
