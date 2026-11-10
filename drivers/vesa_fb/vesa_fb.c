@@ -39,6 +39,24 @@ static vbe_table_hdr_t *vbe_hdr = 0;
 static vbe_mode_rec_t  *vbe_recs = 0;
 static uint32_t         vbe_count = 0;
 
+//карта drawable-режимов: слой рисует программно поверх LFB и не умеет
+//программировать DAC-палитру, поэтому 8bpp-режимы из списка выбрасываются.
+//иначе "-set 800x600" на qemu попадает в первый же 800x600x8 (mode 0x103)
+//и экран превращается в цветной мусор: драйвер пишет сырые индексы палитры
+static uint32_t vbe_idx_map[VBE_MODES_MAX];
+static uint32_t vbe_drawable = 0;
+
+//bitfields режимов, прочитанные из ModeInfoBlock после 4F01 (смещения
+//0x1F..0x24). нулевые длины означают "не прочитано — возьми канонический
+//дефолт": некоторые BIOS (cirrus/trident в 86box) отдают раскладку,
+//отличающуюся от захардкоженной, и пересчет цвета едет
+static struct vbe_bitfields
+{
+    uint8_t bf_r_len, bf_r_off;
+    uint8_t bf_g_len, bf_g_off;
+    uint8_t bf_b_len, bf_b_off;
+} vbe_bits[VBE_MODES_MAX];
+
 static gr_mode_info_t vesa_cur_mode;
 static gr_fix_info_t  vesa_fix;
 static int            vesa_ready = 0;
@@ -67,10 +85,11 @@ static void vesa_mode_name(uint32_t x, uint32_t y, uint32_t bpp, char *out)
     strcat(out, c);
 }
 
-//заполнение gr_mode_info_t из записи таблицы
+//заполнение gr_mode_info_t из записи таблицы.
+//index — drawable-индекс (после фильтра 8bpp), переводится в сырой через vbe_idx_map
 static void vesa_fill_mode(uint32_t index, gr_mode_info_t *m)
 {
-    const vbe_mode_rec_t *r = &vbe_recs[index];
+    const vbe_mode_rec_t *r = &vbe_recs[vbe_idx_map[index]];
     memset(m, 0, sizeof(gr_mode_info_t));
     m->index = index;
     vesa_mode_name(r->xres, r->yres, r->bpp, m->name);
@@ -80,7 +99,8 @@ static void vesa_fill_mode(uint32_t index, gr_mode_info_t *m)
     m->yres_virtual = r->yres;
     m->bpp = r->bpp;
 
-    //bitfields: 32/24 — RGB888, 16 — RGB565, 8 — палитра (слой сам знает)
+    //канонические bitfields-дефолты: 32/24 — RGB888, 16 — RGB565,
+    //8 — палитра (слой сам знает)
     if (m->bpp == 16)
     {
         m->red.offset = 11; m->red.length = 5;
@@ -94,6 +114,15 @@ static void vesa_fill_mode(uint32_t index, gr_mode_info_t *m)
         m->blue.offset = 0; m->blue.length = 8;
     }
 
+    //прочитанные из 4F01 раскладки точнее дефолта — перекрываем, если есть
+    const struct vbe_bitfields *bf = &vbe_bits[index];
+    if (bf->bf_r_len && bf->bf_g_len && bf->bf_b_len)
+    {
+        m->red.offset = bf->bf_r_off;     m->red.length = bf->bf_r_len;
+        m->green.offset = bf->bf_g_off;   m->green.length = bf->bf_g_len;
+        m->blue.offset = bf->bf_b_off;    m->blue.length = bf->bf_b_len;
+    }
+
     m->lfb = r->phys_base;
     m->pitch = r->pitch;
     m->flags = GR_MODE_LFB;
@@ -104,14 +133,14 @@ static void vesa_fill_mode(uint32_t index, gr_mode_info_t *m)
 static int vs_get_mode_count(void *priv)
 {
     (void)priv;
-    return vesa_ready ? (int)vbe_count : 0;
+    return vesa_ready ? (int)vbe_drawable : 0;
 }
 
 static int vs_get_mode(void *priv, uint32_t index, gr_mode_info_t *out)
 {
     (void)priv;
     if (!vesa_ready || !out) return GR_ERR_BADARG;
-    if (index >= vbe_count) return GR_ERR_BADMODE;
+    if (index >= vbe_drawable) return GR_ERR_BADMODE;
     vesa_fill_mode(index, out);
     return GR_OK;
 }
@@ -138,22 +167,25 @@ static int vs_set_mode(void *priv, uint32_t index)
 {
     (void)priv;
     if (!vesa_ready) return GR_ERR_NODEV;
-    if (index >= vbe_count) return GR_ERR_BADMODE;
+    if (index >= vbe_drawable) return GR_ERR_BADMODE;
     if (!vesa_driver.vbe_rm_exec_ptr) return GR_ERR_UNSUPPORTED;
 
-    const vbe_mode_rec_t *r = &vbe_recs[index];
+    const vbe_mode_rec_t *r = &vbe_recs[vbe_idx_map[index]];
 
-    //4F02: установка режима с флагом LFB (номер уже содержит 0x4000)
+    //4F02: установка режима с флагом LFB. vbe.inc пишет номер в таблицу
+    //уже с битом 0x4000, поэтому перед OR сбрасываем оба флаговых бита
+    //14-15: случайно выставленный бит 15 BIOS трактует как "не чистить
+    //экран", и в LFB остаются пиксели предыдущего режима — мусор на весь
+    //кадр до первой полной перерисовки
     vbe_rm_regs_t regs;
     memset(&regs, 0, sizeof(regs));
     regs.ax = 0x4F02;
-    regs.bx = r->mode_number | 0x4000;
+    regs.bx = (uint16_t)((r->mode_number & 0x3FFF) | 0x4000);
     if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0) return GR_ERR_IO;
 
     //4F01: перечитываем параметры — pitch/bpp/PhysBasePtr могли смениться.
     //номер режима обязан быть чистым: биты 14-15 некоторые BIOS считают
-    //за неизвестный режим (тот же грабель, что в stage2, см. vbe.inc),
-    //а в таблице номера хранятся уже с битом 0x4000
+    //за неизвестный режим (тот же грабель, что в stage2, см. vbe.inc)
     memset(&regs, 0, sizeof(regs));
     regs.ax = 0x4F01;
     regs.cx = r->mode_number & 0x3FFF;
@@ -170,12 +202,29 @@ static int vs_set_mode(void *priv, uint32_t index)
                    | ((uint32_t)mi[0x2A] << 16) | ((uint32_t)mi[0x2B] << 24);
     if (phys == 0 || pitch == 0) return GR_ERR_IO;
 
+    //раскладка цветовых масок конкретного BIOS (RedMaskSize/FieldPosition
+    //и соседи, смещения 0x1F..0x24); берем только если все три непустые
+    uint32_t bf_r_len = mi[0x1F], bf_r_off = mi[0x20];
+    uint32_t bf_g_len = mi[0x21], bf_g_off = mi[0x22];
+    uint32_t bf_b_len = mi[0x23], bf_b_off = mi[0x24];
+
     //освежаем запись таблицы актуальными параметрами режима
-    vbe_recs[index].xres = (uint16_t)xres;
-    vbe_recs[index].yres = (uint16_t)yres;
-    vbe_recs[index].bpp = (uint8_t)bpp;
-    vbe_recs[index].pitch = (uint16_t)pitch;
-    vbe_recs[index].phys_base = phys;
+    vbe_mode_rec_t *rec = &vbe_recs[vbe_idx_map[index]];
+    rec->xres = (uint16_t)xres;
+    rec->yres = (uint16_t)yres;
+    rec->bpp = (uint8_t)bpp;
+    rec->pitch = (uint16_t)pitch;
+    rec->phys_base = phys;
+
+    if (bf_r_len && bf_g_len && bf_b_len)
+    {
+        vbe_bits[index].bf_r_len = (uint8_t)bf_r_len;
+        vbe_bits[index].bf_r_off = (uint8_t)bf_r_off;
+        vbe_bits[index].bf_g_len = (uint8_t)bf_g_len;
+        vbe_bits[index].bf_g_off = (uint8_t)bf_g_off;
+        vbe_bits[index].bf_b_len = (uint8_t)bf_b_len;
+        vbe_bits[index].bf_b_off = (uint8_t)bf_b_off;
+    }
 
     //новый LFB в identity-пространство ядра (старые отображения не мешают)
     if (vesa_driver.vmm_map_pages_ptr)
@@ -221,25 +270,59 @@ void driver_main(struct boot_info *boot)
     if (vbe_hdr->count < vbe_count) vbe_count = vbe_hdr->count;
     if (vbe_count == 0) return;
 
-    //текущий режим: сначала индекс из bootinfo, иначе ищем по параметрам
-    uint32_t cur = 0xFFFFFFFF;
-    if (boot->vbe_current < vbe_count) cur = boot->vbe_current;
-    else
+    //карта drawable-режимов: 8bpp выпадает, у слоя нет программирования палитры
+    vbe_drawable = 0;
+    for (uint32_t i = 0; i < vbe_count; i++)
     {
-        for (uint32_t i = 0; i < vbe_count; i++)
+        if (vbe_recs[i].bpp == 8) continue;
+        if (vbe_drawable >= VBE_MODES_MAX) break;
+        vbe_idx_map[vbe_drawable++] = i;
+    }
+    if (vbe_drawable == 0) return;
+
+    //формы bitfields сбрасываем: модуль мог грузиться повторно, старые
+    //значения от прошлого режима недействительны
+    for (uint32_t i = 0; i < vbe_drawable; i++)
+    {
+        vbe_bits[i].bf_r_len = 0; vbe_bits[i].bf_r_off = 0;
+        vbe_bits[i].bf_g_len = 0; vbe_bits[i].bf_g_off = 0;
+        vbe_bits[i].bf_b_len = 0; vbe_bits[i].bf_b_off = 0;
+    }
+
+    //текущий режим: сначала индекс из bootinfo (он в индексах сырой таблицы,
+    //переводим в drawable), иначе ищем по параметрам
+    uint32_t cur = 0xFFFFFFFF;
+    if (boot->vbe_current < vbe_count)
+    {
+        for (uint32_t i = 0; i < vbe_drawable; i++)
         {
-            uint32_t b = boot->bpp;
-            if (b == 15) b = 16;            //так же, как в fb_driver.c
-            if (vbe_recs[i].xres == boot->width &&
-                vbe_recs[i].yres == boot->height &&
-                vbe_recs[i].bpp == b)
+            if (vbe_idx_map[i] == boot->vbe_current)
             {
                 cur = i;
                 break;
             }
         }
     }
-    if (cur == 0xFFFFFFFF || vbe_recs[cur].phys_base == 0) return;
+    else
+    {
+        for (uint32_t i = 0; i < vbe_drawable; i++)
+        {
+            const vbe_mode_rec_t *rec = &vbe_recs[vbe_idx_map[i]];
+            uint32_t b = boot->bpp;
+            if (b == 15) b = 16;            //так же, как в fb_driver.c
+            if (rec->xres == boot->width &&
+                rec->yres == boot->height &&
+                rec->bpp == b)
+            {
+                cur = i;
+                break;
+            }
+        }
+    }
+    //boot-режим не попал в drawable-список (например, он был 8bpp) —
+    //берем первый drawable-режим, лишь бы у него был настоящий LFB
+    if (cur == 0xFFFFFFFF && vbe_drawable > 0) cur = 0;
+    if (cur == 0xFFFFFFFF || vbe_recs[vbe_idx_map[cur]].phys_base == 0) return;
 
     vesa_fill_mode(cur, &vesa_cur_mode);
 
@@ -267,7 +350,7 @@ void driver_main(struct boot_info *boot)
     strcpy(vesa_driver.longname, "VESA VBE linear framebuffer (simplefb model)");
     vesa_driver.priority = 10;          //выше fbdrv-fallback (у него 0)
     vesa_driver.modes = 0;              //режимы отдаём динамически через ops
-    vesa_driver.mode_count = vbe_count;
+    vesa_driver.mode_count = vbe_drawable;
     vesa_driver.ops = &vesa_ops;
     vesa_driver.priv = 0;
     vesa_driver.current_mode = cur;

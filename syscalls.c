@@ -115,9 +115,29 @@ void systemcall_draw_string(struct regs *r)
     r->eax = 0;
 }
 
+//текущая геометрия экрана из кэша графического слоя. boot_info описывает
+//только режим, выставленный загрузчиком: после смены разрешения на ходу
+//(SYS_GRAPH_INFO SET_MODE) он уже не соответствует действительности, и
+//рисование по его числам уезжает в чужие строки LFB — артефакты,
+//дублирование и триплирование картинки по горизонтали
+static void gr_sys_screen_dims(uint32_t *w, uint32_t *h)
+{
+    gr_mode_info_t m;
+    if (gr_get_current_mode(&m) == GR_OK && m.xres != 0 && m.yres != 0)
+    {
+        *w = m.xres;
+        *h = m.yres;
+        return;
+    }
+    *w = boot_info ? boot_info->width : 0;
+    *h = boot_info ? boot_info->height : 0;
+}
+
 void systemcall_draw_char(struct regs *r)
 {
-    if(r->ebx >= boot_info->width || r->ecx >=boot_info->height) return;
+    uint32_t scr_w = 0, scr_h = 0;
+    gr_sys_screen_dims(&scr_w, &scr_h);
+    if(r->ebx >= scr_w || r->ecx >= scr_h) return;
     if(fb && fb->draw_codepoint)
     {
         fb->draw_codepoint(r->ebx, r->ecx, r->edx, r->esi);
@@ -127,6 +147,20 @@ void systemcall_draw_char(struct regs *r)
 
 void systemcall_get_fb_info(struct regs *r)
 {
+    //геометрия обязана идти от активного режима графического слоя: setbg,
+    //sekhmet и arfetch собирают свой рендер из этих чисел, и после смены
+    //режима boot_info отдавал бы старые width/height/bpp/pitch — обои и
+    //графика рисовались в формате уже несуществующего режима
+    gr_mode_info_t m;
+    if (gr_get_current_mode(&m) == GR_OK &&
+        m.xres != 0 && m.yres != 0 && m.bpp != 0 && m.pitch != 0)
+    {
+        r->eax = m.pitch;
+        r->ebx = m.bpp;
+        r->ecx = m.xres;
+        r->edx = m.yres;
+        return;
+    }
     r->eax = boot_info->pitch;
     r->ebx = boot_info->bpp;
     r->ecx = boot_info->width;
@@ -1834,12 +1868,17 @@ void systemcall_scroll_rect(struct regs *r)
         r->eax = -1;
         return;
     }
-    if (x + w > (int32_t)boot_info->width)
+    //границы берем из активного режима слоя, а не из bootinfo: после
+    //смены разрешения bootinfo описывает несуществующий режим и валидные
+    //скроллы отбрасывались бы как "выходящие за экран"
+    uint32_t scr_w = 0, scr_h = 0;
+    gr_sys_screen_dims(&scr_w, &scr_h);
+    if (x + w > (int32_t)scr_w)
     {
         r->eax = -1;
         return;
     }
-    if (y + h > (int32_t)boot_info->height)
+    if (y + h > (int32_t)scr_h)
     {
         r->eax = -1;
         return;
@@ -1890,12 +1929,17 @@ void systemcall_fb_blit(struct regs *r)
         r->eax = -1;
         return;
     }
-    if (x + w > (int32_t)boot_info->width)
+    //границы из активного режима слоя: после смены разрешения blit по
+    //bootinfo отбрасывал валидные прямоугольники (графика "не видна совсем")
+    //или пропускал запись за пределы реального экрана
+    uint32_t scr_w = 0, scr_h = 0;
+    gr_sys_screen_dims(&scr_w, &scr_h);
+    if (x + w > (int32_t)scr_w)
     {
         r->eax = -1;
         return;
     }
-    if (y + h > (int32_t)boot_info->height)
+    if (y + h > (int32_t)scr_h)
     {
         r->eax = -1;
         return;

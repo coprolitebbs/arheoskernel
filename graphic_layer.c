@@ -467,21 +467,158 @@ static uint8_t  *gr_wallpaper_raw = 0;
 static uint32_t  gr_wallpaper_size = 0;
 static bool      gr_wallpaper_present = false;
 
+//геометрия и bitfields формата буфера обоев на момент установки: буфер
+//рисуется userspace'ом в формате текущего экрана, и при смене режима
+//пересобирается под новый формат (масштаб nearest-neighbor + перепаковка
+//пикселей), поэтому слой обязан помнить, в каком формате лежат пиксели
+static uint32_t gr_wp_w = 0;
+static uint32_t gr_wp_h = 0;
+static uint32_t gr_wp_bpp = 0;
+static uint32_t gr_wp_pitch = 0;
+static uint8_t  gr_wp_r_len = 0, gr_wp_r_off = 0;
+static uint8_t  gr_wp_g_len = 0, gr_wp_g_off = 0;
+static uint8_t  gr_wp_b_len = 0, gr_wp_b_off = 0;
+
 static uint32_t gr_screen_bytes(void)
 {
     return gr_cur_mode.pitch * gr_cur_mode.yres;
 }
 
-//Сброс обоев, не соответствующих текущему режиму (после смены режима)
+//Сброс/пересчет обоев, не соответствующих текущему режиму (после смены
+//режима). Буфер обоев хранится в формате режима на момент установки, поэтому
+//при смене разрешения перепаковываем пиксели в новый формат: читаем пиксель
+//в старом bpp, распаковываем в 0x00RRGGBB по bitfields источника, пакуем
+//в новый bpp и пишем с масштабом nearest-neighbor. Пересчитать нечем
+//(формат источника неизвестен, 8bpp, не хватило памяти) — только тогда
+//обои сбрасываются, чтобы не вернуть на экран чужие пиксели
+static void gr_wp_forget_format(void)
+{
+    gr_wp_w = 0;
+    gr_wp_h = 0;
+    gr_wp_bpp = 0;
+    gr_wp_pitch = 0;
+    gr_wp_r_len = 0; gr_wp_r_off = 0;
+    gr_wp_g_len = 0; gr_wp_g_off = 0;
+    gr_wp_b_len = 0; gr_wp_b_off = 0;
+}
+
+//распаковка пикселя буфера обоев в 0x00RRGGBB по формату источника
+static uint32_t gr_wp_read_rgb(const uint8_t *row, uint32_t x)
+{
+    const uint8_t *p = row + x * (gr_wp_bpp / 8);
+    uint32_t raw;
+    switch (gr_wp_bpp)
+    {
+    case 32:
+        raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+            | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        break;
+    case 24:
+        raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+        break;
+    default:
+        raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8);   //15/16 — оба двухбайтовые
+        break;
+    }
+    uint32_t r = gr_unscale8(raw >> gr_wp_r_off, gr_wp_r_len);
+    uint32_t g = gr_unscale8(raw >> gr_wp_g_off, gr_wp_g_len);
+    uint32_t b = gr_unscale8(raw >> gr_wp_b_off, gr_wp_b_len);
+    return (r << 16) | (g << 8) | b;
+}
+
+//запись пикселя в новый буфер в формате текущего режима
+static void gr_wp_write_px(uint8_t *row, uint32_t x, uint32_t rgb)
+{
+    uint32_t packed = gr_pack_color(rgb);
+    uint8_t *p = row + x * (gr_cur_mode.bpp / 8);
+    switch (gr_cur_mode.bpp)
+    {
+    case 32:
+        *(uint32_t *)p = packed;
+        break;
+    case 24:
+        p[0] =  packed        & 0xFF;
+        p[1] = (packed >> 8)  & 0xFF;
+        p[2] = (packed >> 16) & 0xFF;
+        break;
+    default:
+        *(uint16_t *)p = (uint16_t)packed;   //15/16
+        break;
+    }
+}
+
+//запоминание формата источника обоев — вызывается после установки.
+//источник обязан совпадать по размеру с текущим экраном: setbg строит
+//буфер из данных SYS_GET_FB_INFO, и те теперь всегда актуальны
+static void gr_wp_capture_format(void)
+{
+    if (gr_wallpaper_size != gr_screen_bytes() || gr_cur_mode.bpp < 16)
+    {
+        gr_wp_forget_format();
+        return;
+    }
+    gr_wp_w = gr_cur_mode.xres;
+    gr_wp_h = gr_cur_mode.yres;
+    gr_wp_bpp = gr_cur_mode.bpp;
+    gr_wp_pitch = gr_cur_mode.pitch;
+    gr_wp_r_len = gr_cur_mode.red.length;   gr_wp_r_off = gr_cur_mode.red.offset;
+    gr_wp_g_len = gr_cur_mode.green.length; gr_wp_g_off = gr_cur_mode.green.offset;
+    gr_wp_b_len = gr_cur_mode.blue.length;  gr_wp_b_off = gr_cur_mode.blue.offset;
+}
+
 static void gr_wallpaper_validate(void)
 {
-    if (gr_wallpaper_present && gr_wallpaper_size != gr_screen_bytes())
+    if (!gr_wallpaper_present || !gr_wallpaper_raw) return;
+    uint32_t need = gr_screen_bytes();
+    if (gr_wallpaper_size == need) return;
+
+    bool can_remap = gr_wp_w != 0 && gr_wp_h != 0 &&
+                     gr_wp_bpp >= 16 && gr_cur_mode.bpp >= 16 &&
+                     gr_wallpaper_size == gr_wp_pitch * gr_wp_h;
+    if (!can_remap)
     {
-        if (gr_wallpaper_raw) kfree(gr_wallpaper_raw);
+        kfree(gr_wallpaper_raw);
         gr_wallpaper_raw = 0;
         gr_wallpaper_size = 0;
         gr_wallpaper_present = false;
+        gr_wp_forget_format();
+        return;
     }
+
+    uint8_t *nbuf = (uint8_t *)kmalloc(need);
+    if (!nbuf)
+    {
+        kfree(gr_wallpaper_raw);
+        gr_wallpaper_raw = 0;
+        gr_wallpaper_size = 0;
+        gr_wallpaper_present = false;
+        gr_wp_forget_format();
+        return;
+    }
+
+    //построчная перепаковка: строка-источник выбирается по пропорции высот,
+    //пиксель в строке — по пропорции ширин (nearest-neighbor)
+    uint32_t nw = gr_cur_mode.xres;
+    uint32_t nh = gr_cur_mode.yres;
+    for (uint32_t ny = 0; ny < nh; ny++)
+    {
+        const uint8_t *srow = gr_wallpaper_raw
+                            + (uint32_t)(ny * gr_wp_h / nh) * gr_wp_pitch;
+        uint8_t *drow = nbuf + (uint32_t)ny * gr_cur_mode.pitch;
+        for (uint32_t nx = 0; nx < nw; nx++)
+            gr_wp_write_px(drow, nx, gr_wp_read_rgb(srow, nx * gr_wp_w / nw));
+    }
+
+    kfree(gr_wallpaper_raw);
+    gr_wallpaper_raw = nbuf;
+    gr_wallpaper_size = need;
+    gr_wp_w = nw;
+    gr_wp_h = nh;
+    gr_wp_bpp = gr_cur_mode.bpp;
+    gr_wp_pitch = gr_cur_mode.pitch;
+    gr_wp_r_len = gr_cur_mode.red.length;   gr_wp_r_off = gr_cur_mode.red.offset;
+    gr_wp_g_len = gr_cur_mode.green.length; gr_wp_g_off = gr_cur_mode.green.offset;
+    gr_wp_b_len = gr_cur_mode.blue.length;  gr_wp_b_off = gr_cur_mode.blue.offset;
 }
 
 //Декодирует один кодпойнт UTF-8, возвращает число потреблённых байт (>=1).
@@ -623,6 +760,7 @@ static void uni_set_wallpaper(const void *src, uint32_t size)
     memcpy(gr_wallpaper_raw, src, size);
     gr_wallpaper_size = size;
     gr_wallpaper_present = true;
+    gr_wp_capture_format();
 }
 
 static bool uni_has_wallpaper(void)
