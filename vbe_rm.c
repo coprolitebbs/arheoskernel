@@ -57,24 +57,19 @@ static int vbe_rm_ready = 0;
 static volatile int vbe_rm_busy = 0;
 static uint32_t vbe_rm_blob_size = 0;
 
-//дескриптор on-screen маяков тримплина: стадию смены режима блоб рисует
-//белыми квадратами в видимый LFB (beacon_scr в vbe_rm_blob.asm) — отладка
-//на машинах без COM-терминала (Panasonic CF-18 и т.п.). lfb == 0 — маяки
-//выключены: текстовый/банковский режим, fallback-драйвер без LFB
-static uint32_t trace_lfb = 0;
-static uint16_t trace_pitch = 0;
-static uint8_t  trace_bpp = 0;
+//on-screen маяки стадий блоб печатает сам — BIOS teletype '0'..'3'
+//(scrmk в vbe_rm_blob.asm), ячейки дескриптора ему не нужны. прямой
+//рисунок в LFB из реального режима невозможен (лимит сегмента 64 КБ
+//дает #GP — именно это ломало смену режима в fix4), поэтому экранные
+//маркеры делаются только штатным вызовом BIOS. vbe_rm_screen_trace
+//осталась как COM-след геометрии: драйвер сообщает lfb/pitch/bpp
+//при регистрации и после каждой успешной смены режима
 
 //задать геометрию маяков. зовется графическим драйвером при регистрации
-//и после каждой успешной смены режима — маркеры следующего вызова рисуются
-//уже в актуальный фреймбуфер
+//и после каждой успешной смены режима — COM-след актуальной геометрии;
+//сами экранные маркеры блоб печатает teletype и геометрии не требует
 int vbe_rm_screen_trace(uint32_t lfb, uint32_t pitch, uint8_t bpp)
 {
-    trace_lfb = lfb;
-    trace_pitch = (uint16_t)pitch;
-    //в ячейку блоба кладем байты на пиксель, а не биты: 15bpp — те же
-    //2 байта строки, что и 16bpp, множить адрес на 15 нельзя
-    trace_bpp = (uint8_t)((bpp + 7) / 8);
     com_puts("[VBE_RM] screen trace lfb=");
     com_puthex(lfb);
     com_puts(" pitch=");
@@ -189,13 +184,6 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
     *(volatile struct idtr_cell *)VBE_RM_PM_IDT_ADDR = pm_idt;
     struct idtr_cell rm_idt = { 0x3FF, 0x00000000u };
     *(volatile struct idtr_cell *)VBE_RM_RM_IDT_ADDR = rm_idt;
-
-    //дескриптор маяков для блоба — перед каждым прыжком, геометрия могла
-    //смениться с прошлого вызова. пейджинг еще включен, но зона ячеек
-    //identity-mapped, и в RM блоб прочитает те же байты
-    *(volatile uint32_t *)0x4370 = trace_lfb;
-    *(volatile uint16_t *)0x4374 = trace_pitch;
-    *(volatile uint8_t *)0x4375 = trace_bpp;
 
     //вход в блоб: CS остаётся flat 0x08, EIP = 0x4000. Блоб сам сохраняет
     //GPR/сегменты/флаги/стек, переключает IDTR на IVT и PIC на легаси-базу,
