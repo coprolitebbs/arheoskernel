@@ -356,12 +356,18 @@ void isr_handler(struct regs *r)
             //Увеличиваем системные тики
             tick_count++;
 
-            //Обновляем мигание курсора TTY
-            kconsole_update_cursor();
-
-            if ((tick_count & 5) == 0)
+            //пока держится блокировка планировщика (смена режима, spawn)
+            //— рисовать из IRQ нельзя: LFB и CRTC в этот момент
+            //перепрограммируются, состояние графического слоя недействительно
+            if (kernel_schedule_lock == 0)
             {
-                kernel_load_animation_next_step();
+                //Обновляем мигание курсора TTY
+                kconsole_update_cursor();
+
+                if ((tick_count & 5) == 0)
+                {
+                    kernel_load_animation_next_step();
+                }
             }
 
             if (kernel_schedule_lock == 1) return;

@@ -2236,15 +2236,28 @@ void systemcall_graph_info(struct regs *r)
             com_puts("[GINFO] set_mode idx=");
             com_puthex(r->ecx);
             com_puts("\n");
+            //смена режима — атомарная секция ядра: таймер не должен
+            //вытеснять контекст задачи посреди gr_set_mode. внутри нее
+            //ядро меняет глобальное состояние графического слоя, а
+            //тримплин real mode (vbe_rm_exec) уходит в BIOS int 10h;
+            //прилетевший посреди этого IRQ0 с schedule() переключает
+            //CR3/esp, и контекст продолжения смены режима становится
+            //мусором. держим блокировку до конца redraw консолей
+            uint8_t saved_sched_lock = kernel_schedule_lock;
+            kernel_schedule_lock = 1;
+
             int rc = gr_set_mode(r->ecx);
+            kprintf("set %d\n",rc);
             if (rc != GR_OK)
             {
+                kernel_schedule_lock = saved_sched_lock;
                 r->eax = (uint32_t)rc;
                 return;
             }
             //геометрия консолей привязана к разрешению: пересчитываем окна
             //TTY под новый режим и очищаем экран
             kconsole_mode_changed();
+            kernel_schedule_lock = saved_sched_lock;
             r->eax = 0;
             break;
         }
