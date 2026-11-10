@@ -88,13 +88,17 @@
 
 //Область тримплина в младшей памяти. Адреса обязаны совпадать с
 //vbe_rm_blob.asm и gdt.c (дескрипторы с базой 0x4000 на индексах 128/129)
-//Зона 0x4000..0x47FF не занята никем: BDA заканчивается на 0x4FF,
+//Зона 0x4000..0x4BFF не занята никем: BDA заканчивается на 0x4FF,
 //bootinfo с 0x5000, stage2 с 0x7E00, pmm никогда не раздаёт память ниже 1 МБ
+//Карта: код блоба 0x4000.., вход-параметры 0x4300, результаты 0x4320,
+//служебные ячейки 0x4340..0x434f, метка целостности 0x4350, буфер VBE
+//4F01 (1 КБ) 0x4400..0x47FF. Служебная зона вынесена за код блоба, чтобы
+//runtime-записи блоба физически не могли затереть код возврата
 #define VBE_RM_BLOB_ADDR 0x4000
-#define VBE_RM_BLOB_MAX  0x200
-#define VBE_RM_REQ_ADDR  0x4200
-#define VBE_RM_RES_ADDR  0x4220
-#define VBE_RM_INFO_ADDR 0x4300
+#define VBE_RM_BLOB_MAX  0x400
+#define VBE_RM_REQ_ADDR  0x4300
+#define VBE_RM_RES_ADDR  0x4320
+#define VBE_RM_INFO_ADDR 0x4400
 #define VBE_RM_INFO_SIZE 0x400
 
 

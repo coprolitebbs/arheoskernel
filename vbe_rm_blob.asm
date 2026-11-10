@@ -34,18 +34,42 @@
 ;Карта блоба (смещения от начала — фиксированные, между секциями times):
 ;  0x000..0x07F  32-битный вход: сохранение контекста, маскировка IRQ
 ;  0x080..0x0BF  16-битный PM: выключение PG и PE
-;  0x0C0..0x17F  реальный режим: параметры из 0x4200, int 10h, результат в 0x4220
-;  0x180..0x1C4  возврат в 32-битный PM и retf (конец кода = 0x41c5)
-;Служебные ячейки (просто RAM поверх, копироваться не обязаны) лежат ЗА
-;кодом возврата: 0x41D0 ESP вызывающего, 0x41D4 SS, 0x41D8/0x41D9 маски
-;PIC, 0x41DC флаг IF. Прежнее размещение 0x41C0..0x41CC перекрывало хвост
-;pm32_ret: запись esp/ss при входе затирала test/jz/sti/retf, и на выходе
-;процессор исполнял затертые байты вместо retf (вечное скольжение по RAM)
-;Параметры: vbe_rm_regs_t по 0x4200 (вход), результат по 0x4220 (выход).
+;  0x0C0..0x17F  реальный режим: параметры из 0x4300, int 10h, результат в 0x4320
+;  0x180..       возврат в 32-битный PM и retf
+;Служебные ячейки вынесены ЗА пределы блоба (0x4340..0x434f), чтобы запись
+;esp/ss при входе физически не могла затереть код возврата:
+;  0x4340 ESP вызывающего, 0x4344 SS, 0x4348/0x4349 маски PIC, 0x434C флаг IF
+;Параметры: vbe_rm_regs_t по 0x4300 (вход), результат по 0x4320 (выход).
 ;Стек реального режима: 0x7000 вниз (зона 0x6400..0x7BFF свободна — stage2
 ;лежит с 0x7E00, таблица e820 заканчивается до 0x6400).
+;
+;Маяки отладки: на каждой стадии блоб выдаёт один символ в COM1 (0x3f8).
+;Последний видимый символ в журнале — точка смерти:
+;  '1' вход в блоб (32-битный PM, пейджинг включен)
+;  '2' IRQ замаскированы, уход в 16-битный PM
+;  '3' PG выключен (16-битный PM)
+;  '4' PE выключен (реальный режим)
+;  '5' сегменты/стек RM готовы
+;  '6' параметры ещё не загружены, int 10h впереди
+;  '7' BIOS вернулся, результаты сложены в 0x4320
+;  '8' возврат в 32-битный PM
+;  '9' CR0/CR3 восстановлены (PG снова включен)
+;  'a' маски PIC восстановлены
+;  'b' всё готово, retf
+;Маяк — один байт; comch ждёт готовности THR (LSR.5), символы не теряются.
 
 BITS 32
+
+%macro comch 1
+    mov dx, 0x3FD
+%%com_wait:
+    in al, dx
+    test al, 0x20
+    jz %%com_wait
+    mov dx, 0x3F8
+    mov al, %1
+    out dx, al
+%endmacro
 
 global vbe_rm_blob_start
 global vbe_rm_blob_end
@@ -56,12 +80,13 @@ vbe_rm_blob_start:
 
 ;-------------- 32-битный вход (EIP = 0x4000) --------------
 blob_entry:
+    comch '1'
     pushfd
     pop eax
     and eax, 0x200
-    mov [0x41DC], eax       ;запомнить IF вызывающего (до cli!)
+    mov [0x434C], eax       ;запомнить IF вызывающего (до cli!)
     cli
-    mov [0x41D4], ss
+    mov [0x4344], ss
     push ds
     push es
     push fs
@@ -75,16 +100,17 @@ blob_entry:
     ;контекста (cr3), а не на адрес возврата lcall. при сохранении до пушей
     ;два первых pop на выходе съедают кадр возврата lcall, cr3/cr0 получают
     ;мусор (cr0 = CS возврата -> PE=0), а retf прыгает по чужому стеку
-    mov [0x41D0], esp
+    mov [0x4340], esp
     ;BIOS не должен получить прерывание, пока PIC переназначен на 0x20,
     ;а мы сидим в реальном режиме с родными векторами IVT
     in al, 0x21
-    mov [0x41D8], al
+    mov [0x4348], al
     in al, 0xA1
-    mov [0x41D9], al
+    mov [0x4349], al
     mov al, 0xFF
     out 0x21, al
     out 0xA1, al
+    comch '2'
     ;в 16-битный PM (CS=0x0400: база 0x4000, byte-granular, limit 64K)
     jmp 0x0400:0x0080
 
@@ -98,10 +124,12 @@ pm16:
     mov cr0, eax
     xor eax, eax
     mov cr3, eax             ;сброс TLB
+    comch '3'
     mov eax, cr0
     and eax, 0xFFFFFFFE      ;PE off -> реальный режим; CS видимое 0x0400
                              ;даёт базу 0x4000 — код течёт без разрыва
     mov cr0, eax
+    comch '4'
     jmp 0x0400:0x00C0
 
 times (0xC0 - ($-vbe_rm_blob_start)) db 0
@@ -115,25 +143,28 @@ real_part:
     mov gs, ax
     mov ss, ax
     mov sp, 0x7000           ;свой стек в свободной младшей памяти
+    comch '5'
 
-    ;параметры вызова из блока 0x4200
-    mov ax, [0x4200]         ;AX
-    mov bx, [0x4202]         ;BX
-    mov cx, [0x4204]         ;CX
-    mov dx, [0x4206]         ;DX
-    mov di, [0x4208]         ;DI
-    mov si, [0x420A]         ;SI
-    mov es, [0x420C]         ;ES:DI -> буфер структуры VBE (0x430:0)
+    comch '6'
+    ;параметры вызова из блока 0x4300
+    mov ax, [0x4300]         ;AX
+    mov bx, [0x4302]         ;BX
+    mov cx, [0x4304]         ;CX
+    mov dx, [0x4306]         ;DX
+    mov di, [0x4308]         ;DI
+    mov si, [0x430A]         ;SI
+    mov es, [0x430C]         ;ES:DI -> буфер структуры VBE
     int 0x10
 
-    ;результаты в блок 0x4220
-    mov [0x4220], ax
-    mov [0x4222], bx
-    mov [0x4224], cx
-    mov [0x4226], dx
-    mov [0x4228], di
-    mov [0x422A], si
-    mov [0x422C], es
+    ;результаты в блок 0x4320
+    mov [0x4320], ax
+    mov [0x4322], bx
+    mov [0x4324], cx
+    mov [0x4326], dx
+    mov [0x4328], di
+    mov [0x432A], si
+    mov [0x432C], es
+    comch '7'
 
     ;обратно в PM: база CS-кэша сохраняется, выборка не рвётся
     mov eax, cr0
@@ -146,32 +177,36 @@ times (0x180 - ($-vbe_rm_blob_start)) db 0
 ;-------------- возврат в 32-битный PM --------------
 BITS 32
 pm32_ret:
+    comch '8'
     mov ax, 0x10
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
-    mov ax, [0x41D4]
+    mov ax, [0x4344]
     mov ss, ax
-    mov esp, [0x41D0]        ;PM-стек на дно кадра контекста ДО обращений к нему
+    mov esp, [0x4340]        ;PM-стек на дно кадра контекста ДО обращений к нему
     pop eax
     mov cr3, eax             ;сначала CR3, потом CR0 (PG) — иначе fault
     pop eax
     mov cr0, eax
-    mov al, [0x41D8]
+    comch '9'
+    mov al, [0x4348]
     out 0x21, al
-    mov al, [0x41D9]
+    mov al, [0x4349]
     out 0xA1, al
+    comch 'a'
     popa
     pop gs
     pop fs
     pop es
     pop ds
-    mov eax, [0x41DC]
+    mov eax, [0x434C]
     test eax, 0x200
     jz .if_off
     sti
 .if_off:
+    comch 'b'
     retf
 
 vbe_rm_blob_end:

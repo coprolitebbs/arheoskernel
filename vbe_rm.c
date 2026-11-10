@@ -31,11 +31,11 @@
 extern const uint8_t vbe_rm_blob_start[];
 extern const uint8_t vbe_rm_blob_end[];
 
-//метка целостности лежит в зарезервированной зоне блоба (0x4000..0x41ff):
-//код блоба занимает 0x4000..0x41c4, служебные ячейки 0x41d0..0x41df, так
-//что 0x41e0 никем не трогается. если младшую память кто-то затер, метка
-//исчезнет и vbe_rm_exec откажется прыгать в чужой код
-#define VBE_RM_MAGIC_ADDR 0x41E0
+//метка целостности лежит в служебной зоне за кодом блоба: код занимает
+//0x4000..~0x4215 (с маяками), вход 0x4300, результат 0x4320, ячейки
+//0x4340..0x434f, так что 0x4350 никем не трогается. если младшую память
+//кто-то затер, метка исчезнет и vbe_rm_exec откажется прыгать в чужой код
+#define VBE_RM_MAGIC_ADDR 0x4350
 #define VBE_RM_MAGIC      0x5652454Du
 
 static int vbe_rm_ready = 0;
@@ -64,11 +64,16 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
     if (!vbe_rm_ready || !regs) return -1;
 
     //однопоточное ядро: банально крутимся, пока предыдущий вызов не дошёл
-    //до конца; реентерабельность не нужна, из IRQ вызывать запрещено
-    while (vbe_rm_busy) { }
+    //до конца; реентерабельность не нужна, из IRQ вызывать запрещено.
+    //если это сообщение появилось больше одного раза — вызов случился
+    //из контекста, где предыдущий exec ещё не вернулся (реентрантность)
+    while (vbe_rm_busy)
+    {
+        com_puts("[VBE_RM] busy-wait, previous exec not returned\n");
+    }
     vbe_rm_busy = 1;
 
-    //проверка целостности тримплина до прыжка: метка 0x41e0 и весь код
+    //проверка целостности тримплина до прыжка: метка 0x4350 и весь код
     //блоба обязаны совпадать с тем, что скопировал vbe_rm_init.
     //расхождение — младшую память кто-то затер, lcall ушел бы в чужой
     //код и выглядел бы снаружи как "просто виснет"
@@ -80,10 +85,22 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
         return -1;
     }
 
+    //вектор int 10h обязан указывать на BIOS: сегмент 0x0000 в IVT означает,
+    //что вектор затёрт — int 10h в реальном режиме улетит на 0000:0000 и
+    //процессор поедет исполнять нули IVT (внешне — вечный спин без смены
+    //режима). в норме сегмент >= 0xC000 (VGA BIOS в верхнем ROM)
+    uint32_t ivt10 = *(volatile uint32_t *)0x40;
+    if (ivt10 == 0)
+    {
+        com_puts("[VBE_RM] IVT int10 vector is 0000:0000, refusing BIOS call\n");
+        vbe_rm_busy = 0;
+        return -1;
+    }
+
     volatile vbe_rm_regs_t *req = (volatile vbe_rm_regs_t *)VBE_RM_REQ_ADDR;
     volatile vbe_rm_regs_t *res = (volatile vbe_rm_regs_t *)VBE_RM_RES_ADDR;
 
-    //параметры пишем по фиксированному адресу 0x4200 — их читает
+    //параметры пишем по фиксированному адресу 0x4300 — их читает
     //реальнорежимная часть блоба
     req->ax = regs->ax;
     req->bx = regs->bx;
@@ -94,8 +111,14 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
     req->es = regs->es;
 
     //трасса вызова: если после этой строки "back" нет — CPU не вернулся
-    //из блоба (реальный режим/BIOS); если есть — смотрим на res->ax
-    com_puts("[VBE_RM] exec ax=");
+    //из блоба (реальный режим/BIOS); если есть — смотрим на res->ax.
+    //блоб параллельно пишет маяки-символы в COM1: '1'..'b' — см.
+    //vbe_rm_blob.asm; последний видимый маяк — точная стадия смерти
+    com_puts("[VBE_RM] exec ivt10=");
+    com_puthex(ivt10 >> 16);
+    com_puts(":");
+    com_puthex(ivt10 & 0xFFFF);
+    com_puts(" ax=");
     com_puthex(req->ax);
     com_puts(" bx=");
     com_puthex(req->bx);
@@ -124,6 +147,16 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
     com_puthex(res->ax);
     com_puts(" bx=");
     com_puthex(res->bx);
+    com_puts(" cx=");
+    com_puthex(res->cx);
+    com_puts(" dx=");
+    com_puthex(res->dx);
+    com_puts(" di=");
+    com_puthex(res->di);
+    com_puts(" si=");
+    com_puthex(res->si);
+    com_puts(" es=");
+    com_puthex(res->es);
     com_puts("\n");
 
     regs->ax = res->ax;
