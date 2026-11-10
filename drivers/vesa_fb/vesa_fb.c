@@ -306,6 +306,9 @@ static int vs_set_mode(void *priv, uint32_t index)
         //следующую попытку, затем откат на запись таблицы
         if (pitch == 0 || xres == 0 || yres == 0 || phys == 0) continue;
         if (bpp != 16 && bpp != 24 && bpp != 32) continue;
+        //pitch меньше xres*bpp/8 у линейного режима физически невозможен:
+        //такой ответ не описывает активный скан-аут, не верить
+        if (pitch < xres * ((bpp + 7) / 8)) continue;
 
         //bitfields валидны, только если поля укладываются в bpp: часть BIOS
         //отдает мусор в MaskSize/FieldPosition для нестандартных режимов
@@ -325,6 +328,30 @@ static int vs_set_mode(void *priv, uint32_t index)
 
     if (mi_ok)
     {
+        //расхождение с бутовой записью — важный след: либо BIOS подменил
+        //режим (выше уже напечатана подмена по 4F03), либо его 4F01
+        //описывает не то, что реально едет по шине (известная болезнь
+        //части S3: сообщаемый pitch не равен фактическому скан-ауту)
+        if (pitch != rec->pitch || xres != rec->xres || yres != rec->yres)
+        {
+            vcom_puts("[VESA] geometry drift: tbl ");
+            vcom_puthex(rec->xres);
+            vcom_putc('x');
+            vcom_puthex(rec->yres);
+            vcom_putc('x');
+            vcom_puthex(rec->bpp);
+            vcom_puts(" pitch ");
+            vcom_puthex(rec->pitch);
+            vcom_puts(" -> hw ");
+            vcom_puthex(xres);
+            vcom_putc('x');
+            vcom_puthex(yres);
+            vcom_putc('x');
+            vcom_puthex(bpp);
+            vcom_puts(" pitch ");
+            vcom_puthex(pitch);
+            vcom_puts("\n");
+        }
         //освежаем запись таблицы фактическими параметрами железа: pitch
         //под виртуальную ширину, подмена режима и смена PhysBasePtr
         //теперь доезжают до слоя и консоли автоматически
@@ -386,6 +413,13 @@ static int vs_set_mode(void *priv, uint32_t index)
     vesa_fix.visual = (vesa_cur_mode.bpp == 8) ? GR_VISUAL_PSEUDOCOLOR
                                                : GR_VISUAL_TRUECOLOR;
     vesa_fix.line_length = vesa_cur_mode.pitch;
+
+    //дескриптор маяков под новую геометрию: следующий вызов блоба рисует
+    //стадии уже в актуальный фреймбуфер
+    if (vesa_driver.vbe_rm_screen_trace_ptr)
+        vesa_driver.vbe_rm_screen_trace_ptr(vesa_cur_mode.lfb,
+                                            vesa_cur_mode.pitch,
+                                            (uint8_t)vesa_cur_mode.bpp);
     return GR_OK;
 }
 

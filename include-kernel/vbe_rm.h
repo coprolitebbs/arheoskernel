@@ -35,6 +35,11 @@ void vbe_rm_init(void);
 //Не вызывать из обработчиков прерываний (маскируются IRQ, стек уходит в RM).
 int vbe_rm_exec(vbe_rm_regs_t *regs);
 
+//Дескриптор on-screen маяков тримплина: адрес видимого LFB, длина строки
+//и байт на пиксель. Стадии смены режима рисуются белыми квадратами в угол
+//экрана (beacon_scr) — отладка на машинах без COM. lfb = 0 выключает маяки.
+int vbe_rm_screen_trace(uint32_t lfb, uint32_t pitch, uint8_t bpp);
+
 //Буфер 1 КБ под структуры VBE (VbeInfoBlock 512 байт, ModeInfoBlock 256 байт).
 //Лежит по физическому адресу VBE_RM_INFO_ADDR, identity-mapped, читается напрямую.
 uint8_t *vbe_rm_info_buf(void);

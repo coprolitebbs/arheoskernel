@@ -904,6 +904,19 @@ static void gr_inject_runtime(gr_driver_t *drv)
     //Сервис вызова BIOS int 10h через real-mode тримплин: нужен драйверам
     //со сменой видеорежима на ходу (vesa_fb -> 4F02); остальным не мешает
     if (!drv->vbe_rm_exec_ptr) drv->vbe_rm_exec_ptr = vbe_rm_exec;
+    //on-screen маяки тримплина: стадии смены режима рисуются в угол
+    //видимого LFB, отладка доступна и без COM-порта (реальные машины).
+    //сразу запрашиваем геометрию у драйвера — до первой смены режима
+    //маркеры уже видны на экране
+    if (!drv->vbe_rm_screen_trace_ptr)
+        drv->vbe_rm_screen_trace_ptr = vbe_rm_screen_trace;
+    if (drv->vbe_rm_screen_trace_ptr && drv->ops && drv->ops->get_var)
+    {
+        gr_mode_info_t m;
+        memset(&m, 0, sizeof(m));
+        if (drv->ops->get_var(drv->priv, &m) == GR_OK)
+            drv->vbe_rm_screen_trace_ptr(m.lfb, m.pitch, (uint8_t)m.bpp);
+    }
 }
 
 int graphic_layer_register_driver(gr_driver_t *drv)
