@@ -302,21 +302,54 @@ static int vs_set_mode(void *priv, uint32_t index)
     if (actual != clean)
         rec->mode_number = (uint16_t)(actual | 0x4000);
 
-    //4F01: ModeInfoBlock активного режима. две попытки: сначала чистый CX
+    //4F01: ModeInfoBlock активного режима. три попытки: сначала чистый CX
     //(как читает stage2), затем CX с битом 14 — по спеке VBE он запрашивает
     //параметры именно LFB-версии режима (PhysBasePtr отдают не все BIOS
-    //на чистый номер)
+    //на чистый номер); третья — после повторного 4F02 в тот же режим:
+    //S3 Trio64 сразу после смены отчитывается в 4F01 геометрией чужого
+    //режима (вдвое-вчетверо меньшей или соседней из списка) — его
+    //внутреннее состояние описания режима рассинхронизировано сменой;
+    //идемпотентный повторный 4F02 пересинхронизирует VBIOS, и следующий
+    //4F01 читает уже активный скан-аут
     uint32_t attr = 0, xres = 0, yres = 0, bpp = 0, pitch = 0, phys = 0;
     uint32_t bf_r_len = 0, bf_r_off = 0;
     uint32_t bf_g_len = 0, bf_g_off = 0;
     uint32_t bf_b_len = 0, bf_b_off = 0;
     int mi_ok = 0;
-    for (int attempt = 0; attempt < 2 && !mi_ok; attempt++)
+    for (int attempt = 0; attempt < 3 && !mi_ok; attempt++)
     {
+        if (attempt == 2)
+        {
+            //повторная установка того же режима идемпотентна: железо либо
+            //уже в нем, либо вернется в него же; ошибки окна RM (саморемонт
+            //тримплина в vbe_rm_exec) не означают отказ BIOS — прерываем
+            //цикл и остаемся на записи stage2
+            memset(&regs, 0, sizeof(regs));
+            regs.ax = 0x4F02;
+            regs.bx = (uint16_t)(clean | 0x4000);
+            if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0) break;
+            memset(&regs, 0, sizeof(regs));
+            regs.ax = 0x4F03;
+            if (vesa_driver.vbe_rm_exec_ptr(&regs) == 0)
+            {
+                uint32_t recheck = (uint32_t)(regs.bx & 0x3FFF);
+                if (recheck != actual)
+                {
+                    //после пересета BIOS назвал другой активный режим:
+                    //обновляем точку опоры, иначе и третий 4F01 ляжет мимо
+                    vcom_puts("[VESA] 4F03 changed after re-set ");
+                    vcom_puthex(actual);
+                    vcom_puts(" -> ");
+                    vcom_puthex(recheck);
+                    vcom_puts("\n");
+                    actual = recheck;
+                    rec->mode_number = (uint16_t)(actual | 0x4000);
+                }
+            }
+        }
         memset(&regs, 0, sizeof(regs));
         regs.ax = 0x4F01;
-        regs.cx = (attempt == 0) ? (uint16_t)actual
-                                 : (uint16_t)(actual | 0x4000);
+        regs.cx = (uint16_t)((attempt & 1) ? (actual | 0x4000) : actual);
         regs.es = VBE_RM_INFO_ADDR >> 4;
         regs.di = VBE_RM_INFO_ADDR & 0xF;
         if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0) continue;
@@ -564,17 +597,41 @@ void driver_main(struct boot_info *boot)
     //палитры; yres < 400 выпадает тоже — это режимы двойной развертки
     //(320x240 и родня): на части BIOS (Voodoo Banshee) смена в них виснет
     //внутри int 10h, а программный слой поверх LFB двойную развертку
-    //все равно не отрисовывает
+    //все равно не отрисовывает. записи с нулевой/некорректной геометрией
+    //(S3 Trio64 при перечислении отдает и такие) выпадают тоже: рисовать
+    //по ним нельзя, а 4F01 после смены на них не спасает — BIOS сам
+    //подменяет режим и геометрия все равно уезжает
     vbe_drawable = 0;
     for (uint32_t i = 0; i < vbe_count; i++)
     {
         if (vbe_recs[i].bpp == 8) continue;
+        if (vbe_recs[i].bpp != 16 && vbe_recs[i].bpp != 24 &&
+            vbe_recs[i].bpp != 32) continue;
+        if (vbe_recs[i].xres == 0 || vbe_recs[i].yres == 0 ||
+            vbe_recs[i].phys_base == 0) continue;
         if (vbe_recs[i].yres < 400)
         {
             vcom_puts("[VESA] skip doublescan-suspect mode ");
             vcom_puthex(vbe_recs[i].mode_number & 0x3FFF);
             vcom_puts("\n");
             continue;
+        }
+        //санитизация длины строки: pitch меньше xres*байт_на_пиксель у
+        //линейного режима физически невозможен — это ложь BIOS при
+        //перечислении (известная болезнь S3: сообщаемый pitch не равен
+        //фактическому скан-ауту). рисунок по такой записи разваливается
+        //на мусорные пикселы и повторы строк; канонический минимум —
+        //единственная безопасная оценка
+        uint32_t min_pitch = (uint32_t)vbe_recs[i].xres *
+                             ((vbe_recs[i].bpp + 7) / 8);
+        if (vbe_recs[i].pitch < min_pitch)
+        {
+            vcom_puts("[VESA] stage2 pitch implausible, clamp ");
+            vcom_puthex(vbe_recs[i].pitch);
+            vcom_puts(" -> ");
+            vcom_puthex(min_pitch);
+            vcom_puts("\n");
+            vbe_recs[i].pitch = (uint16_t)min_pitch;
         }
         if (vbe_drawable >= VBE_MODES_MAX) break;
         vbe_idx_map[vbe_drawable++] = i;
