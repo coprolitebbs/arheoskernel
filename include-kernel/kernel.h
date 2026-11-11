@@ -37,7 +37,7 @@ void _start(void);
 
 void switch_to_usermode(uint32_t entry);
 
-uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset);
+//uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset);
 uint32_t get_geode_gx1_framebuffer_address(void);
 
 void kernel_halt_all(void);

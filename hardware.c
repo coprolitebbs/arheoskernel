@@ -45,21 +45,6 @@ static uint8_t g_bus_scanned[32];
 
 
 //Внутренние функции
-uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset)
-{
-    //Вычисляем адрес по спецификации PCI Configuration Mechanism #1
-    uint32_t address = (1UL << 31) |
-                       ((uint32_t)bus << 16) |
-                       ((uint32_t)slot << 11) |
-                       ((uint32_t)func << 8) |
-                       (offset & 0xFC);
-    uint32_t value;
-    //"a" привязывает переменную к EAX, "d" привязывает к DX
-    __asm__ volatile ("outl %%eax, %%dx":: "a"(address), "d"((uint16_t)0x0CF8));
-    __asm__ volatile ("inl %%dx, %%eax":"=a"(value):"d"((uint16_t)0x0CFC));
-    return value;
-}
-
 
 
 //Проверка сигнатуры и контрольной суммы RSDP
@@ -173,7 +158,8 @@ uint32_t enumerate_pci_ven_dev_ids(void)
 
     for (uint8_t slot = 0; slot < 32; slot++)
     {
-        uint32_t id = pci_read_config_dword(0, slot, 0, 0x00);
+        //uint32_t id = pci_read_config_dword(0, slot, 0, 0x00);
+        uint32_t id = pci_cfg_read_dword(0, slot, 0, 0x00);
         uint16_t vendor = id & 0xFFFF;
         uint16_t device = id >> 16;
 
@@ -193,7 +179,8 @@ uint32_t enumerate_pci_ven_dev_ids(void)
         // Vendor ID S3 = 0x5333, Device ID Trio64 = 0x8811
         if (res == 0 && vendor == 0x5333 && device == 0x8811)
         {
-            uint32_t bar0 = pci_read_config_dword(0, slot, 0, 0x10);
+            //uint32_t bar0 = pci_read_config_dword(0, slot, 0, 0x10);
+            uint32_t bar0 = pci_cfg_read_dword(0, slot, 0, 0x10);
             res =  bar0 & 0xFFFFFFF0; // Отсекаем флаги PCI, получаем физ. адрес
         }
     }
