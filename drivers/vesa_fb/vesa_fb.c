@@ -226,40 +226,51 @@ static int vs_set_mode(void *priv, uint32_t index)
     regs.bx = (uint16_t)(clean | 0x4000);
     if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0)
     {
-        //отказ BIOS на точную запись — не спешим возвращать ошибку: часть
-        //BIOS (seavgabios qemu) перечисляет в 4F00/4F01 режимы, которые сам
-        //же отказывается ставить (24bpp на stdvga и т.п.). пробуем прочие
-        //drawable-записи той же геометрии WxH; успех переписывает номер
-        //режима в исходную запись, дальше 4F03/4F01 читают железо по нему,
-        //и get_mode(index) описывает то, что реально на экране. до смены
-        //железа экран и кэш слоя остаются согласованными в любом случае
-        vcom_puts("[VESA] 4F02 refused, trying alternates\n");
-        uint32_t self_raw = vbe_idx_map[index];
-        int alt_ok = 0;
-        for (uint32_t a = 0; a < vbe_drawable && !alt_ok; a++)
+        //разовый сбой окна RM (железо в окне, саморемонт тримплина в
+        //vbe_rm_exec) не обязан означать отказ BIOS: 4F02 идемпотентен,
+        //повтор безопасен — железо либо уже в запрошенном режиме, либо
+        //не тронуто
+        vcom_puts("[VESA] 4F02 exec failed, retry once\n");
+        memset(&regs, 0, sizeof(regs));
+        regs.ax = 0x4F02;
+        regs.bx = (uint16_t)(clean | 0x4000);
+        if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0)
         {
-            if (vbe_idx_map[a] == self_raw) continue;
-            vbe_mode_rec_t *ar = &vbe_recs[vbe_idx_map[a]];
-            if (ar->xres != rec->xres || ar->yres != rec->yres) continue;
-            uint16_t aclean = (uint16_t)(ar->mode_number & 0x3FFF);
-            if (aclean == clean) continue;
-            memset(&regs, 0, sizeof(regs));
-            regs.ax = 0x4F02;
-            regs.bx = (uint16_t)(aclean | 0x4000);
-            if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0) continue;
-            vcom_puts("[VESA] alternate mode ");
-            vcom_puthex(aclean);
-            vcom_puts(" accepted\n");
-            rec->mode_number = ar->mode_number;
-            clean = aclean;
-            alt_ok = 1;
-        }
-        if (!alt_ok)
-        {
-            //все альтернативы тоже отвергнуты: железо не тронуто, слой
-            //отрисует старый режим как ни в чем не бывало
-            vcom_puts("[VESA] 4F02 refused, no alternate accepted\n");
-            return GR_ERR_IO;
+            //отказ BIOS на точную запись — не спешим возвращать ошибку: часть
+            //BIOS (seavgabios qemu) перечисляет в 4F00/4F01 режимы, которые сам
+            //же отказывается ставить (24bpp на stdvga и т.п.). пробуем прочие
+            //drawable-записи той же геометрии WxH; успех переписывает номер
+            //режима в исходную запись, дальше 4F03/4F01 читают железо по нему,
+            //и get_mode(index) описывает то, что реально на экране. до смены
+            //железа экран и кэш слоя остаются согласованными в любом случае
+            vcom_puts("[VESA] 4F02 refused, trying alternates\n");
+            uint32_t self_raw = vbe_idx_map[index];
+            int alt_ok = 0;
+            for (uint32_t a = 0; a < vbe_drawable && !alt_ok; a++)
+            {
+                if (vbe_idx_map[a] == self_raw) continue;
+                vbe_mode_rec_t *ar = &vbe_recs[vbe_idx_map[a]];
+                if (ar->xres != rec->xres || ar->yres != rec->yres) continue;
+                uint16_t aclean = (uint16_t)(ar->mode_number & 0x3FFF);
+                if (aclean == clean) continue;
+                memset(&regs, 0, sizeof(regs));
+                regs.ax = 0x4F02;
+                regs.bx = (uint16_t)(aclean | 0x4000);
+                if (vesa_driver.vbe_rm_exec_ptr(&regs) != 0) continue;
+                vcom_puts("[VESA] alternate mode ");
+                vcom_puthex(aclean);
+                vcom_puts(" accepted\n");
+                rec->mode_number = ar->mode_number;
+                clean = aclean;
+                alt_ok = 1;
+            }
+            if (!alt_ok)
+            {
+                //все альтернативы тоже отвергнуты: железо не тронуто, слой
+                //отрисует старый режим как ни в чем не бывало
+                vcom_puts("[VESA] 4F02 refused, no alternate accepted\n");
+                return GR_ERR_IO;
+            }
         }
     }
 
@@ -285,6 +296,11 @@ static int vs_set_mode(void *priv, uint32_t index)
     {
         vcom_puts("[VESA] 4F03 failed, assume requested\n");
     }
+
+    //подмена режима фиксируется в записи: следующая смена этого индекса
+    //пойдет сразу на рабочий номер BIOS, без повторной подмены
+    if (actual != clean)
+        rec->mode_number = (uint16_t)(actual | 0x4000);
 
     //4F01: ModeInfoBlock активного режима. две попытки: сначала чистый CX
     //(как читает stage2), затем CX с битом 14 — по спеке VBE он запрашивает
@@ -357,22 +373,42 @@ static int vs_set_mode(void *priv, uint32_t index)
         mi_ok = 1;
     }
 
+    //опорная запись для сверки ответа 4F01: режим, который BIOS назвал
+    //активным (4F03). заполняется после 4F01, здесь только заготовка
+    vbe_mode_rec_t *ref = rec;
+
     if (mi_ok)
     {
-        //расхождение с бутовой записью — важный след: либо BIOS подменил
+        //режим, который BIOS назвал активным (4F03), ищется в таблице
+        //по номеру; если таких записей несколько (после перезаписи номеров
+        //альтернативами), приоритет у записи с тем же bpp, что в ответе
+        //4F01. нет такой записи — опора на запрошенную запись
+        for (uint32_t pass = 0; pass < 2 && ref == rec; pass++)
+        {
+            for (uint32_t k = 0; k < vbe_drawable; k++)
+            {
+                vbe_mode_rec_t *kr = &vbe_recs[vbe_idx_map[k]];
+                if ((uint16_t)(kr->mode_number & 0x3FFF) != (uint16_t)actual)
+                    continue;
+                if (pass == 0 && (uint32_t)kr->bpp != bpp) continue;
+                ref = kr;
+                break;
+            }
+        }
+        //расхождение с опорной записью — важный след: либо BIOS подменил
         //режим (выше уже напечатана подмена по 4F03), либо его 4F01
         //описывает не то, что реально едет по шине (известная болезнь
         //части S3: сообщаемый pitch не равен фактическому скан-ауту)
-        if (pitch != rec->pitch || xres != rec->xres || yres != rec->yres)
+        if (pitch != ref->pitch || xres != ref->xres || yres != ref->yres)
         {
             vcom_puts("[VESA] geometry drift: tbl ");
-            vcom_puthex(rec->xres);
+            vcom_puthex(ref->xres);
             vcom_putc('x');
-            vcom_puthex(rec->yres);
+            vcom_puthex(ref->yres);
             vcom_putc('x');
-            vcom_puthex(rec->bpp);
+            vcom_puthex(ref->bpp);
             vcom_puts(" pitch ");
-            vcom_puthex(rec->pitch);
+            vcom_puthex(ref->pitch);
             vcom_puts(" -> hw ");
             vcom_puthex(xres);
             vcom_putc('x');
@@ -383,28 +419,43 @@ static int vs_set_mode(void *priv, uint32_t index)
             vcom_puthex(pitch);
             vcom_puts("\n");
         }
-        //ответ 4F01 принимается только если он описывает реальный режим
-        //из таблицы: на CX с битом 14 и после подмен по 4F03 часть BIOS
-        //отдает поля чужого или полу-мусорного режима (S3 Trio64 на
-        //CX|0x4000 отчитывался вдвое-вчетверо меньшей геометрией). раньше
-        //такой ответ перезаписывал запись таблицы, слой рисовал по
-        //уехавшей геометрии, и изображение занимало четверть/половину
-        //экрана. сверяем xres/yres/bpp со всеми записями: их значения тот
-        //же BIOS вернул при перечислении на буте, это нижняя граница доверия
-        int known = 0;
-        for (uint32_t k = 0; k < vbe_drawable; k++)
+        //ответ 4F01 принимается только при ТОЧНОМ совпадении xres/yres/bpp
+        //с опорной записью — той геометрией, что этот же BIOS отдал при
+        //перечислении на буте для этого же номера режима. проверка
+        //"известный среди всех записей" пропускала ответ геометрией ЧУЖОГО,
+        //но известного режима (S3 Trio64 после смены отчитывался то
+        //вдвое-вчетверо меньшей геометрией, то геометрией соседнего режима
+        //из списка): запись портилась, слой рисовал по уехавшей геометрии —
+        //удвоение/учетверение экрана при рабочей консоли
+        if (xres != ref->xres || yres != ref->yres || bpp != ref->bpp)
         {
-            const vbe_mode_rec_t *kr = &vbe_recs[vbe_idx_map[k]];
-            if (kr->xres == xres && kr->yres == yres && kr->bpp == bpp)
-            {
-                known = 1;
-                break;
-            }
-        }
-        if (!known)
-        {
-            vcom_puts("[VESA] 4F01 describes unknown mode, keep stage2 record\n");
+            vcom_puts("[VESA] 4F01 mismatches reference mode, keep stage2 record\n");
             mi_ok = 0;
+        }
+    }
+
+    if (mi_ok)
+    {
+        //разметка pitch: у линейного режима pitch лежит в диапазоне
+        //[xres*байт_на_пиксель, 2*xres*байт] — BIOS округляет строку вверх,
+        //но не более чем вдвое. значения вне диапазона и ровно двукратный
+        //дрейф от опорной записи (тот же режим, тот же BIOS на буте дал
+        //другое) — ложь про активный скан-аут; такой pitch сводится к
+        //опорному, иначе слой рисует по уехавшей длине строки — удвоение
+        uint32_t bytes = xres * ((bpp + 7) / 8);
+        uint32_t pitch_ref = (ref->pitch >= bytes) ? ref->pitch : bytes;
+        if (pitch < bytes || pitch > bytes * 2 ||
+            pitch == pitch_ref * 2 || pitch_ref == pitch * 2)
+        {
+            if (pitch != pitch_ref)
+            {
+                vcom_puts("[VESA] pitch implausible or 2x drifted, clamp ");
+                vcom_puthex(pitch);
+                vcom_puts(" -> ");
+                vcom_puthex(pitch_ref);
+                vcom_puts("\n");
+            }
+            pitch = pitch_ref;
         }
     }
 
@@ -436,7 +487,7 @@ static int vs_set_mode(void *priv, uint32_t index)
     }
     else
     {
-        //4F01 сорвался или описал неизвестный режим — остаемся на записи
+        //4F01 сорвался или разошелся с опорной записью — остаемся на записи
         //stage2-таблицы: ее параметры тот же биос проверил при перечислении
         //на буте, а раз мы дошли сюда, запрошенный (или альтернативный)
         //номер режима успешно выставился и сейчас. рассинхрона нет,

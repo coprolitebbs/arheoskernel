@@ -80,17 +80,27 @@ int vbe_rm_screen_trace(uint32_t lfb, uint32_t pitch, uint8_t bpp)
     return 0;
 }
 
+//развернуть блоб в младшей памяти: эталонная копия из .rodata + метка
+//целостности за кодом. зовется из vbe_rm_init на старте и из vbe_rm_exec
+//для саморемонта, если младшую память кто-то затер между вызовами или
+//прямо во время окна RM
+static void vbe_rm_deploy(void)
+{
+    //первый вызов идет до включения пейджинга (linear == physical);
+    //повторные — из exec с пейджингом, но младшая память identity-mapped,
+    //запись по VA 0x4000 и там попадает на физический 0x4000
+    memcpy((void *)VBE_RM_BLOB_ADDR, (const void *)vbe_rm_blob_start, vbe_rm_blob_size);
+    //метка целостности — за концом блоба, сам блоб ее не трогает
+    *(volatile uint32_t *)VBE_RM_MAGIC_ADDR = VBE_RM_MAGIC;
+}
+
 void vbe_rm_init(void)
 {
     uint32_t blob_size = (uint32_t)(vbe_rm_blob_end - vbe_rm_blob_start);
     if (blob_size == 0 || blob_size > VBE_RM_BLOB_MAX) return;
 
-    //на момент вызова пейджинг ещё выключен: linear == physical,
-    //пишем машинный код прямо на физический 0x4000
-    memcpy((void *)VBE_RM_BLOB_ADDR, (const void *)vbe_rm_blob_start, blob_size);
-    //метка целостности — за концом блоба, сам блоб ее не трогает
-    *(volatile uint32_t *)VBE_RM_MAGIC_ADDR = VBE_RM_MAGIC;
     vbe_rm_blob_size = blob_size;
+    vbe_rm_deploy();
     vbe_rm_ready = 1;
     com_puts("[VBE_RM] blob copied to 0x4000, size=");
     com_puthex(blob_size);
@@ -113,14 +123,23 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
 
     //проверка целостности тримплина до прыжка: метка 0x4350 и весь код
     //блоба обязаны совпадать с тем, что скопировал vbe_rm_init.
-    //расхождение — младшую память кто-то затер, lcall ушел бы в чужой
-    //код и выглядел бы снаружи как "просто виснет"
+    //расхождение — младшую память кто-то затер: раньше это был вечный
+    //отказ всех последующих смен режима (внешне — "4F02 refused"), теперь
+    //блоб развертывается заново из эталонной копии в .rodata и вызов
+    //продолжается; если затирающий активен, следующий exec снова
+    //отремонтирует и напечатает след
     if (*(volatile uint32_t *)VBE_RM_MAGIC_ADDR != VBE_RM_MAGIC ||
         memcmp((const void *)VBE_RM_BLOB_ADDR, vbe_rm_blob_start, vbe_rm_blob_size) != 0)
     {
-        com_puts("[VBE_RM] trampoline trashed at 0x4000, refusing to jump\n");
-        vbe_rm_busy = 0;
-        return -1;
+        com_puts("[VBE_RM] trampoline trashed at 0x4000, redeploying\n");
+        vbe_rm_deploy();
+        if (*(volatile uint32_t *)VBE_RM_MAGIC_ADDR != VBE_RM_MAGIC ||
+            memcmp((const void *)VBE_RM_BLOB_ADDR, vbe_rm_blob_start, vbe_rm_blob_size) != 0)
+        {
+            com_puts("[VBE_RM] redeploy verify failed, refusing to jump\n");
+            vbe_rm_busy = 0;
+            return -2;
+        }
     }
 
     //вектор int 10h обязан указывать на BIOS: сегмент 0x0000 в IVT означает,
@@ -132,7 +151,7 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
     {
         com_puts("[VBE_RM] IVT int10 vector is 0000:0000, refusing BIOS call\n");
         vbe_rm_busy = 0;
-        return -1;
+        return -3;
     }
 
     volatile vbe_rm_regs_t *req = (volatile vbe_rm_regs_t *)VBE_RM_REQ_ADDR;
@@ -211,6 +230,17 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
         com_puts("[VBE_RM] drained stuck kbd bytes: ");
         com_puthex(drained_kbd);
         com_puts("\n");
+    }
+
+    //контроль затирания во время окна RM: блоб и метка обязаны остаться
+    //эталонными и после возврата. расхождение — кто-то пишет в младшую
+    //память параллельно с BIOS-вызовом; развернем заново и оставим след,
+    //иначе следующий exec узнает о порче только по своей предпроверке
+    if (*(volatile uint32_t *)VBE_RM_MAGIC_ADDR != VBE_RM_MAGIC ||
+        memcmp((const void *)VBE_RM_BLOB_ADDR, vbe_rm_blob_start, vbe_rm_blob_size) != 0)
+    {
+        com_puts("[VBE_RM] trampoline trashed during RM window, redeploying\n");
+        vbe_rm_deploy();
     }
 
     com_puts("[VBE_RM] back, res ax=");
