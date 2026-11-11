@@ -264,6 +264,8 @@ $CC $USER_CCFLAGS_ELF -c "userspace/system procs/thoth/thoth.c" -o bin/u_thoth.o
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/thoth/platform_arheos.c" -o bin/u_thoth_platform.o
 #lsusb
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/lsusb/lsusb.c" -o bin/u_lsusb.o
+#lspci
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/lspci/lspci.c" -o bin/u_lspci.o
 #arfetch
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/arfetch/arfetch.c" -o bin/u_arfetch.o
 #graphinfo — отчет о видеодрайвере и режимах
@@ -307,6 +309,7 @@ $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x400
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_uconfig_elf.o bin/u_uimage_elf.o bin/u_sekhmet.o -o bin/sekhmet.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_thoth.o bin/u_thoth_platform.o -o bin/thoth.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lsusb.o -o bin/lsusb.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lspci.o -o bin/lspci.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_uimage_elf.o bin/u_arfetch.o -o bin/arfetch.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_ugraph_elf.o bin/u_graphinfo.o -o bin/graphinfo.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_lib_elf.o bin/u_df.o -o bin/df.elf
@@ -367,10 +370,11 @@ create_fat_image() {
     mcopy -i "$IMG" bin/setbg.bin ::/BIN/
     mcopy -i "$IMG" bin/thoth.elf ::/BIN/
     mcopy -i "$IMG" bin/lsusb.elf ::/BIN/
+    mcopy -i "$IMG" bin/lspci.elf ::/BIN/
     mcopy -i "$IMG" bin/arfetch.elf ::/BIN/
     mcopy -i "$IMG" bin/df.elf ::/BIN/
     mcopy -i "$IMG" bin/arcom.elf ::/BIN/
-    mcopy -i "$IMG" bin/graphinfo.elf ::/BIN/
+    mcopy -i "$IMG" bin/graphinfo.elf ::/BIN/GRINFO.ELF
 
     mmd -i "$IMG" ::/CONFIG
     mmd -i "$IMG" ::/CONFIG/BOOT
@@ -477,10 +481,11 @@ e2cp bin/rmdir.bin tmp_ext2.img:/bin/rmdir.bin
 e2cp bin/setbg.bin tmp_ext2.img:/bin/setbg.bin
 e2cp bin/thoth.elf tmp_ext2.img:/bin/thoth.elf
 e2cp bin/lsusb.elf tmp_ext2.img:/bin/lsusb.elf
+e2cp bin/lspci.elf tmp_ext2.img:/bin/lspci.elf
 e2cp bin/arfetch.elf tmp_ext2.img:/bin/arfetch.elf
 e2cp bin/df.elf tmp_ext2.img:/bin/df.elf
 e2cp bin/arcom.elf tmp_ext2.img:/bin/arcom.elf
-e2cp bin/graphinfo.elf tmp_ext2.img:/bin/graphinfo.elf
+e2cp bin/graphinfo.elf tmp_ext2.img:/bin/grinfo.elf
 
 e2mkdir tmp_ext2.img:/config
 e2mkdir tmp_ext2.img:/config/boot

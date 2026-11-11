@@ -19,6 +19,7 @@
 #include "include-kernel/ports_io.h"
 #include "include-kernel/comdebug.h"
 #include "include-kernel/pmm.h"
+#include "include-kernel/lib.h"
 
 //Глобальные переменные, заполняются один раз
 static uint32_t *SMI_CMD;
@@ -30,6 +31,17 @@ static uint16_t  SLP_TYPb;
 static uint16_t  SLP_EN  = 1 << 13;
 static uint16_t  SCI_EN  = 1;
 static int acpi_ready = 0;  //1, если всё найдено и можно выключаться
+
+
+//Переменные PCI-подсистемы ядра
+
+static pci_dev_record_t g_pci_devs[PCI_REGISTRY_MAX];
+static int  g_pci_devs_count = 0;
+static int  g_pci_scanned    = 0;
+
+//Битовая карта уже просканированных шин — защита от петель мостов
+static uint8_t g_bus_scanned[32];
+
 
 
 //Внутренние функции
@@ -310,3 +322,221 @@ void acpi_poweroff(void) {
         outw((uint32_t)(uintptr_t)PM1b_CNT, SLP_TYPb | SLP_EN);
     }
 }
+
+
+//PCI-подсистема ядра: доступ к конфигурационному пространству (механизм #1),
+//сканирование шин (включая PCI-to-PCI мосты) и реестр устройств для userspace
+
+//--------------- Доступ к конфигурационному пространству ---------------
+
+//Чтение выровненного dword. offset маскируется по границе dword
+uint32_t pci_cfg_read_dword(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset){
+    uint32_t address = 0x80000000u |
+                       (bus    << 16) |
+                       (dev    << 11) |
+                       (func   <<  8) |
+                       (offset & 0xFC);
+    outl(PCI_CONFIG_ADDRESS_PORT, address);
+    return inl(PCI_CONFIG_DATA_PORT);
+}
+
+void pci_cfg_write_dword(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset, uint32_t value){
+    uint32_t address = 0x80000000u |
+                       (bus    << 16) |
+                       (dev    << 11) |
+                       (func   <<  8) |
+                       (offset & 0xFC);
+    outl(PCI_CONFIG_ADDRESS_PORT, address);
+    outl(PCI_CONFIG_DATA_PORT, value);
+}
+
+uint16_t pci_cfg_read_word(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset){
+    uint32_t v = pci_cfg_read_dword(bus, dev, func, offset);
+    return (uint16_t)(v >> ((offset & 2) * 8));
+}
+
+uint8_t pci_cfg_read_byte(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset){
+    uint32_t v = pci_cfg_read_dword(bus, dev, func, offset);
+    return (uint8_t)(v >> ((offset & 3) * 8));
+}
+
+//--------------- Реестр ---------------
+
+int pci_registry_count(void){
+    return g_pci_devs_count;
+}
+
+int pci_registry_get(int idx, pci_dev_record_t *out){
+    if (idx < 0 || idx >= g_pci_devs_count || !out) return -1;
+    *out = g_pci_devs[idx];
+    return 0;
+}
+
+static int pci_registry_add(const pci_dev_record_t *rec){
+    if (!rec) return -1;
+    if (g_pci_devs_count >= PCI_REGISTRY_MAX) return -1;
+    g_pci_devs[g_pci_devs_count++] = *rec;
+    return g_pci_devs_count - 1;
+}
+
+//Чтение конфиг-пространства устройства, уже присутствующего в реестре.
+//Userspace не может читать произвольные (bus,dev,func) — только перечисленные.
+int pci_registry_read_cfg(uint32_t bdf, uint8_t offset, uint32_t *out_value){
+    if (!out_value) return -1;
+    if (offset > PCI_CFG_OFF_MAX) return -1;
+
+    for (int i = 0; i < g_pci_devs_count; i++){
+        uint32_t dev_bdf = PCI_BDF(g_pci_devs[i].bus, g_pci_devs[i].dev, g_pci_devs[i].func);
+        if (dev_bdf != bdf) continue;
+
+        uint32_t v = pci_cfg_read_dword(g_pci_devs[i].bus, g_pci_devs[i].dev,
+                                        g_pci_devs[i].func, offset);
+        //Выравнивание внутри dword, если offset не кратен 4
+        *out_value = v >> ((offset & 3) * 8);
+        return 0;
+    }
+    return -1;
+}
+
+//--------------- Сканирование ---------------
+
+static void pci_record_device(uint32_t bus, uint32_t dev, uint32_t func){
+    pci_dev_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+
+    uint32_t id = pci_cfg_read_dword(bus, dev, func, PCI_CFG_VENDOR_ID);
+    rec.vendor_id = (uint16_t)(id & 0xFFFF);
+    rec.device_id = (uint16_t)(id >> 16);
+
+    uint32_t rev_class = pci_cfg_read_dword(bus, dev, func, PCI_CFG_REV_CLASS);
+    rec.rev         = (uint8_t)(rev_class & 0xFF);
+    rec.prog_if     = (uint8_t)((rev_class >> 8)  & 0xFF);
+    rec.subclass    = (uint8_t)((rev_class >> 16) & 0xFF);
+    rec.class_code  = (uint8_t)((rev_class >> 24) & 0xFF);
+
+    rec.bus  = (uint8_t)bus;
+    rec.dev  = (uint8_t)dev;
+    rec.func = (uint8_t)func;
+
+    uint8_t htype = pci_cfg_read_byte(bus, dev, func, PCI_CFG_HEADER_TYPE);
+    rec.header_type = htype & ~PCI_HTYPE_MULTIFUNC;
+
+    rec.irq = pci_cfg_read_byte(bus, dev, func, PCI_CFG_IRQ_LINE);
+
+    rec.cmd    = pci_cfg_read_word(bus, dev, func, PCI_CFG_CMD);
+    rec.status = pci_cfg_read_word(bus, dev, func, PCI_CFG_STATUS);
+
+    //BAR-ы: обычное устройство — 6, мост — 2
+    int bars = (rec.header_type == PCI_HTYPE_BRIDGE) ? 2 : PCI_BARS_MAX;
+    for (int b = 0; b < PCI_BARS_MAX; b++){
+        if (b < bars)
+            rec.bars[b] = pci_cfg_read_dword(bus, dev, func, PCI_CFG_BAR0 + 4 * b);
+        else
+            rec.bars[b] = 0;
+    }
+
+    rec.rom_base = pci_cfg_read_dword(bus, dev, func, PCI_CFG_ROM_BASE);
+
+    if (rec.header_type == PCI_HTYPE_NORMAL || rec.header_type == PCI_HTYPE_BRIDGE){
+        uint32_t subsys = pci_cfg_read_dword(bus, dev, func, PCI_CFG_SUBSYSTEM);
+        rec.subsys_vendor_id = (uint16_t)(subsys & 0xFFFF);
+        rec.subsys_id        = (uint16_t)(subsys >> 16);
+    }
+
+    //Мост: запоминаем номер вторичной шины для рекурсии
+    rec.bridge_secondary = 0xFF;
+    if (rec.header_type == PCI_HTYPE_BRIDGE &&
+        rec.class_code == PCI_CLASS_BRIDGE &&
+        rec.subclass == PCI_SUBCLASS_PCI_BRIDGE){
+        rec.bridge_secondary = pci_cfg_read_byte(bus, dev, func, PCI_CFG_BR_SECONDARY);
+    }
+
+    //COM-лог найденного устройства
+    com_puts("[PCI] ");
+    if (bus < 0x10) com_puts("0");
+    com_puthex(bus);
+    com_puts(":");
+    if (dev < 0x10) com_puts("0");
+    com_puthex(dev);
+    com_puts(".");
+    com_puthex(func);
+    com_puts(" vid:did ");
+    com_puthex(rec.vendor_id);
+    com_puts(":");
+    com_puthex(rec.device_id);
+    com_puts(" class ");
+    com_puthex(rec.class_code);
+    com_puts("/");
+    com_puthex(rec.subclass);
+    com_puts("/");
+    com_puthex(rec.prog_if);
+    if (rec.irq != 0xFF){
+        com_puts(" irq ");
+        com_puthex(rec.irq);
+    }
+    com_puts("\n");
+
+    pci_registry_add(&rec);
+}
+
+static void pci_scan_bus(uint32_t bus, int depth){
+    if (bus > 255) return;
+    if (g_bus_scanned[bus >> 3] & (1u << (bus & 7))) return; //шина уже пройдена
+    g_bus_scanned[bus >> 3] |= (1u << (bus & 7));
+
+    if (depth > PCI_SCAN_MAX_DEPTH) return;
+
+    for (uint32_t dev = 0; dev < 32; dev++){
+        uint32_t id = pci_cfg_read_dword(bus, dev, 0, PCI_CFG_VENDOR_ID);
+        if ((id & 0xFFFF) == 0xFFFF) continue; //слот пуст
+
+        uint8_t htype = pci_cfg_read_byte(bus, dev, 0, PCI_CFG_HEADER_TYPE);
+        uint32_t func_max = (htype & PCI_HTYPE_MULTIFUNC) ? 8 : 1;
+
+        for (uint32_t func = 0; func < func_max; func++){
+            uint32_t fid = pci_cfg_read_dword(bus, dev, func, PCI_CFG_VENDOR_ID);
+            if ((fid & 0xFFFF) == 0xFFFF) continue; //функции нет
+
+            if (g_pci_devs_count >= PCI_REGISTRY_MAX) return;
+
+            pci_record_device(bus, dev, func);
+
+            //Рекурсия в мосты
+            uint8_t fht  = pci_cfg_read_byte(bus, dev, func, PCI_CFG_HEADER_TYPE);
+            uint32_t cls = pci_cfg_read_dword(bus, dev, func, PCI_CFG_REV_CLASS);
+            if ((fht & ~PCI_HTYPE_MULTIFUNC) == PCI_HTYPE_BRIDGE &&
+                ((cls >> 24) & 0xFF) == PCI_CLASS_BRIDGE &&
+                ((cls >> 16) & 0xFF) == PCI_SUBCLASS_PCI_BRIDGE){
+                uint8_t secondary = pci_cfg_read_byte(bus, dev, func, PCI_CFG_BR_SECONDARY);
+                if (secondary != 0 && secondary != bus){
+                    pci_scan_bus(secondary, depth + 1);
+                }
+            }
+        }
+    }
+}
+
+//Полное сканирование. Повторные вызовы — no-op
+int pci_scan_all(void){
+    if (g_pci_scanned) return g_pci_devs_count;
+    g_pci_scanned = 1;
+
+    memset(g_bus_scanned, 0, sizeof(g_bus_scanned));
+    g_pci_devs_count = 0;
+
+    //Детект PCI: если на шине 0 нет ни одного устройства,
+    //считаем PCI-хост отсутствующим (или механизм #1 не работает)
+    uint32_t id0 = pci_cfg_read_dword(0, 0, 0, PCI_CFG_VENDOR_ID);
+    if ((id0 & 0xFFFF) == 0xFFFF){
+        com_puts("[PCI] Mechanism #1: no devices on bus 0, PCI host absent?\n");
+        return 0;
+    }
+
+    pci_scan_bus(0, 0);
+
+    com_puts("[PCI] scan done, ");
+    com_puthex(g_pci_devs_count);
+    com_puts(" devices\n");
+    return g_pci_devs_count;
+}
+

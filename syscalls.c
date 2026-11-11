@@ -39,6 +39,7 @@
 #include "userspace/include/mount_structures.h"
 #include "include-kernel/graphic_layer.h"
 #include "userspace/include/ugraph.h"
+#include "include-kernel/hardware.h"
 
 // Состояние модификаторов клавиатуры в ядре
 bool shift_pressed = false;
@@ -2023,6 +2024,49 @@ void systemcall_usb_get_dev(struct regs *r)
     r->eax = 0;
 }
 
+
+
+// ---- PCI ----
+//   SYS_PCI_COUNT: eax = число устройств (при первом вызове ядро сканирует шины)
+//   SYS_PCI_GET_DEV: ebx = idx, ecx = u_pci_dev_t*; -> 0/-1
+//   SYS_PCI_READ_CFG: ebx = PCI_BDF(bus,dev,func), ecx = offset (0..255);
+//                     -> eax = dword из конфиг-пространства или -1.
+//                     Читаются только устройства из реестра — userspace не может
+//                     тыкать произвольные конфиг-циклы в живую шину
+
+void systemcall_pci_count(struct regs *r){
+    r->eax = (uint32_t)pci_scan_all();
+}
+
+void systemcall_pci_get_dev(struct regs *r){
+    int idx = (int)r->ebx;
+    u_pci_dev_t *user_out = (u_pci_dev_t *)r->ecx;
+
+    if (!user_out || (uint32_t)user_out < 0x40000000){
+        r->eax = (uint32_t)-1; return;
+    }
+
+    pci_dev_record_t rec;
+    if (pci_registry_get(idx, &rec) != 0){
+        r->eax = (uint32_t)-1; return;
+    }
+
+    *user_out = rec;
+    r->eax = 0;
+}
+
+void systemcall_pci_read_cfg(struct regs *r){
+    uint32_t bdf    = r->ebx;
+    uint32_t offset = r->ecx & 0xFFFF;
+
+    uint32_t value = 0;
+    if (pci_registry_read_cfg(bdf, (uint8_t)offset, &value) != 0){
+        r->eax = (uint32_t)-1;
+        return;
+    }
+    r->eax = value;
+}
+
 void systemcall_get_tty_cursor_pos(struct regs *r)
 {
     if (!current_tty)
@@ -2366,5 +2410,7 @@ void syscalls_table_init(void)
     syscalls_table[SYS_GET_MOUNT_COUNT].func = &systemcall_get_mount_count;
     syscalls_table[SYS_GET_MOUNT_INFO].func = &systemcall_get_mount_info;
     syscalls_table[SYS_GRAPH_INFO].func = &systemcall_graph_info;
-
+    syscalls_table[SYS_PCI_COUNT].func = &systemcall_pci_count;
+    syscalls_table[SYS_PCI_GET_DEV].func = &systemcall_pci_get_dev;
+    syscalls_table[SYS_PCI_READ_CFG].func = &systemcall_pci_read_cfg;
 }

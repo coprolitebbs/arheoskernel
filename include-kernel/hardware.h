@@ -20,6 +20,40 @@
 
 #include <stdint.h>
 #include "ports_io.h"
+#include "../userspace/include/udevices_struct.h"
+
+//Смещения в конфигурационном пространстве (заголовок типа 0x00 / 0x01)
+#define PCI_CFG_VENDOR_ID   0x00
+#define PCI_CFG_CMD         0x04
+#define PCI_CFG_STATUS      0x06
+#define PCI_CFG_REV_CLASS   0x08
+#define PCI_CFG_HEADER_TYPE 0x0E
+#define PCI_CFG_BAR0        0x10
+#define PCI_CFG_SUBSYSTEM   0x2C
+#define PCI_CFG_ROM_BASE    0x30
+#define PCI_CFG_IRQ_LINE    0x3C
+#define PCI_CFG_BR_PRIMARY  0x18
+#define PCI_CFG_BR_SECONDARY 0x19
+
+#define PCI_CLASS_BRIDGE       0x06
+#define PCI_SUBCLASS_PCI_BRIDGE 0x04
+
+#define PCI_HTYPE_NORMAL      0x00
+#define PCI_HTYPE_BRIDGE      0x01
+#define PCI_HTYPE_CARDBUS     0x02
+#define PCI_HTYPE_MULTIFUNC   0x80
+
+//Максимум уровней вложенности мостов — защита от мусорных конфигураций
+#define PCI_SCAN_MAX_DEPTH 6
+
+//Порты PCI Configuration Mechanism #1
+#define PCI_CONFIG_ADDRESS_PORT 0x0CF8
+#define PCI_CONFIG_DATA_PORT    0x0CFC
+
+//PCI_BDF()/PCI_BDF_BUS()/PCI_BDF_DEV()/PCI_BDF_FUNC() берутся из upci_struct.h
+
+//Конфигурационное пространство: механизм #1 умеет только 0..255
+#define PCI_CFG_OFF_MAX 255
 
 //‘труктуры ACPI
 
@@ -55,5 +89,24 @@ void find_and_prepare_s3_trio64(void);
 
 void acpi_init(void);
 void acpi_poweroff(void);
+
+
+//Доступ к конфигурационному пространству (механизм #1)
+uint32_t pci_cfg_read_dword(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset);
+void     pci_cfg_write_dword(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset, uint32_t value);
+uint16_t pci_cfg_read_word(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset);
+uint8_t  pci_cfg_read_byte(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset);
+
+//Сканирование шин (лениво, при первом системном вызове от userspace)
+//Заполняет внутренний реестр; повторные вызовы — no-op
+int  pci_scan_all(void);
+
+//Реестр найденных устройств
+int  pci_registry_count(void);
+int  pci_registry_get(int idx, pci_dev_record_t *out);
+
+//Чтение конфиг-пространства устройства из реестра (безопасно для userspace).
+//Возвращает 0 при успехе, -1 если устройство не найдено или offset вне диапазона
+int  pci_registry_read_cfg(uint32_t bdf, uint8_t offset, uint32_t *out_value);
 
 #endif

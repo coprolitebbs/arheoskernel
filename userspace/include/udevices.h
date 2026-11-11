@@ -34,4 +34,32 @@ const char* u_usb_class_name(uint8_t dev_class);
 //Утилита: возвращает имя вендора по VID или NULL (без malloc)
 const char* u_usb_vendor_name(uint32_t vid);
 
+
+//PCI
+
+//Возвращает количество PCI-устройств (ядро при первом вызове сканирует шины)
+int u_pci_count(void);
+
+//Возвращает 0 при успехе, -1 при неверном idx
+int u_pci_get_dev(int idx, u_pci_dev_t *out);
+
+//Чтение dword из конфиг-пространства устройства из реестра.
+//bdf = PCI_BDF(bus,dev,func); off — смещение 0..255.
+//Возвращает dword или 0xFFFFFFFF (ошибка / устройство не в реестре)
+uint32_t u_pci_read_cfg(uint32_t bdf, uint8_t off);
+
+//Утилита: имя базового класса PCI (без malloc)
+const char* u_pci_class_name(uint8_t base_class);
+
+//Утилита: «полное» имя класса с учётом подкласса (без malloc)
+const char* u_pci_class_sub_name(uint8_t base_class, uint8_t subclass);
+
+//Утилита: имя вендора по VID или NULL (без malloc)
+const char* u_pci_vendor_name(uint16_t vid);
+
+//Утилита: имя устройства по VID:DID или NULL (без malloc, только популярные)
+const char* u_pci_device_name(uint16_t vid, uint16_t did);
+
+
+
 #endif

@@ -86,6 +86,11 @@
 //graphic_layer.c: fbdrv-fallback или загруженный vesa_fb и т.п.)
 #define SYS_GRAPH_INFO            66
 
+//реестр PCI устройств
+#define SYS_PCI_COUNT             67   //-> eax = число устройств (ленивое сканирование шин)
+#define SYS_PCI_GET_DEV           68   //ebx = idx, ecx = pci_dev_record_t*
+#define SYS_PCI_READ_CFG          69   //ebx = PCI_BDF(bus,dev,func), ecx = offset; -> eax = dword или -1
+
 //op-коды для SYS_GRAPH_INFO (ebx = op)
 #define GRAPH_INFO_DRIVER   0   //ecx = u_gr_driver_info_t*
 #define GRAPH_INFO_MODE     1   //ecx = индекс режима, edx = u_gr_mode_info_t*
