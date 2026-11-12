@@ -34,7 +34,8 @@ extern const uint8_t vbe_rm_blob_start[];
 extern const uint8_t vbe_rm_blob_end[];
 
 //метка целостности лежит в служебной зоне за кодом блоба: код занимает
-//0x4000..~0x4260, вход 0x4300, результат 0x4320, ячейки 0x4340..0x4375,
+//0x4000..0x4335 (вход 0x4000, RM-часть до 0x42A0, возврат pm32_ret
+//0x42A0..0x4335), параметры 0x4380, результат 0x43A0, ячейки 0x4340..0x4378,
 //так что 0x4350 никем не трогается. если младшую память кто-то затер,
 //метка исчезнет и vbe_rm_exec откажется прыгать в чужой код
 #define VBE_RM_MAGIC_ADDR 0x4350
@@ -157,8 +158,8 @@ int vbe_rm_exec(vbe_rm_regs_t *regs)
     volatile vbe_rm_regs_t *req = (volatile vbe_rm_regs_t *)VBE_RM_REQ_ADDR;
     volatile vbe_rm_regs_t *res = (volatile vbe_rm_regs_t *)VBE_RM_RES_ADDR;
 
-    //параметры пишем по фиксированному адресу 0x4300 — их читает
-    //реальнорежимная часть блоба
+    //параметры пишем по фиксированному адресу 0x4380 — их читает
+    //реальнорежимная часть блоба (за хвостом блоба, см. driver_graphic_layer.h)
     req->ax = regs->ax;
     req->bx = regs->bx;
     req->cx = regs->cx;

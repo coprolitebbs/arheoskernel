@@ -123,6 +123,19 @@ int u_gr_fix_info(u_gr_fix_info_t *out);
 //и очищает экран
 int u_gr_set_mode(uint32_t index);
 
+//Примитивы графического слоя из Ring-3 (SYS_GR_PRIM): заливка, линия
+//(в том числе диагональные — на Geode это аппаратный векторный движок GP),
+//копирование области внутри экрана и блит RAM->FB.
+//params — массив int32[6], раскладка по op (см. GR_PRIM_* в syscall.h):
+//  GR_PRIM_FILL_RECT: x, y, w, h, color
+//  GR_PRIM_DRAW_LINE: x0, y0, x1, y1, color
+//  GR_PRIM_COPY_AREA: sx, sy, w, h, dx, dy
+//  GR_PRIM_BLIT:      x, y, w, h, указатель на буфер пикселей
+//color — 0x00RRGGBB; буфер blit — пиксели в формате текущего режима
+//(упакованные строки w*(bpp/8) байт, без padding).
+//Возвращает 0 при успехе, иначе отрицательный код GR_ERR_* ядра
+int u_gr_prim(uint32_t op, const int32_t *params);
+
 //Утилиты: строковые имена полей fix-информации (без malloc)
 const char *u_gr_visual_name(uint32_t visual);
 const char *u_gr_type_name(uint32_t type);

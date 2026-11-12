@@ -41,29 +41,45 @@
 
 
 //---- Регистры графического конвейера Geode GX1 (смещения от GX_BASE) ----
-//Взято из Geode GX1 Data Book, таблица 6-29 (Graphics Processor Registers)
-#define GP_DST_OFFSET       0x8100  // Destination X/Y (16:16)
-#define GP_SRC_OFFSET       0x8108  // Source X/Y (16:16)
-#define GP_STRIDE           0x810C  // Pitch (bytes)
-#define GP_WID_HEIGHT       0x8104  // Width (31:16) / Height (15:0)
-#define GP_SRC_COLOR_FG     0x8110  // Foreground color (source)
-#define GP_SRC_COLOR_BG     0x8114  // Background color
-#define GP_RASTER_MODE      0x8200  // ROP and raster operation control
-#define GP_VECTOR_MODE      0x8204  // Writing starts vector draw
-#define GP_BLT_MODE         0x8208  // Writing starts BLT
-#define GP_BLT_STATUS       0x820C  // Status (bit 0 = PB, bit 4 = CE)
+//Geode GX1 Data Book (MediaGX databook), таблица 4-23/4-25:
+//GP-регистры лежат в управляющем пространстве GX_BASE+0x8100..0x82FF.
+//Сам GX_BASE задается регистром GCR (порт 0x22/0x23, индекс 0xB8):
+//биты 1:0 = 01/10/11 -> база 0x40000000/0x80000000/0xC0000000 (00 = выключен),
+//биты 3:2 = размер scratchpad (в нем живут BLT-буферы): 00/01/10/11 = 0/2/3/4 КБ.
+//Через PCI BAR регистры GP на GX1 НЕ доступны (BAR видеофункции CS5530A
+//отдает апертуру framebuffer), поэтому любые схемы "BAR1 = GP" ошибочны.
+#define GP_DST_XY          0x8100  //BLT: 31:16=Y, 15:0=X; вектор: старт Y/X
+#define GP_WID_HGT         0x8104  //BLT: 31:16=WIDTH, 15:0=HEIGHT; вектор: 29:16=LENGTH, 15:0=INIT_ERR
+#define GP_SRC_XY          0x8108  //BLT: 31:16=SRC_X (!), 15:0=SRC_Y; вектор: 31:16=AXIAL_ERR, 15:0=DIAG_ERR
+#define GP_SRC_COLOR       0x810C  //цвета mono-расширения источника (цвет заливки НЕ здесь!)
+#define GP_PAT_COLOR_A     0x8110  //31:16=PAT_COLOR_0 (цвет solid-примитивов), 15:0=PAT_COLOR_1
+#define GP_RASTER_MODE     0x8200  //7:0=ROP (Windows-стиль), 9:8=PM (00=solid), 10/11/12=PT/ST/TB
+#define GP_VECTOR_MODE     0x8204  //запись запускает вектор: 0=YMAJ, 1=DMAJ, 2=DMIN, 3=DEST
+#define GP_BLT_MODE        0x8208  //запись запускает BLT: 1:0=RS, 4:2=RD, 7:6=SM, 8=реверс Y
+#define GP_BLT_STATUS      0x820C  //0=BB, 1=PB, 2=BP (RO); 8=16bpp; 9=строка FB 2048 байт (иначе 1024)
 
-//Биты статуса BLT
-#define GP_BLT_STATUS_PB    (1 << 0)  // Primitive Busy
-#define GP_BLT_STATUS_CE    (1 << 4)  // Command Empty
+//Биты статуса/конфигурации GP_BLT_STATUS
+#define GP_ST_BB           (1u << 0)  //BLT Busy — 0 перед прямым доступом к FB
+#define GP_ST_PB           (1u << 1)  //Pipeline Busy
+#define GP_ST_BP           (1u << 2)  //BLT Pending — 0 перед загрузкой регистров
+#define GP_ST_16BPP        (1u << 8)  //формат пикселя GP = 16bpp (по умолчанию 8bpp)
+#define GP_ST_W2048        (1u << 9)  //строка FB = 2048 байт (по умолчанию 1024)
 
-//Режимы BLT (упрощённо, полные значения — в Data Book)
-#define GP_BLT_MODE_SRC_NONE     0x00000000  // Нет источника (solid fill)
-#define GP_BLT_MODE_SRC_FB       0x00000001  // Источник — framebuffer
-#define GP_BLT_MODE_DST_FB       0x00000000  // Назначение — framebuffer
+//ROP-коды пайплайна GX1 (входы P/S/D; у solid-примитивов цвет всегда из
+//GP_PAT_COLOR_0, у копирования источник — реальный пиксель из FB):
+#define GP_ROP_PATCOPY     0xF0   //результат = P — заливка и сплошные линии
+#define GP_ROP_SRCCOPY     0xCC   //результат = S — копирование FB->FB
 
-//ROP-код для простого копирования источника (SRCCOPY)
-#define GEODE_ROP_SRCCOPY        0xCC
+//Биты GP_BLT_MODE для SRCCOPY FB->FB
+#define GP_BM_SRC_FB       0x01   //RS=01: источник из FB (через BLT-буфер 0)
+#define GP_BM_REV_Y        0x100  //реверс Y — перекрывающиеся копии вниз
+
+// маяк quiet-RM в ячейках блоба vbe_rm_blob.asm (за GDTR-ячейкой 0x4370):
+// != 0 -> блок выполняет int 10h с IF=0 и без teletype-маяков на экране.
+// Ставится этим драйвером: на GX1-платформе IRQ в RM-окне и teletype
+// в графическом режиме (через Virtual VGA/VSA-SMI) — главные подозреваемые
+// в зависании смены режима, vesa_fb этот флаг не трогает (для него 0).
+#define VBE_RM_QUIET_ADDR  0x4378
 
 static vbe_table_hdr_t *vbe_hdr = 0;
 static vbe_mode_rec_t  *vbe_recs = 0;
@@ -96,8 +112,10 @@ static gr_ops_t       geode_ops;
 static gr_driver_t    geode_driver;
 
 
-// Базовый адрес регистров, получаемый из PCI BAR
+// Базовый адрес управляющего пространства GXm (из GCR, не из PCI BAR)
 static volatile uint32_t *gx_base;
+// размер scratchpad (BLT-буферов GP) в КБ из GCR[3:2]; 0 = BLT FB->FB недоступен
+static uint32_t geode_sp_kb = 0;
 
 
 
@@ -131,143 +149,422 @@ static void vcom_puthex(uint32_t v)
 }
 
 
-// Вспомогательная функция для ожидания завершения операции
-static void geode_wait_blt_idle(void) {
-    // Ждем, пока бит Primitive Busy не станет равен 0
-    while (gx_base[GP_BLT_STATUS / 4] & GP_BLT_STATUS_PB) {
-        // Можно добавить yield_ptr(), если операция долгая
+//Вспомогательная функция для ожидания завершения операции.
+//Ждать обязаны все три RO-бита (BB/PB/BP): BP=1 при загрузке регистров
+//уничтожает отложенный BLT, BB=1 запрещает прямой доступ к FB.
+//Таймаут — от мертвого/недокрученного GP: без него зависший движок
+//повесил бы слой намертво
+static int geode_wait_blt_idle(void)
+{
+    uint32_t spins = 0;
+    if (!gx_base) return -1;
+    while (gx_base[GP_BLT_STATUS / 4] & (GP_ST_BB | GP_ST_PB | GP_ST_BP))
+    {
+        if (++spins > 20000000u)  //порядка секунды на GX1-233; дальше движок мертв
+        {
+            vcom_puts("[GEODE] gp engine stuck (BB/PB/BP), timeout\n");
+            return -1;
+        }
     }
+    return 0;
 }
 
+//чтение GCR (порт 0x22/0x23, индекс 0xB8): биты 1:0 — база GX_BASE,
+//биты 3:2 — размер scratchpad (BLT-буферы GP). Только чтение: писать
+//в конфиг-регистры CPU из драйвера нельзя (там же ключи блокировки)
+static uint8_t geode_gcr_get(void)
+{
+    uint8_t v;
+    __asm__ __volatile__("outb %0, %1" :: "a"((uint8_t)0xB8), "Nd"((uint16_t)0x22));
+    __asm__ __volatile__("inb %1, %0" : "=a"(v) : "Nd"((uint16_t)0x23));
+    return v;
+}
 
-//Инициализация аппаратного 2D-движка: поиск устройства и маппинг регистров
+//упаковка 0x00RRGGBB в формат текущего режима — зеркало gr_pack_color
+//графического слоя (примитивам драйвера слой отдает цвет до упаковки)
+static uint32_t geode_scale8(uint32_t v, uint8_t len)
+{
+    if (len == 0) return 0;
+    if (len >= 8) return v & 0xFF;
+    return (((v & 0xFF) * ((1u << len) - 1)) + 127) / 255;
+}
+
+static uint32_t geode_pack_color(uint32_t rgb)
+{
+    if (geode_cur_mode.bpp >= 24) return rgb;
+    uint32_t r = (rgb >> 16) & 0xFF;
+    uint32_t g = (rgb >> 8)  & 0xFF;
+    uint32_t b =  rgb        & 0xFF;
+    return (geode_scale8(r, geode_cur_mode.red.length)   << geode_cur_mode.red.offset)
+         | (geode_scale8(g, geode_cur_mode.green.length) << geode_cur_mode.green.offset)
+         | (geode_scale8(b, geode_cur_mode.blue.length)  << geode_cur_mode.blue.offset);
+}
+
+//GP жив только в 16bpp и только при строке FB 1024/2048 байт: ширина строки
+//в GP задается одним битом (GP_BLT_STATUS[9]), произвольного stride нет.
+//На GX1 контроллер дисплея держит строку 2048 байт для ВСЕХ 16bpp-режимов
+//и 1024 для 8bpp (XY-организация framebuffer, даташит 4.5.8), так что
+//16bpp-режимы платы проходят этот фильтр целиком
+static int geode_gp_mode_ok(void)
+{
+    if (!gx_base) return 0;
+    if (geode_cur_mode.bpp != 16) return 0;
+    if (geode_cur_mode.pitch != 1024 && geode_cur_mode.pitch != 2048) return 0;
+    return 1;
+}
+
+//конфигурация GP под текущий режим: формат пикселя и ширина строки FB.
+//зовется после инициализации и после каждой успешной смены режима —
+//VBIOS при 4F02 мог переставить биты 8/9 под свой режим
+static void geode_gp_reconfig(void)
+{
+    if (!gx_base) return;
+    uint32_t cfg = 0;
+    if (geode_gp_mode_ok())
+    {
+        cfg |= GP_ST_16BPP;
+        if (geode_cur_mode.pitch == 2048) cfg |= GP_ST_W2048;
+    }
+    gx_base[GP_BLT_STATUS / 4] = cfg;
+    vcom_puts("[GEODE] gp reconfig bpp=");
+    vcom_puthex(geode_cur_mode.bpp);
+    vcom_puts(" pitch=");
+    vcom_puthex(geode_cur_mode.pitch);
+    vcom_puts(" cfg=");
+    vcom_puthex(cfg);
+    vcom_puts("\n");
+}
+
+//Инициализация аппаратного 2D-движка: подтверждение GX1-платформы по PCI
+//и маппинг GP-регистров через GX_BASE из GCR.
+//
+//ВАЖНО про PCI: сканируем ТОЛЬКО шину 0. Полный проход 256 шин (как было
+//раньше) на примитивном хост-бридже GXm уходит в type-1 конфигурационные
+//циклы, которые бриджем не транслируются никуда внятного — поведение
+//CS5530A на них не гарантируется, а подвешенная шина PCI перед первым
+//же BIOS-вызовом — худший из сценариев. Видео на GX1-плате
+//(функция CS5530A 0x1078:0x0104) сидит на шине 0, функций 0..7.
+//BAR не читаем вовсе: GP-регистры на GX1 всегда за GX_BASE из GCR.
 static int geode_init_accel(gr_driver_t *drv)
 {
     if (!drv->pci_cfg_read_dword_ptr || !drv->vmm_map_pages_ptr)
         return GR_ERR_UNSUPPORTED;
 
-    //Ищем видеоустройство Geode (Vendor ID: 0x100B — National Semiconductor/AMD)
-    //Device ID для GX1 может быть 0x0030 или подобным; уточните по своему железу
-    uint32_t video_bus = 0xFFFFFFFF, video_dev = 0xFFFFFFFF;
-
-    for (uint32_t bus = 0; bus < 256 && video_bus == 0xFFFFFFFF; bus++) {
-        for (uint32_t dev = 0; dev < 32; dev++) {
-            uint32_t id = drv->pci_cfg_read_dword_ptr(bus, dev, 0, 0x00);
+    //Шина 0, устройства 0..31, функции 0..7: ищем Cyrix/NatSemi/AMD.
+    //0x1078 (Cyrix) — host-bridge GXm и функции CS5530A, включая видео
+    //0x0104; 0x100B/0x1022 — NatSemi/AMD-бренд Geode. Устройства с
+    //vendor 0xFFFF отсутствуют, и функции за отсутствующей тоже
+    int found = 0;
+    for (uint32_t dev = 0; dev < 32 && !found; dev++)
+    {
+        for (uint32_t func = 0; func < 8; func++)
+        {
+            uint32_t id = drv->pci_cfg_read_dword_ptr(0, dev, func, 0x00);
             uint16_t vendor = id & 0xFFFF;
-            uint16_t device = id >> 16;
-            //Vendor ID Geode: 0x100B (National Semiconductor) или 0x1022 (AMD)
-            if ((vendor == 0x100B || vendor == 0x1022) &&
-                (device == 0x0030 || device == 0x0031 || device == 0x0104)) {
-                video_bus = bus;
-                video_dev = dev;
-                break;
+            if (vendor == 0xFFFF) break;      //функций за этой нет
+            if (vendor == 0x1078) { found = 1; break; }
+            if ((vendor == 0x100B || vendor == 0x1022))
+            {
+                uint16_t device = id >> 16;
+                if (device == 0x0030 || device == 0x0031 || device == 0x0104)
+                {
+                    found = 1;
+                    break;
+                }
             }
         }
     }
-    if (video_bus == 0xFFFFFFFF)
+    if (!found)
+    {
+        vcom_puts("[GEODE] no GX1-class device on bus 0\n");
         return GR_ERR_NOTFOUND;
+    }
 
-    //BAR1 — регистры графического процессора
-    uint32_t bar1 = drv->pci_cfg_read_dword_ptr(video_bus, video_dev, 0, 0x14);
-    uint32_t gx_phys = bar1 & 0xFFFFFFF0;  //отсекаем флаги PCI
-    if (gx_phys == 0)
-        return GR_ERR_IO;
+    //GX_BASE из GCR: биты 1:0, 00 означает "пространство выключено" —
+    //тогда GP нет вовсе (BIOS мог не поднимать графику)
+    uint8_t gcr = geode_gcr_get();
+    uint32_t gx_phys;
+    switch (gcr & 0x3)
+    {
+    case 1:  gx_phys = 0x40000000u; break;
+    case 2:  gx_phys = 0x80000000u; break;
+    case 3:  gx_phys = 0xC0000000u; break;
+    default:
+        vcom_puts("[GEODE] gcr=");
+        vcom_puthex(gcr);
+        vcom_puts(" - GX_BASE disabled, no GP\n");
+        return GR_ERR_NOTFOUND;
+    }
 
-    //Маппим страницы регистров в адресное пространство ядра (identity-mapped)
-    //Размер области: 0x1000 байт достаточно для всех GP_* регистров (0x8100..0x82FF)
-    drv->vmm_map_pages_ptr(gx_phys, 0x1000);
+    //Scratchpad (GCR[3:2]) — память BLT-буферов GP. Без нее BLT FB->FB
+    //некуда буферизовать: копирование уйдет в software, заливка/линии
+    //останутся аппаратными (они буферов не требуют)
+    static const uint32_t sp_tab[4] = { 0, 2, 3, 4 };
+    geode_sp_kb = sp_tab[(gcr >> 2) & 0x3];
+    uint32_t sp_kb = geode_sp_kb;
+
+    //Маппим страницу управляющего пространства с GP-регистрами
+    //(GX_BASE+0x8000..0x8FFF покрывает 0x8100..0x82FF)
+    drv->vmm_map_pages_ptr(gx_phys + 0x8000, 0x1000);
 
     gx_base = (volatile uint32_t *)(uintptr_t)gx_phys;
 
-    vcom_puts("[GEODE] accel registers at ");
+    vcom_puts("[GEODE] gx_base=");
     vcom_puthex(gx_phys);
-    vcom_puts("\n");
+    vcom_puts(" gcr=");
+    vcom_puthex(gcr);
+    vcom_puts(" scratchpad=");
+    vcom_puthex(sp_kb);
+    vcom_puts("KB\n");
     return GR_OK;
 }
 
 
 
-//Аппаратная заливка прямоугольника через BLT (источник = none)
+//адрес пикселя в LFB (identity-маппинг слоя: VA == физический LFB)
+static inline uint8_t *geode_lfb_pixel(int x, int y)
+{
+    return (uint8_t *)(uintptr_t)geode_cur_mode.lfb
+         + (uint32_t)y * geode_cur_mode.pitch
+         + (uint32_t)x * (geode_cur_mode.bpp / 8);
+}
+
+//программная запись пикселя — fallback примитивов, когда GP недоступен
+//(gr_draw_line/gr_fill_rect слоя не подменяют сбойный op на свой LFB-код,
+//поэтому драйвер обязан сам довести примитив до экрана в любом режиме)
+static void geode_sw_pixel(int x, int y, uint32_t packed)
+{
+    uint8_t *p = geode_lfb_pixel(x, y);
+    switch (geode_cur_mode.bpp)
+    {
+    case 32: *(volatile uint32_t *)p = packed; break;
+    case 24:
+        p[0] =  packed        & 0xFF;
+        p[1] = (packed >> 8)  & 0xFF;
+        p[2] = (packed >> 16) & 0xFF;
+        break;
+    case 16: *(volatile uint16_t *)p = (uint16_t)packed; break;
+    default: *p = (uint8_t)packed; break;
+    }
+}
+
+//программная заливка (та же геометрия, что у gr_lfb_fill_rect слоя)
+static void geode_sw_fill_rect(int x, int y, int w, int h, uint32_t packed)
+{
+    uint32_t bpp = geode_cur_mode.bpp / 8;
+    for (int row = 0; row < h; row++)
+    {
+        uint8_t *line = (uint8_t *)(uintptr_t)geode_cur_mode.lfb
+                      + (uint32_t)(y + row) * geode_cur_mode.pitch
+                      + (uint32_t)x * bpp;
+        if (bpp == 4)
+        {
+            uint32_t *l = (uint32_t *)line;
+            for (int c = 0; c < w; c++) l[c] = packed;
+        }
+        else if (bpp == 2)
+        {
+            uint16_t *l = (uint16_t *)line;
+            for (int c = 0; c < w; c++) l[c] = (uint16_t)packed;
+        }
+        else if (bpp == 3)
+        {
+            for (int c = 0; c < w; c++)
+            {
+                uint8_t *p = line + (uint32_t)c * 3;
+                p[0] =  packed        & 0xFF;
+                p[1] = (packed >> 8)  & 0xFF;
+                p[2] = (packed >> 16) & 0xFF;
+            }
+        }
+        else
+        {
+            for (int c = 0; c < w; c++) line[c] = (uint8_t)packed;
+        }
+    }
+}
+
+//Заливка: GP BLT с источником "none". У solid-примитивов GX1 цвет берется
+//из GP_PAT_COLOR_0 (старшее слово GP_PAT_COLOR_A, даташит 4.4.3), ROP=0xF0
+//выбирает P. Запуск — запись GP_BLT_MODE (RS=00: источника нет)
 static int geode_fill_rect(void *priv, int x, int y, int w, int h, uint32_t color)
 {
     (void)priv;
-    if (!gx_base) return GR_ERR_NODEV;
+    if (w <= 0 || h <= 0) return GR_ERR_BADARG;
 
-    //Ждём, пока предыдущая операция завершится
-    geode_wait_blt_idle();
+    if (gx_base && geode_gp_mode_ok() && geode_wait_blt_idle() == 0)
+    {
+        uint32_t c16 = (uint16_t)geode_pack_color(color);
+        gx_base[GP_PAT_COLOR_A / 4] = c16 << 16;                     //PAT_COLOR_0
+        gx_base[GP_DST_XY / 4]      = ((uint32_t)(uint16_t)y << 16) | (uint16_t)x;
+        gx_base[GP_WID_HGT / 4]     = ((uint32_t)(uint16_t)w << 16) | (uint16_t)h;
+        gx_base[GP_RASTER_MODE / 4] = GP_ROP_PATCOPY;                //PM=00 solid
+        gx_base[GP_BLT_MODE / 4]    = 0x00000000;                    //старт BLT
+        return GR_OK;
+    }
 
-    //1. Цвет заливки ( foreground color )
-    gx_base[GP_SRC_COLOR_FG / 4] = color;
-
-    //2. Адрес назначения: (y << 16) | x
-    gx_base[GP_DST_OFFSET / 4] = ((uint32_t)y << 16) | (uint32_t)x;
-
-    //3. Шаг (pitch) в байтах
-    gx_base[GP_STRIDE / 4] = geode_cur_mode.pitch;
-
-    //4. Ширина (старшие 16 бит) и высота (младшие 16 бит)
-    gx_base[GP_WID_HEIGHT / 4] = ((uint32_t)w << 16) | (uint32_t)h;
-
-    //5. ROP: простая замена (SRCCOPY)
-    gx_base[GP_RASTER_MODE / 4] = GEODE_ROP_SRCCOPY;
-
-    //6. Запуск BLT: источник = none, назначение = framebuffer
-    gx_base[GP_BLT_MODE / 4] = GP_BLT_MODE_SRC_NONE | GP_BLT_MODE_DST_FB;
-
+    geode_sw_fill_rect(x, y, w, h, geode_pack_color(color));
     return GR_OK;
 }
 
-
-
-//Аппаратное копирование прямоугольника внутри видеопамяти
+//Копирование FB->FB через GP BLT (RS=01: источник из FB через BLT-буфер).
+//Строка источника целиком буферизуется в scratchpad, поэтому ширина одной
+//операции ограничена памятью BLT-буфера: режем на вертикальные полосы
+//(если полоса одна — это один BLT, поведение слоя не меняется).
+//При копировании вниз (dy > sy) включаем реверс Y и стартуем с нижней
+//строки — иначе BLT затирает еще не прочитанные строки источника
 static int geode_copy_area(void *priv, int sx, int sy, int w, int h, int dx, int dy)
 {
     (void)priv;
-    if (!gx_base) return GR_ERR_NODEV;
+    if (w <= 0 || h <= 0) return GR_ERR_BADARG;
 
-    geode_wait_blt_idle();
+    if (gx_base && geode_gp_mode_ok() && geode_sp_kb >= 2)
+    {
+        //строка источника должна влезть в BLT-буфер: консервативно
+        //считаем, что под буфер уходит половина scratchpad
+        uint32_t bytes_pp = geode_cur_mode.bpp / 8;
+        uint32_t chunk = (geode_sp_kb * 1024u / 2u) / bytes_pp;
+        if (chunk == 0) chunk = 1;
 
-    //Источник
-    gx_base[GP_SRC_OFFSET / 4] = ((uint32_t)sy << 16) | (uint32_t)sx;
-    //Назначение
-    gx_base[GP_DST_OFFSET / 4] = ((uint32_t)dy << 16) | (uint32_t)dx;
-    //Шаг (общий для источника и назначения)
-    gx_base[GP_STRIDE / 4] = geode_cur_mode.pitch;
-    //Размеры
-    gx_base[GP_WID_HEIGHT / 4] = ((uint32_t)w << 16) | (uint32_t)h;
-    //ROP
-    gx_base[GP_RASTER_MODE / 4] = GEODE_ROP_SRCCOPY;
+        for (int off = 0; off < w; off += (int)chunk)
+        {
+            int cw = w - off;
+            if (cw > (int)chunk) cw = (int)chunk;
 
-    //Запуск: источник = framebuffer, назначение = framebuffer
-    gx_base[GP_BLT_MODE / 4] = GP_BLT_MODE_SRC_FB | GP_BLT_MODE_DST_FB;
+            if (geode_wait_blt_idle() != 0) break;
 
+            if (dy > sy)
+            {
+                //реверс Y: старт — ЛЕВЫЙ-НИЖНИЙ угол полосы (X инкрементный,
+                //Y декрементный реверс-битом), иначе BLT затирает источник
+                gx_base[GP_SRC_XY / 4] = ((uint32_t)(uint16_t)(sx + off) << 16)
+                                       |  (uint16_t)(sy + h - 1);
+                gx_base[GP_DST_XY / 4] = ((uint32_t)(uint16_t)(dx + off) << 16)
+                                       |  (uint16_t)(dy + h - 1);
+                gx_base[GP_WID_HGT / 4]     = ((uint32_t)(uint16_t)cw << 16) | (uint16_t)h;
+                gx_base[GP_RASTER_MODE / 4] = GP_ROP_SRCCOPY;
+                gx_base[GP_BLT_MODE / 4]    = GP_BM_SRC_FB | GP_BM_REV_Y;
+            }
+            else
+            {
+                gx_base[GP_SRC_XY / 4] = ((uint32_t)(uint16_t)(sx + off) << 16)
+                                       |  (uint16_t)sy;
+                gx_base[GP_DST_XY / 4] = ((uint32_t)(uint16_t)(dx + off) << 16)
+                                       |  (uint16_t)dy;
+                gx_base[GP_WID_HGT / 4]     = ((uint32_t)(uint16_t)cw << 16) | (uint16_t)h;
+                gx_base[GP_RASTER_MODE / 4] = GP_ROP_SRCCOPY;
+                gx_base[GP_BLT_MODE / 4]    = GP_BM_SRC_FB;
+            }
+        }
+        return GR_OK;
+    }
+
+    //software: memmove построчно с направлением против затирания
+    uint32_t bpp = geode_cur_mode.bpp / 8;
+    uint32_t row_bytes = (uint32_t)w * bpp;
+    if (dy <= sy)
+    {
+        for (int i = 0; i < h; i++)
+        {
+            uint8_t *d = (uint8_t *)(uintptr_t)geode_cur_mode.lfb
+                       + (uint32_t)(dy + i) * geode_cur_mode.pitch + (uint32_t)dx * bpp;
+            uint8_t *s = (uint8_t *)(uintptr_t)geode_cur_mode.lfb
+                       + (uint32_t)(sy + i) * geode_cur_mode.pitch + (uint32_t)sx * bpp;
+            __builtin_memmove(d, s, row_bytes);
+        }
+    }
+    else
+    {
+        for (int i = h - 1; i >= 0; i--)
+        {
+            uint8_t *d = (uint8_t *)(uintptr_t)geode_cur_mode.lfb
+                       + (uint32_t)(dy + i) * geode_cur_mode.pitch + (uint32_t)dx * bpp;
+            uint8_t *s = (uint8_t *)(uintptr_t)geode_cur_mode.lfb
+                       + (uint32_t)(sy + i) * geode_cur_mode.pitch + (uint32_t)sx * bpp;
+            __builtin_memmove(d, s, row_bytes);
+        }
+    }
     return GR_OK;
 }
 
-
-
-//Аппаратная отрисовка линии (упрощённо: горизонтальные и вертикальные)
+//Линии. H/V — через заливку; диагонали — векторным движком GP (Bresenham
+//в железе): старт в GP_DST_XY, длина/начальная ошибка в GP_WID_HGT,
+//осевая/диагональная ошибки в GP_SRC_XY, запуск записью GP_VECTOR_MODE.
+//Если GP недоступен — программный Брезенхэм прямо в LFB (слой при наличии
+//op->draw_line на свой код не откатывается, обязаны уметь сами)
 static int geode_draw_line(void *priv, int x0, int y0, int x1, int y1, uint32_t color)
 {
     (void)priv;
-    if (!gx_base) return GR_ERR_NODEV;
 
-    //Для горизонтальной линии достаточно заливки высотой 1
-    if (y0 == y1) {
+    //горизонтальная — заливка высотой 1, вертикальная — шириной 1
+    if (y0 == y1)
+    {
         int x = (x0 < x1) ? x0 : x1;
         int w = (x0 < x1) ? (x1 - x0 + 1) : (x0 - x1 + 1);
         return geode_fill_rect(priv, x, y0, w, 1, color);
     }
-    //Для вертикальной — заливка шириной 1
-    if (x0 == x1) {
+    if (x0 == x1)
+    {
         int y = (y0 < y1) ? y0 : y1;
         int h = (y0 < y1) ? (y1 - y0 + 1) : (y0 - y1 + 1);
         return geode_fill_rect(priv, x0, y, 1, h, color);
     }
 
-    //Диагональные линии: программный fallback через put_pixel слоя
-    //(полноценный векторный движок требует точной настройки ошибок Брезенхэма)
-    return GR_ERR_UNSUPPORTED;
+    int dx = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
+    int dy = (y1 >= y0) ? (y1 - y0) : (y0 - y1);
+    uint32_t packed = geode_pack_color(color);
+
+    if (gx_base && geode_gp_mode_ok() && geode_wait_blt_idle() == 0)
+    {
+        //векторный движок GP: классический Брезенхэм с дроблением шага
+        //на "осевой" (шаг по мажорной оси) и "диагональный" (по обеим).
+        //начальная ошибка 2*minor-major, осевая 2*minor,
+        //диагональная 2*(minor-major); мажорная ось определяет LENGTH.
+        //конец линии включительно: LENGTH = major+1 (нулевой LENGTH не
+        //рисует ни пиксела). если на железе пикселов окажется на один
+        //больше/меньше — правится здесь, в одном месте
+        int major, minor;
+        uint32_t vmode = 0;
+        if (dx >= dy)            //X-мажорная: YMAJ=0, мажорная ось — X
+        {
+            major = dx; minor = dy;
+            if (x1 >= x0) vmode |= 0x2;    //DMAJ: шаг по X вперед
+            if (y1 >= y0) vmode |= 0x4;    //DMIN: шаг по Y вперед
+        }
+        else                     //Y-мажорная: YMAJ=1, мажорная ось — Y
+        {
+            major = dy; minor = dx;
+            vmode |= 0x1;                  //YMAJ
+            if (y1 >= y0) vmode |= 0x2;    //DMAJ: шаг по Y вперед
+            if (x1 >= x0) vmode |= 0x4;    //DMIN: шаг по X вперед
+        }
+
+        uint32_t c16 = (uint16_t)geode_pack_color(color);
+        gx_base[GP_PAT_COLOR_A / 4] = c16 << 16;      //цвет solid-примитива
+        gx_base[GP_DST_XY / 4]      = ((uint32_t)(uint16_t)y0 << 16) | (uint16_t)x0;
+        //LENGTH в битах 29:16 (биты 31:30 в векторном режиме зарезервированы)
+        gx_base[GP_WID_HGT / 4]     = ((uint32_t)(major + 1) << 16)
+                                    | (uint32_t)(uint16_t)(2 * minor - major);
+        gx_base[GP_SRC_XY / 4]      = ((uint32_t)(uint16_t)(2 * minor) << 16)
+                                    | (uint16_t)(uint32_t)(2 * (minor - major));
+        gx_base[GP_RASTER_MODE / 4] = GP_ROP_PATCOPY;
+        gx_base[GP_VECTOR_MODE / 4] = vmode;          //запуск вектора
+        return GR_OK;
+    }
+
+    //программный Брезенхэм по LFB
+    int sx = (x1 >= x0) ? 1 : -1;
+    int sy = (y1 >= y0) ? 1 : -1;
+    int err = dx - dy;
+    for (;;)
+    {
+        geode_sw_pixel(x0, y0, packed);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = err * 2;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 <  dx) { err += dx; y0 += sy; }
+    }
+    return GR_OK;
 }
 
 
@@ -730,6 +1027,10 @@ static int vs_set_mode(void *priv, uint32_t index)
 
     geode_fill_mode(index, &geode_cur_mode);
 
+    //GP обязан перечитать формат пикселя/ширину строки FB под новый режим:
+    //VBIOS при 4F02 переставлял биты 8/9 GP_BLT_STATUS под свою геометрию
+    geode_gp_reconfig();
+
     memset(&geode_fix, 0, sizeof(geode_fix));
     strcpy(geode_fix.id, "geode");
     geode_fix.smem_start = geode_cur_mode.lfb;
@@ -926,18 +1227,35 @@ void driver_main(struct boot_info *boot)
     descr_api.struct_ptr = &geode_driver;
 
 
-    //Пытаемся инициализировать аппаратный 2D-движок
+    //Примитивы регистрируются ВСЕГДА: реализация сама выбирает между GP
+    //и LFB-программным путём на каждом вызове. Если ops->fill_rect оставить
+    //NULL при рабочем set_mode — слой рисует своим lfb-кодом, а при
+    //НЕ-NULL, но сбойном op (как было раньше) слой НЕ откатывается на
+    //свой код и примитив просто пропадает — gr_fill_rect возвращает ошибку
+    geode_ops.fill_rect  = geode_fill_rect;
+    geode_ops.copy_area  = geode_copy_area;
+    geode_ops.draw_line  = geode_draw_line;
+
+    //Пытаемся инициализировать аппаратный 2D-движок (только лог GP):
+    //если GP не найден — примитивы работают программно поверх LFB
     if (geode_init_accel(&geode_driver) == GR_OK)
     {
-        geode_ops.fill_rect  = geode_fill_rect;
-        geode_ops.copy_area  = geode_copy_area;
-        geode_ops.draw_line  = geode_draw_line;
-        vcom_puts("[GEODE] hardware acceleration enabled\n");
+        geode_gp_reconfig();
+        vcom_puts("[GEODE] GP engine mapped\n");
     }
     else
     {
-        vcom_puts("[GEODE] accel init failed, using software fallback\n");
+        vcom_puts("[GEODE] GP unavailable, primitives run on LFB\n");
     }
+
+    //quiet-RM для блоба vbe_rm_blob.asm: все BIOS-вызовы этого драйвера
+    //(4F02/4F03/4F01) идут с IF=0 и без teletype-маяков. На GX1-плате IRQ
+    //в RM-окне (тик 100Гц/клава/RTC сквозь легаси-PIC) и teletype в
+    //графическом режиме (через Virtual VGA -> VSA -> SMI) — основные
+    //подозреваемые в зависании смены разрешения; vesa_fb флаг не трогает
+    //и на CF-18 работает по-старому (IF=1). Если на конкретной плате VBIOS
+    //без тиков вешается в 4F02 — вернуть 0 здесь же, одной строкой
+    *(volatile uint8_t *)VBE_RM_QUIET_ADDR = 1;
 
 
     geode_ready = 1;

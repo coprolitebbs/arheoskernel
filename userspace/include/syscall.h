@@ -96,6 +96,22 @@
 //eax = число устройств после обновления или отрицательный код ошибки
 #define SYS_USB_RESCAN            70
 
+//Примитивы графического слоя из Ring-3: заливка/линия/копирование/блит.
+//eax = SYS_GR_PRIM, ebx = op (GR_PRIM_*), ecx = указатель задачи на
+//массив int32[6] с параметрами операции (раскладка по op). Возврат —
+//код GR_ERR_* ядра (0 = успех). Примитивы идут через активный драйвер
+//графического слоя: на Geode это аппаратные fill/copy/вектор GP,
+//на остальных — программные реализации поверх LFB
+#define SYS_GR_PRIM               71
+
+//op-коды SYS_GR_PRIM (ebx) и раскладка int32[6] (ecx -> params[]):
+#define GR_PRIM_FILL_RECT   1   //params: x, y, w, h, color(0x00RRGGBB)
+#define GR_PRIM_DRAW_LINE   2   //params: x0, y0, x1, y1, color(0x00RRGGBB)
+#define GR_PRIM_COPY_AREA   3   //params: sx, sy, w, h, dx, dy
+#define GR_PRIM_BLIT        4   //params: x, y, w, h, (int32)указатель на буфер
+                                //буфер: пиксели формата текущего режима, без
+                                //padding: строка = w*(bpp/8) байт, h строк
+
 //op-коды для SYS_GRAPH_INFO (ebx = op)
 #define GRAPH_INFO_DRIVER   0   //ecx = u_gr_driver_info_t*
 #define GRAPH_INFO_MODE     1   //ecx = индекс режима, edx = u_gr_mode_info_t*

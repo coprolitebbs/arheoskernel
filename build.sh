@@ -240,6 +240,8 @@ $CC $USER_CCFLAGS -c userspace/examples/allocram/allocram.c -o bin/u_allocram.o
 $CC $USER_CCFLAGS_ELF -c userspace/examples/arr_test/arr_test.c -o bin/u_arr_test.o
 #kbd test
 $CC $USER_CCFLAGS_ELF -c userspace/examples/scanf_check/scanf_check.c -o bin/u_scanf_check.o
+#gpu test — тест аппаратного ускорения графики (на Geode — GP)
+$CC $USER_CCFLAGS_ELF -c userspace/examples/gputest/gputest.c -o bin/u_gputest.o
 
 
 #Утилиты
@@ -319,6 +321,7 @@ $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lsusb.o -o bin/
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lspci.o -o bin/lspci.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_uimage_elf.o bin/u_arfetch.o -o bin/arfetch.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_ugraph_elf.o bin/u_graphinfo.o -o bin/graphinfo.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_ugraph_elf.o bin/u_gputest.o -o bin/gputest.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_lib_elf.o bin/u_df.o -o bin/df.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_arcom_ui.o bin/u_arcom_core.o bin/u_arcom_ah.o bin/u_arcom_am.o -o bin/arcom.elf
 
@@ -383,6 +386,7 @@ create_fat_image() {
     mcopy -i "$IMG" bin/df.elf ::/BIN/
     mcopy -i "$IMG" bin/arcom.elf ::/BIN/
     mcopy -i "$IMG" bin/graphinfo.elf ::/BIN/GRINFO.ELF
+    mcopy -i "$IMG" bin/gputest.elf ::/BIN/GPUTEST.ELF
 
     mmd -i "$IMG" ::/CONFIG
     mmd -i "$IMG" ::/CONFIG/BOOT
@@ -494,6 +498,7 @@ e2cp bin/arfetch.elf tmp_ext2.img:/bin/arfetch.elf
 e2cp bin/df.elf tmp_ext2.img:/bin/df.elf
 e2cp bin/arcom.elf tmp_ext2.img:/bin/arcom.elf
 e2cp bin/graphinfo.elf tmp_ext2.img:/bin/grinfo.elf
+e2cp bin/gputest.elf tmp_ext2.img:/bin/gputest.elf
 
 e2mkdir tmp_ext2.img:/config
 e2mkdir tmp_ext2.img:/config/boot

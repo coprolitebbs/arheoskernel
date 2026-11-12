@@ -1949,6 +1949,52 @@ void systemcall_fb_blit(struct regs *r)
 }
 
 
+//SYS_GR_PRIM: примитивы графического слоя из Ring-3 — заливка, линия
+//(диагонали на Geode идут аппаратным векторным движком GP), копирование
+//области внутри экрана (GP BLT) и блит RAM->FB. Примитивы сознательно
+//идут через gr_* активного драйвера, а не через fb-драйвер: после смены
+//разрешения fb-драйвер держит геометрию bootinfo, а слой — фактическую.
+//gr_* сами возвращают GR_ERR_NODEV (-2), если активного драйвера нет.
+//eax = SYS_GR_PRIM, ebx = op (GR_PRIM_*), ecx = указатель задачи на
+//int32[6] с параметрами (раскладка в userspace/include/syscall.h)
+void systemcall_gr_prim(struct regs *r)
+{
+    //параметры читаются из памяти задачи: указатель обязан быть из
+    //пространства Ring-3 (та же защита, что в fb_blit/draw_string)
+    if ((uint32_t)r->ecx < 0x40000000)
+    {
+        r->eax = -1;
+        return;
+    }
+    const volatile int32_t *p = (const volatile int32_t *)r->ecx;
+    int32_t a0 = p[0], a1 = p[1], a2 = p[2], a3 = p[3], a4 = p[4], a5 = p[5];
+
+    switch (r->ebx)
+    {
+    case GR_PRIM_FILL_RECT:      //x, y, w, h, color
+        r->eax = gr_fill_rect(a0, a1, a2, a3, (uint32_t)a4);
+        break;
+    case GR_PRIM_DRAW_LINE:      //x0, y0, x1, y1, color
+        r->eax = gr_draw_line(a0, a1, a2, a3, (uint32_t)a4);
+        break;
+    case GR_PRIM_COPY_AREA:      //sx, sy, w, h, dx, dy
+        r->eax = gr_copy_area(a0, a1, a2, a3, a4, a5);
+        break;
+    case GR_PRIM_BLIT:           //x, y, w, h, указатель на буфер пикселей
+        if ((uint32_t)a4 < 0x40000000)
+        {
+            r->eax = -1;
+            return;
+        }
+        r->eax = gr_blit(a0, a1, a2, a3, (const void *)(uintptr_t)a4);
+        break;
+    default:
+        r->eax = -1;
+        break;
+    }
+}
+
+
 void systemcall_clipboard(struct regs *r)
 {
     uint32_t op   = r->ebx;
@@ -2441,6 +2487,7 @@ void syscalls_table_init(void)
     syscalls_table[SYS_GET_MOUNT_COUNT].func = &systemcall_get_mount_count;
     syscalls_table[SYS_GET_MOUNT_INFO].func = &systemcall_get_mount_info;
     syscalls_table[SYS_GRAPH_INFO].func = &systemcall_graph_info;
+    syscalls_table[SYS_GR_PRIM].func = &systemcall_gr_prim;
     syscalls_table[SYS_PCI_COUNT].func = &systemcall_pci_count;
     syscalls_table[SYS_PCI_GET_DEV].func = &systemcall_pci_get_dev;
     syscalls_table[SYS_PCI_READ_CFG].func = &systemcall_pci_read_cfg;
