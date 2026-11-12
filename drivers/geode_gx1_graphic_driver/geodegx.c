@@ -132,11 +132,11 @@ static void vcom_puthex(uint32_t v)
 
 
 // Вспомогательная функция для ожидания завершения операции
-static void geode_wait_blt_idle(void)
-{
-    uint32_t timeout = 1000000; // грубый таймаут
-    while ((gx_base[GP_BLT_STATUS / 4] & GP_BLT_STATUS_PB) && --timeout)
-        ; // можно добавить yield_ptr() для очень долгих операций
+static void geode_wait_blt_idle(void) {
+    // Ждем, пока бит Primitive Busy не станет равен 0
+    while (gx_base[GP_BLT_STATUS / 4] & GP_BLT_STATUS_PB) {
+        // Можно добавить yield_ptr(), если операция долгая
+    }
 }
 
 
@@ -146,6 +146,8 @@ static int geode_init_accel(gr_driver_t *drv)
     if (!drv->pci_cfg_read_dword_ptr || !drv->vmm_map_pages_ptr)
         return GR_ERR_UNSUPPORTED;
 
+    //Ищем видеоустройство Geode (Vendor ID: 0x100B — National Semiconductor/AMD)
+    //Device ID для GX1 может быть 0x0030 или подобным; уточните по своему железу
     uint32_t video_bus = 0xFFFFFFFF, video_dev = 0xFFFFFFFF;
 
     for (uint32_t bus = 0; bus < 256 && video_bus == 0xFFFFFFFF; bus++) {
@@ -153,14 +155,9 @@ static int geode_init_accel(gr_driver_t *drv)
             uint32_t id = drv->pci_cfg_read_dword_ptr(bus, dev, 0, 0x00);
             uint16_t vendor = id & 0xFFFF;
             uint16_t device = id >> 16;
-
+            //Vendor ID Geode: 0x100B (National Semiconductor) или 0x1022 (AMD)
             if ((vendor == 0x100B || vendor == 0x1022) &&
                 (device == 0x0030 || device == 0x0031 || device == 0x0104)) {
-                // Проверка класса устройства: 0x03 (Display controller)
-                uint32_t class_rev = drv->pci_cfg_read_dword_ptr(bus, dev, 0, 0x08);
-                uint8_t base_class = (class_rev >> 24) & 0xFF;
-                if (base_class != 0x03) continue; // не видеоустройство
-
                 video_bus = bus;
                 video_dev = dev;
                 break;
@@ -170,26 +167,14 @@ static int geode_init_accel(gr_driver_t *drv)
     if (video_bus == 0xFFFFFFFF)
         return GR_ERR_NOTFOUND;
 
-    // BAR1 — регистры графического процессора
+    //BAR1 — регистры графического процессора
     uint32_t bar1 = drv->pci_cfg_read_dword_ptr(video_bus, video_dev, 0, 0x14);
-
-    // Проверка: это memory BAR (бит 0 = 0) и 32-битная адресация (биты 2:1 = 00)
-    if (bar1 & 0x1) {
-        vcom_puts("[GEODE] BAR1 is I/O, not memory\n");
-        return GR_ERR_IO;
-    }
-
-    uint32_t gx_phys = bar1 & 0xFFFFFFF0;  // отсекаем флаги PCI
+    uint32_t gx_phys = bar1 & 0xFFFFFFF0;  //отсекаем флаги PCI
     if (gx_phys == 0)
         return GR_ERR_IO;
 
-    // Проверка выравнивания на 4 байта (для volatile uint32_t*)
-    if (gx_phys & 0x3) {
-        vcom_puts("[GEODE] BAR1 not 4-byte aligned\n");
-        return GR_ERR_IO;
-    }
-
-    // Маппим страницы регистров
+    //Маппим страницы регистров в адресное пространство ядра (identity-mapped)
+    //Размер области: 0x1000 байт достаточно для всех GP_* регистров (0x8100..0x82FF)
     drv->vmm_map_pages_ptr(gx_phys, 0x1000);
 
     gx_base = (volatile uint32_t *)(uintptr_t)gx_phys;
@@ -208,20 +193,25 @@ static int geode_fill_rect(void *priv, int x, int y, int w, int h, uint32_t colo
     (void)priv;
     if (!gx_base) return GR_ERR_NODEV;
 
-    // Проверка границ (слой уже обрезает, но для прямых вызовов — защита)
-    if (x < 0 || y < 0 || w <= 0 || h <= 0)
-        return GR_ERR_BADARG;
-    if ((uint32_t)x + (uint32_t)w > geode_cur_mode.xres ||
-        (uint32_t)y + (uint32_t)h > geode_cur_mode.yres)
-        return GR_ERR_BADARG;
-
+    //Ждём, пока предыдущая операция завершится
     geode_wait_blt_idle();
 
+    //1. Цвет заливки ( foreground color )
     gx_base[GP_SRC_COLOR_FG / 4] = color;
+
+    //2. Адрес назначения: (y << 16) | x
     gx_base[GP_DST_OFFSET / 4] = ((uint32_t)y << 16) | (uint32_t)x;
+
+    //3. Шаг (pitch) в байтах
     gx_base[GP_STRIDE / 4] = geode_cur_mode.pitch;
+
+    //4. Ширина (старшие 16 бит) и высота (младшие 16 бит)
     gx_base[GP_WID_HEIGHT / 4] = ((uint32_t)w << 16) | (uint32_t)h;
+
+    //5. ROP: простая замена (SRCCOPY)
     gx_base[GP_RASTER_MODE / 4] = GEODE_ROP_SRCCOPY;
+
+    //6. Запуск BLT: источник = none, назначение = framebuffer
     gx_base[GP_BLT_MODE / 4] = GP_BLT_MODE_SRC_NONE | GP_BLT_MODE_DST_FB;
 
     return GR_OK;
@@ -235,22 +225,20 @@ static int geode_copy_area(void *priv, int sx, int sy, int w, int h, int dx, int
     (void)priv;
     if (!gx_base) return GR_ERR_NODEV;
 
-    // Проверка границ
-    if (sx < 0 || sy < 0 || dx < 0 || dy < 0 || w <= 0 || h <= 0)
-        return GR_ERR_BADARG;
-    if ((uint32_t)sx + (uint32_t)w > geode_cur_mode.xres ||
-        (uint32_t)sy + (uint32_t)h > geode_cur_mode.yres ||
-        (uint32_t)dx + (uint32_t)w > geode_cur_mode.xres ||
-        (uint32_t)dy + (uint32_t)h > geode_cur_mode.yres)
-        return GR_ERR_BADARG;
-
     geode_wait_blt_idle();
 
+    //Источник
     gx_base[GP_SRC_OFFSET / 4] = ((uint32_t)sy << 16) | (uint32_t)sx;
+    //Назначение
     gx_base[GP_DST_OFFSET / 4] = ((uint32_t)dy << 16) | (uint32_t)dx;
+    //Шаг (общий для источника и назначения)
     gx_base[GP_STRIDE / 4] = geode_cur_mode.pitch;
+    //Размеры
     gx_base[GP_WID_HEIGHT / 4] = ((uint32_t)w << 16) | (uint32_t)h;
+    //ROP
     gx_base[GP_RASTER_MODE / 4] = GEODE_ROP_SRCCOPY;
+
+    //Запуск: источник = framebuffer, назначение = framebuffer
     gx_base[GP_BLT_MODE / 4] = GP_BLT_MODE_SRC_FB | GP_BLT_MODE_DST_FB;
 
     return GR_OK;
@@ -258,51 +246,28 @@ static int geode_copy_area(void *priv, int sx, int sy, int w, int h, int dx, int
 
 
 
-//Аппаратная отрисовка линии
+//Аппаратная отрисовка линии (упрощённо: горизонтальные и вертикальные)
 static int geode_draw_line(void *priv, int x0, int y0, int x1, int y1, uint32_t color)
 {
     (void)priv;
     if (!gx_base) return GR_ERR_NODEV;
 
-    // Проверка границ (линия должна быть в пределах экрана)
-    if (x0 < 0 || y0 < 0 || x1 < 0 || y1 < 0 ||
-        (uint32_t)x0 >= geode_cur_mode.xres || (uint32_t)y0 >= geode_cur_mode.yres ||
-        (uint32_t)x1 >= geode_cur_mode.xres || (uint32_t)y1 >= geode_cur_mode.yres)
-        return GR_ERR_BADARG;
-
-    int dx = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
-    int dy = (y1 >= y0) ? (y1 - y0) : (y0 - y1);
-    int major = (dx >= dy) ? dx : dy;
-    int minor = (dx >= dy) ? dy : dx;
-
-    if (major == 0) { //точка
-        return geode_fill_rect(priv, x0, y0, 1, 1, color);
+    //Для горизонтальной линии достаточно заливки высотой 1
+    if (y0 == y1) {
+        int x = (x0 < x1) ? x0 : x1;
+        int w = (x0 < x1) ? (x1 - x0 + 1) : (x0 - x1 + 1);
+        return geode_fill_rect(priv, x, y0, w, 1, color);
+    }
+    //Для вертикальной — заливка шириной 1
+    if (x0 == x1) {
+        int y = (y0 < y1) ? y0 : y1;
+        int h = (y0 < y1) ? (y1 - y0 + 1) : (y0 - y1 + 1);
+        return geode_fill_rect(priv, x0, y, 1, h, color);
     }
 
-    int y_major = (dy > dx);
-    int dmaj = y_major ? (y1 >= y0) : (x1 >= x0);
-    int dmin = y_major ? (x1 >= x0) : (y1 >= y0);
-
-    int initial_error = 2 * minor - major;
-    int axial_error = 2 * minor;
-    int diag_error = 2 * (minor - major);
-
-    geode_wait_blt_idle();
-
-    gx_base[GP_SRC_COLOR_FG / 4] = color;
-    gx_base[GP_DST_OFFSET / 4] = ((uint32_t)y0 << 16) | (uint32_t)x0;
-    gx_base[GP_WID_HEIGHT / 4] = ((uint32_t)(major + 1) << 16) | (uint16_t)initial_error;
-    gx_base[GP_SRC_OFFSET / 4] = ((uint32_t)(uint16_t)axial_error << 16) | (uint16_t)diag_error;
-    gx_base[GP_RASTER_MODE / 4] = GEODE_ROP_SRCCOPY;
-
-    uint32_t vec_mode = 0;
-    // Бит 3 (DEST) = 0: не читать данные назначения
-    if (y_major) vec_mode |= (1 << 0); // YMAJ
-    if (dmaj)    vec_mode |= (1 << 1); // DMAJ
-    if (dmin)    vec_mode |= (1 << 2); // DMIN
-    gx_base[GP_VECTOR_MODE / 4] = vec_mode;
-
-    return GR_OK;
+    //Диагональные линии: программный fallback через put_pixel слоя
+    //(полноценный векторный движок требует точной настройки ошибок Брезенхэма)
+    return GR_ERR_UNSUPPORTED;
 }
 
 
