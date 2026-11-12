@@ -2025,6 +2025,36 @@ void systemcall_usb_get_dev(struct regs *r)
 }
 
 
+// ---- USB ручной hotplug ----
+//   SYS_USB_RESCAN (lsusb -update): драйвер пересматривает порты активных
+//   контроллеров (добавляет вставленное, снимает вынутое вместе с его
+//   block-регистрацией), после чего ядро переложит devices[] в реестр
+//   -> eax = число устройств после обновления или отрицательный код
+//   Вызов долгий (порт-reset, перечисление, SCSI-инициализация — секунды):
+//   драйвер сам держит schedule_lock, как долгая дисковая операция
+void systemcall_usb_rescan(struct regs *r)
+{
+    if (!usb_driver_api || !usb_driver_api->usb_update)
+    {
+        r->eax = -1;   //USB-драйвер не загружен или без usb_update
+        return;
+    }
+
+    int n = usb_driver_api->usb_update();
+    if (n < 0)
+    {
+        r->eax = n;
+        return;
+    }
+
+    //Пересобрать ядерный реестр из devices[] для SYS_USB_COUNT/GET_DEV
+    usb_registry_clear();
+    for (uint32_t i = 0; i < usb_driver_api->device_count && i < USB_REGISTRY_MAX; i++)
+        usb_registry_add(&usb_driver_api->devices[i]);
+
+    r->eax = usb_registry_count();
+}
+
 
 // ---- PCI ----
 //   SYS_PCI_COUNT: eax = число устройств (при первом вызове ядро сканирует шины)
@@ -2405,6 +2435,7 @@ void syscalls_table_init(void)
     syscalls_table[SYS_CLIPBOARD].func = &systemcall_clipboard;
     syscalls_table[SYS_USB_COUNT].func = &systemcall_usb_count;
     syscalls_table[SYS_USB_GET_DEV].func = &systemcall_usb_get_dev;
+    syscalls_table[SYS_USB_RESCAN].func = &systemcall_usb_rescan;
     syscalls_table[SYS_GET_CURSOR_POS].func = &systemcall_get_tty_cursor_pos;
     syscalls_table[SYS_TTY_LINE_EDIT].func = &systemcall_tty_line_edit;
     syscalls_table[SYS_GET_MOUNT_COUNT].func = &systemcall_get_mount_count;

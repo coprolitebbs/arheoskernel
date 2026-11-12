@@ -84,6 +84,12 @@ typedef struct block_driver_api
                            int (*write_fn)(void*, uint64_t, uint32_t, const void*),
                            void *priv);
 
+    //Снять устройство с регистрации (USB-hotplug: флешку вынули)
+    //id остаётся зарезервирован за слотом; последующие read/write/get_info
+    //по нему возвращают FS_IO_ERROR/FS_NOT_FOUND, или 0 при успехе
+    int (*unregister_device)(uint32_t dev_id);
+
+
     //Экспортные указатели ядра для внутренних нужд драйвера
     void *(*malloc_ptr)(uint32_t size);
     void  (*free_ptr)(void *ptr);
@@ -268,6 +274,15 @@ typedef struct
 
 
     int (*usb_start)(void);
+
+    //Ручной hotplug-rescan (SYS_USB_RESCAN, см. lsusb -update):
+    //пересмотреть порты уже инициализированных контроллеров,
+    //добавить появившиеся устройства, снять исчезнувшие (включая
+    //разрегистрацию block-устройств) и пересобрать devices[]
+    //Возвращает число устройств после обновления или отрицательный код
+    //Если контроллеры ещё не инициализированы — выполняет полный usb_start
+    int (*usb_update)(void);
+
 
     uint32_t debug1;
     uint32_t debug2;

@@ -337,8 +337,17 @@ int block_get_info(uint32_t id, block_info_t *out)
 
 int block_enum_devices(int index, block_info_t *out)
 {
-    if (index < 0 || index >= devices_count) return FS_NOT_FOUND;
-    return block_get_info((uint32_t)index, out);
+    if (index < 0) return FS_NOT_FOUND;
+    //Компактное перечисление: index — это порядковый номер СРЕДИ используемых
+    //слотов (дырки от unregister_device пропускаются)
+    int seen = 0;
+    for (int i = 0; i < devices_count; i++)
+    {
+        if (!devices_ptr[i].used) continue;
+        if (seen == index) return block_get_info((uint32_t)i, out);
+        seen++;
+    }
+    return FS_NOT_FOUND;
 }
 
 int block_find_by_name(const char *name, uint32_t *out_id)
@@ -420,6 +429,16 @@ int block_register_device(const char *name, uint32_t sector_count, uint32_t flag
     return idx;   //валидный id >= 0
 }
 
+//Снять устройство с регистрации (USB-hotplug). id остаётся за слотом:
+//все последующие read/write/get_info по нему возвращают ошибку,
+//enum_devices дырку пропускает. Повторная register_device создаёт НОВЫЙ id
+int block_unregister_device(uint32_t id)
+{
+    if (id >= (uint32_t)devices_count || !devices_ptr[id].used) return FS_IO_ERROR;
+    devices_ptr[id].used = false;
+    return FS_OK;
+}
+
 
 void block_init(struct boot_info *boot)
 {
@@ -462,6 +481,7 @@ void driver_main(struct boot_info *boot)
     api_ptr->scan_partitions     = block_scan_partitions;
     api_ptr->resolve_boot_drive  = block_resolve_boot_drive;
     api_ptr->register_device     = block_register_device;
+    api_ptr->unregister_device   = block_unregister_device;
 
     descr_api_ptr->struct_ptr = (void *)&api;
 

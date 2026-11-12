@@ -185,6 +185,24 @@ int usb_msc_read_capacity(usb_hc_t *hc, uint8_t dev_addr,
     return 0;
 }
 
+//REQUEST SENSE(18): снять CHECK CONDITION (unit attention) и забрать sense-данные.
+//По SPC unit attention НЕ репортится на INQUIRY и НЕ снимается им — поэтому
+//первая после подключения реальная команда (READ CAPACITY) ловит CSW status=1.
+//На hotplug-вставке это штатный путь, без request_sense MSC не инициализируется
+static int usb_msc_request_sense(usb_hc_t *hc, uint8_t dev_addr,
+                                 usb_msc_iface_t *iface){
+    uint8_t cb[6] = {
+        0x03,        //REQUEST SENSE
+        0x00, 0x00, 0x00,
+        18,          //allocation length
+        0x00
+    };
+    uint8_t buf[18];
+    memset(buf, 0, sizeof(buf));
+    int r = usb_msc_bot_transfer(hc, dev_addr, iface, cb, 6, buf, 18, 1);
+    return (r > 0) ? 0 : -1;
+}
+
 int usb_msc_init(usb_hc_t *hc, uint8_t dev_addr,
                  usb_msc_iface_t *iface,
                  uint32_t *out_sector_count, uint32_t *out_sector_size){
@@ -197,9 +215,19 @@ int usb_msc_init(usb_hc_t *hc, uint8_t dev_addr,
 
     if (usb_msc_inquiry(hc, dev_addr, iface) != 0) return -2;
 
+    //Unit attention: первая non-INQUIRY команда после подключения устройства
+    //возвращает CHECK CONDITION (CSW status=1). Снимаем REQUEST SENSE'ом
+    //и повторяем READ CAPACITY. На бутовом пути sense не нужен (первый проход),
+    //но и не вредит — попадаем сюда только при ошибке
     if (usb_msc_read_capacity(hc, dev_addr, iface,
                               out_sector_count, out_sector_size) != 0)
-        return -3;
+    {
+        usb_msc_request_sense(hc, dev_addr, iface);
+
+        if (usb_msc_read_capacity(hc, dev_addr, iface,
+                                  out_sector_count, out_sector_size) != 0)
+            return -3;
+    }
 
     return 0;
 }

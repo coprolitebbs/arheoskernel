@@ -13,6 +13,8 @@
  ; You should have received a copy of the GNU General Public License
  ; along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+;vesa_start.asm — точка входа ELF-модуля драйвера VESA (аналог fb_start.asm)
+
 BITS 32
 
 global driver_entry
@@ -35,7 +37,7 @@ driver_header:
     dd start-driver_entry
     dd 0
     dd 0
-    db "USB layer driver",0
+    db "GEODE graphic driver",0
 
 driver_header_end:
 

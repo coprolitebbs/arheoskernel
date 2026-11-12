@@ -36,6 +36,14 @@ int u_usb_get_dev(int idx, u_usb_dev_t *out)
     return ret;
 }
 
+int u_usb_rescan(void)
+{
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_USB_RESCAN) : "memory");
+    return ret;
+}
+
+
 const char* u_usb_class_name(uint8_t c)
 {
     switch (c)

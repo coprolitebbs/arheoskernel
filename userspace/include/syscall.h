@@ -91,6 +91,11 @@
 #define SYS_PCI_GET_DEV           68   //ebx = idx, ecx = pci_dev_record_t*
 #define SYS_PCI_READ_CFG          69   //ebx = PCI_BDF(bus,dev,func), ecx = offset; -> eax = dword или -1
 
+//Ручной USB-hotplug: пересмотреть порты активных USB-контроллеров
+//(вставлено/вынуто), перестроить реестр устройств и блок-слой.
+//eax = число устройств после обновления или отрицательный код ошибки
+#define SYS_USB_RESCAN            70
+
 //op-коды для SYS_GRAPH_INFO (ebx = op)
 #define GRAPH_INFO_DRIVER   0   //ecx = u_gr_driver_info_t*
 #define GRAPH_INFO_MODE     1   //ecx = индекс режима, edx = u_gr_mode_info_t*

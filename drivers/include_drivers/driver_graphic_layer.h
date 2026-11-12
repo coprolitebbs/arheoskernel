@@ -181,6 +181,11 @@ typedef struct gr_ops
     int (*blit)(void *priv, int x, int y, int w, int h, const void *src);
     int (*copy_area)(void *priv, int sx, int sy, int w, int h, int dx, int dy);
 
+    //аппаратное рисование линии
+    int (*draw_line)(void *priv, int x0, int y0, int x1, int y1, uint32_t color);
+    //ожидание завершения аппаратных операций
+    int (*wait_engine_idle)(void *priv);
+
     //управление выводом
     int (*pan_display)(void *priv, uint32_t yoffset);
     int (*blank)(void *priv, int blank);   //1 = погасить, 0 = включить
@@ -225,6 +230,12 @@ typedef struct gr_driver
     //стадии смены режима рисуются в видимый LFB — отладка на машинах
     //без COM-терминала
     int (*vbe_rm_screen_trace_ptr)(uint32_t lfb, uint32_t pitch, uint8_t bpp);
+
+    //указатели на функции работы с PCI
+    uint32_t (*pci_cfg_read_dword_ptr)(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset);
+    void     (*pci_cfg_write_dword_ptr)(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset, uint32_t value);
+    uint16_t (*pci_cfg_read_word_ptr)(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset);
+    uint8_t  (*pci_cfg_read_byte_ptr)(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset);
 
     void *native_driver_api;  //Адрес на структуру нативных функций драйвера (например, дополнительных) - это для совместимости с дефолтным драйвером фреймбуффера
 } gr_driver_t;

@@ -1,0 +1,921 @@
+diff --git a/drivers/block_driver/block_driver.c b/drivers/block_driver/block_driver.c
+index d252949..4508471 100644
+--- a/drivers/block_driver/block_driver.c
++++ b/drivers/block_driver/block_driver.c
+@@ -337,8 +337,17 @@ int block_get_info(uint32_t id, block_info_t *out)
+ 
+ int block_enum_devices(int index, block_info_t *out)
+ {
+-    if (index < 0 || index >= devices_count) return FS_NOT_FOUND;
+-    return block_get_info((uint32_t)index, out);
++    if (index < 0) return FS_NOT_FOUND;
++    //Компактное перечисление: index — это порядковый номер СРЕДИ используемых
++    //слотов (дырки от unregister_device пропускаются)
++    int seen = 0;
++    for (int i = 0; i < devices_count; i++)
++    {
++        if (!devices_ptr[i].used) continue;
++        if (seen == index) return block_get_info((uint32_t)i, out);
++        seen++;
++    }
++    return FS_NOT_FOUND;
+ }
+ 
+ int block_find_by_name(const char *name, uint32_t *out_id)
+@@ -420,6 +429,16 @@ int block_register_device(const char *name, uint32_t sector_count, uint32_t flag
+     return idx;   //валидный id >= 0
+ }
+ 
++//Снять устройство с регистрации (USB-hotplug). id остаётся за слотом:
++//все последующие read/write/get_info по нему возвращают ошибку,
++//enum_devices дырку пропускает. Повторная register_device создаёт НОВЫЙ id
++int block_unregister_device(uint32_t id)
++{
++    if (id >= (uint32_t)devices_count || !devices_ptr[id].used) return FS_IO_ERROR;
++    devices_ptr[id].used = false;
++    return FS_OK;
++}
++
+ 
+ void block_init(struct boot_info *boot)
+ {
+@@ -462,6 +481,7 @@ void driver_main(struct boot_info *boot)
+     api_ptr->scan_partitions     = block_scan_partitions;
+     api_ptr->resolve_boot_drive  = block_resolve_boot_drive;
+     api_ptr->register_device     = block_register_device;
++    api_ptr->unregister_device   = block_unregister_device;
+ 
+     descr_api_ptr->struct_ptr = (void *)&api;
+ 
+diff --git a/drivers/include_drivers/drv_format.h b/drivers/include_drivers/drv_format.h
+index da9f6c9..b1f1283 100644
+--- a/drivers/include_drivers/drv_format.h
++++ b/drivers/include_drivers/drv_format.h
+@@ -84,6 +84,11 @@ typedef struct block_driver_api
+                            int (*write_fn)(void*, uint64_t, uint32_t, const void*),
+                            void *priv);
+ 
++    //Снять устройство с регистрации (USB-hotplug: флешку вынули).
++    //id остаётся зарезервирован за слотом; последующие read/write/get_info
++    //по нему возвращают FS_IO_ERROR/FS_NOT_FOUND. 0 при успехе
++    int (*unregister_device)(uint32_t dev_id);
++
+     //Экспортные указатели ядра для внутренних нужд драйвера
+     void *(*malloc_ptr)(uint32_t size);
+     void  (*free_ptr)(void *ptr);
+@@ -269,6 +274,14 @@ typedef struct
+ 
+     int (*usb_start)(void);
+ 
++    //Ручной hotplug-rescan (SYS_USB_RESCAN, см. lsusb -update):
++    //пересмотреть порты уже инициализированных контроллеров,
++    //добавить появившиеся устройства, снять исчезнувшие (включая
++    //разрегистрацию block-устройств) и пересобрать devices[].
++    //Возвращает число устройств после обновления или отрицательный код.
++    //Если контроллеры ещё не инициализированы — выполняет полный usb_start
++    int (*usb_update)(void);
++
+     uint32_t debug1;
+     uint32_t debug2;
+     uint32_t debug3;
+diff --git a/drivers/usb_driver/usb_driver.c b/drivers/usb_driver/usb_driver.c
+index 488a6fe..bdd97f4 100644
+--- a/drivers/usb_driver/usb_driver.c
++++ b/drivers/usb_driver/usb_driver.c
+@@ -41,6 +41,156 @@ description_driver_api_t descr_api;
+ uhci_hc_t uhci0;
+ static usb_msc_dev_t g_msc[USB_MAX_MSC_DEVS];
+ 
++//---------------- Ручной hotplug: состояние ----------------
++
++//Пул USB-адресов (1..127). Адреса глобально уникальны на всю систему:
++//uhci_dev_is_ls[]/ehci_dev_speed[] индексируются адресом без разделения
++//по контроллерам, поэтому один и тот же адрес не должен выдаваться
++//двум устройствам даже на разных HC. Стартовое поведение старого кода
++//(addr = 1 + device_count) ломалось после удаления устройства из середины.
++static uint8_t usb_addr_used[128];
++
++static uint8_t usb_alloc_addr(void)
++{
++    for (uint8_t a = 1; a < 128; a++)
++    {
++        if (!usb_addr_used[a]) { usb_addr_used[a] = 1; return a; }
++    }
++    return 0;   //свободных адресов нет
++}
++
++static void usb_free_addr(uint8_t a)
++{
++    if (a && a < 128) usb_addr_used[a] = 0;
++}
++
++//Какие контроллеры успели проинициализироваться при старте.
++//update трогает только их: re-init HC сбросил бы уже выданные адреса
++static uint8_t g_uhci_inited[UHCI_MAX_CONTROLLERS];
++static uint8_t g_ehci_inited[4];
++static int     g_usb_started = 0;   //0 = контроллеры ещё не инициализировались
++
++//Живое устройство: привязка записи реестра к физическому пути
++//(контроллер/корневой порт/хаб) и ресурсам (USB-адрес, MSC-слот, block id).
++//Именно по этой таблице update понимает, что исчезло, а что появилось
++typedef struct
++{
++    uint8_t          used;
++    usb_hc_type_t    type;       //USB_HC_UHCI / USB_HC_EHCI
++    uint8_t          hc_idx;     //индекс в uhci_hcs[] / ehci_hcs[]
++    uint8_t          root_port;  //корневой порт контроллера
++    uint8_t          hub_addr;   //0 = устройство прямо на корневом порту
++    uint8_t          hub_port;   //порт хаба (при hub_addr != 0)
++    uint8_t          dev_addr;   //выданный USB-адрес
++    int              msc_slot;   //индекс в g_msc[] или -1
++    usb_dev_record_t rec;        //запись реестра (в т.ч. block_id)
++} usb_live_t;
++
++static usb_live_t g_live[USB_REGISTRY_MAX];
++
++//Индекс контроллера по обёртке usb_hc_t (указатели указывают в массивы)
++static int usb_hc_index(const usb_hc_t *w)
++{
++    if (!w) return -1;
++    if (w->type == USB_HC_UHCI) return (int)((uhci_hc_t *)w->hc - uhci_hcs);
++    if (w->type == USB_HC_EHCI) return (int)((ehci_hc_t *)w->hc - ehci_hcs);
++    return -1;
++}
++
++//Найти живое устройство по физическому пути
++static usb_live_t *usb_live_find(usb_hc_type_t type, int hc_idx,
++                                 uint8_t root_port, uint8_t hub_addr, uint8_t hub_port)
++{
++    for (int i = 0; i < USB_REGISTRY_MAX; i++)
++    {
++        usb_live_t *lv = &g_live[i];
++        if (!lv->used) continue;
++        if (lv->type != type || (int)lv->hc_idx != hc_idx) continue;
++        if (lv->root_port != root_port) continue;
++        if (lv->hub_addr != hub_addr) continue;
++        if (hub_addr != 0 && lv->hub_port != hub_port) continue;
++        return lv;
++    }
++    return NULL;
++}
++
++static void usb_live_add(usb_port_path_t *path, uint8_t dev_addr,
++                         const usb_dev_record_t *rec, int msc_slot)
++{
++    int idx = usb_hc_index(&path->hc);
++    if (idx < 0) return;
++
++    for (int i = 0; i < USB_REGISTRY_MAX; i++)
++    {
++        if (g_live[i].used) continue;
++        memset(&g_live[i], 0, sizeof(g_live[i]));
++        g_live[i].used      = 1;
++        g_live[i].type      = path->hc.type;
++        g_live[i].hc_idx    = (uint8_t)idx;
++        g_live[i].root_port = path->root_port;
++        g_live[i].hub_addr  = path->hub_addr;
++        g_live[i].hub_port  = path->hub_port;
++        g_live[i].dev_addr  = dev_addr;
++        g_live[i].msc_slot  = msc_slot;
++        g_live[i].rec       = *rec;
++        return;
++    }
++}
++
++//Снять одно устройство: разрегистрировать block-девайс, освободить MSC-слот
++//и USB-адрес. Сама запись реестра пересобирается позже из g_live
++static void usb_live_remove_one(usb_live_t *lv)
++{
++    if (lv->rec.block_id != 0xFFFFFFFFu &&
++        api_ptr->block && api_ptr->block->unregister_device)
++    {
++        api_ptr->block->unregister_device(lv->rec.block_id);
++    }
++
++    if (lv->msc_slot >= 0 && lv->msc_slot < USB_MAX_MSC_DEVS)
++    {
++        //слот не обнуляем целиком: указатель priv в block-слое мог бы ещё
++        //где-то болтаться — просто делаем обёртки чтения/записи мёртвыми
++        g_msc[lv->msc_slot].in_use       = 0;
++        g_msc[lv->msc_slot].sector_count = 0;
++        g_msc[lv->msc_slot].sector_size  = 0;
++    }
++
++    usb_free_addr(lv->dev_addr);
++    lv->used = 0;
++}
++
++//Снять устройство; если это хаб — сначала все устройства за ним
++//(они становятся недостижимы)
++static void usb_live_remove_recursive(usb_live_t *lv)
++{
++    if (lv->rec.dev_class == 0x09)
++    {
++        for (int i = 0; i < USB_REGISTRY_MAX; i++)
++        {
++            if (!g_live[i].used) continue;
++            if (g_live[i].hub_addr != lv->dev_addr) continue;
++            if (g_live[i].type != lv->type || g_live[i].hc_idx != lv->hc_idx) continue;
++            usb_live_remove_recursive(&g_live[i]);
++        }
++    }
++    usb_live_remove_one(lv);
++}
++
++//Пересобрать devices[]/device_count из таблицы живых устройств —
++//именно это ядро потом перекладывает в usb_registry
++static void usb_rebuild_registry(void)
++{
++    api_ptr->device_count = 0;
++    memset(api_ptr->devices, 0, sizeof(api_ptr->devices));
++    for (int i = 0; i < USB_REGISTRY_MAX; i++)
++    {
++        if (!g_live[i].used) continue;
++        if (api_ptr->device_count >= USB_REGISTRY_MAX) break;
++        api_ptr->devices[api_ptr->device_count++] = g_live[i].rec;
++    }
++}
++
+ 
+ 
+ static usb_msc_dev_t *usb_alloc_msc_slot(void)
+@@ -81,25 +231,23 @@ static int usb_msc_write_wrap(void *priv, uint64_t lba, uint32_t count, const vo
+     return (r == 0) ? FS_OK : FS_IO_ERROR;
+ }
+ 
+-//Счётчик имён для block-layer: usb0, usb1, ... — уникальные на всю систему
+-static int g_msc_name_counter = 0;
+-
+-//Записать устройство в реестр + инициализировать как MSC (если это mass
+-//storage) и зарегистрировать в блок-слое. Вызывается и для корневых портов,
+-//и для устройств за хабом.
+-static void usb_setup_device(usb_hc_t *hcw, int port_for_record,
+-                             usb_device_desc_t *desc, uint8_t dev_addr)
++//Заполнить запись устройства + инициализировать MSC (если это mass storage)
++//и зарегистрировать в блок-слое. НЕ добавляет запись в devices[] — реестр
++//пересобирается из g_live (см. usb_rebuild_registry). Вызывается и при старте,
++//и при hotplug-rescan.
++//rec->port заполняет вызывающий (номер корневого порта)
++static void usb_setup_device_rec(usb_hc_t *hcw, usb_device_desc_t *desc,
++                                 uint8_t dev_addr, usb_dev_record_t *rec_out,
++                                 int *msc_slot_out)
+ {
+-    if (api_ptr->device_count < USB_REGISTRY_MAX){
+-        usb_dev_record_t *rec = &api_ptr->devices[api_ptr->device_count++];
+-        memset(rec, 0, sizeof(*rec));
+-        rec->vid = desc->idVendor; rec->pid = desc->idProduct;
+-        rec->dev_class = desc->bDeviceClass;
+-        rec->dev_subclass = desc->bDeviceSubClass;
+-        rec->dev_protocol = desc->bDeviceProtocol;
+-        rec->port = (uint8_t)port_for_record;
+-        rec->block_id = 0xFFFFFFFFu;
+-    }
++    memset(rec_out, 0, sizeof(*rec_out));
++    rec_out->vid          = desc->idVendor;
++    rec_out->pid          = desc->idProduct;
++    rec_out->dev_class    = desc->bDeviceClass;
++    rec_out->dev_subclass = desc->bDeviceSubClass;
++    rec_out->dev_protocol = desc->bDeviceProtocol;
++    rec_out->block_id     = 0xFFFFFFFFu;
++    if (msc_slot_out) *msc_slot_out = -1;
+ 
+     uint16_t ep0 = desc->bMaxPacketSize0 ? desc->bMaxPacketSize0 : 8;
+     uint8_t cfg_buf[256]; memset(cfg_buf, 0, sizeof(cfg_buf));
+@@ -109,7 +257,7 @@ static void usb_setup_device(usb_hc_t *hcw, int port_for_record,
+     usb_config_desc_t *cfg = (usb_config_desc_t*)cfg_buf;
+     usb_msc_iface_t local_msc;
+     if (usb_parse_mass_storage(cfg_buf, cfg->wTotalLength, &local_msc) != 0)
+-        return;
++        return;   //не MSC — обычная запись в реестре
+ 
+     usb_set_configuration(hcw, dev_addr, cfg->bConfigurationValue);
+ 
+@@ -125,42 +273,52 @@ static void usb_setup_device(usb_hc_t *hcw, int port_for_record,
+     slot->hc_wrap.hc   = hcw->hc;
+     slot->hc           = &slot->hc_wrap;
+ 
++    //unit attention после вставки снимается внутри usb_msc_init (REQUEST SENSE)
+     if (usb_msc_init(&slot->hc_wrap, dev_addr, &slot->iface,
+                      &slot->sector_count, &slot->sector_size) == 0
+         && api_ptr->block && api_ptr->block->register_device){
++        //Имя привязано к MSC-слоту: слоты освобождаются при отключении,
++        //поэтому повторная вставка флешки переиспользует то же имя,
++        //а collisions с ещё живыми устройствами не бывает
+         char name[8] = "usb0";
+-        name[3] = (char)('0' + (g_msc_name_counter % 10));
++        int sidx = (int)(slot - g_msc);
++        name[3] = (char)('0' + (sidx % 10));
+         int bid = api_ptr->block->register_device(
+             name, slot->sector_count, BLK_REMOVABLE,
+             usb_msc_read_wrap, usb_msc_write_wrap, (void*)slot);
+         //api_ptr->load_screen_add_string("USB msc addr=%d reg %s -> %d",dev_addr, name, bid);
+         if (bid >= 0){
+             slot->block_id = (uint32_t)bid;
+-            if (api_ptr->device_count > 0)
+-                api_ptr->devices[api_ptr->device_count-1].block_id = (uint32_t)bid;
++            rec_out->block_id = (uint32_t)bid;
+         }
+-        g_msc_name_counter++;
++        if (msc_slot_out) *msc_slot_out = sidx;
+     }
+ }
+ 
+ //Перечислить устройство на заданном пути (корневой порт или порт за хабом),
+ //оформить его; если это хаб (class 09) — рекурсивно обойти его нижние порты.
+ //Глубина ограничена: depth >= 5 — хабы больше не разворачиваем.
++//Используется и при старте, и при hotplug-rescan (в таблице g_live и в
++//devices[] устройство появляется только после успешного перечисления)
+ static void usb_enum_device_at(usb_port_path_t *path, const char *tag, int depth)
+ {
++    uint8_t want_addr = usb_alloc_addr();
++    if (!want_addr) return;   //адреса кончились
++
+     usb_device_desc_t desc; uint8_t dev_addr = 0;
+     memset(&desc, 0, sizeof(desc));
+-    int r = usb_enumerate(path, 1 + api_ptr->device_count, &desc, &dev_addr);
+-
+-    /*api_ptr->load_screen_add_string(
+-        "%s rp%d hub%d.%d enum r=%d vid=%x pid=%x cls=%x mps=%d",
+-        tag, path->root_port, path->hub_addr, path->hub_port,
+-        r, desc.idVendor, desc.idProduct, desc.bDeviceClass,
+-        desc.bMaxPacketSize0);*/
++    if (usb_enumerate(path, want_addr, &desc, &dev_addr) != 0)
++    {
++        usb_free_addr(want_addr);
++        return;
++    }
+ 
+-    if (r != 0) return;
++    usb_dev_record_t rec;
++    int mslot = -1;
++    usb_setup_device_rec(&path->hc, &desc, dev_addr, &rec, &mslot);
++    rec.port = path->root_port;
+ 
+-    usb_setup_device(&path->hc, path->root_port, &desc, dev_addr);
++    usb_live_add(path, dev_addr, &rec, mslot);
+ 
+     if (desc.bDeviceClass == 0x09 && depth < 5){
+         //Хаб: он уже в реестре; разворачиваем его нижние порты.
+@@ -184,13 +342,135 @@ static void usb_enum_device_at(usb_port_path_t *path, const char *tag, int depth
+     }
+ }
+ 
++//Пересмотреть один корневой порт: добавить новое / снять исчезнувшее.
++//Общая логика для EHCI и UHCI
++static void usb_update_root_port(usb_hc_t *hcw, int hc_idx,
++                                 int port, int *added, int *removed)
++{
++    int conn = usb_hc_port_connected(hcw, port);
++    usb_live_t *lv = usb_live_find(hcw->type, hc_idx,
++                                   (uint8_t)port, 0, 0);
++
++    if (!conn && lv)
++    {
++        usb_live_remove_recursive(lv);
++        (*removed)++;
++    }
++    else if (conn && !lv)
++    {
++        usb_port_path_t rp;
++        rp.hc        = *hcw;
++        rp.root_port = (uint8_t)port;
++        rp.hub_addr  = 0;
++        rp.hub_port  = 0;
++        usb_enum_device_at(&rp, "hotplug", 0);
++        (*added)++;
++    }
++}
++
++//Ручной hotplug-rescan (SYS_USB_RESCAN -> lsusb -update).
++//Только уже инициализированные контроллеры: их порты пересматриваются по CCS,
++//новые устройства перечисляются (порт сбрасывается, устройство получает адрес),
++//исчезнувшие — снимаются вместе с block-регистрацией и MSC-слотом.
++//Структуры расписания/HC НЕ переинициализируются: re-init сбросил бы адреса
++//уже подключённых устройств.
++//Возвращает число устройств после обновления или отрицательный код
++int device_usb_start(void);   //полная инициализация (определена ниже)
++
++int device_usb_update(void)
++{
++    if (!api_ptr) return -1;
++
++    //Контроллеры ещё не инициализировались (старт не удался или драйвер
++    //перезагружен) — полный старт
++    if (!g_usb_started) return device_usb_start();
++
++    int added = 0, removed = 0;
++
++    //Блокируем вытеснение на время перечисления (как долгая операция с диском):
++    //конкурентный MSC-read из другой задачи крутил бы те же QH/TD-кольца
++    uint8_t we = 0;
++    volatile uint8_t *lock = api_ptr->schedule_lock_ptr;
++    if (lock && *lock == 0) { *lock = 1; we = 1; }
++
++    //--- EHCI: корневые порты (порядок как при старте: сначала EHCI) ---
++    for (int eci = 0; eci < ehci_hc_count && eci < 4; eci++)
++    {
++        if (!g_ehci_inited[eci]) continue;
++        ehci_hc_t *ehc = &ehci_hcs[eci];
++        usb_hc_t hcw = { USB_HC_EHCI, ehc };
++        for (int port = 1; port <= (int)ehc->n_ports; port++)
++            usb_update_root_port(&hcw, eci, port, &added, &removed);
++    }
++
++    //--- UHCI: корневые порты ---
++    for (int hci = 0; hci < uhci_hc_count && hci < UHCI_MAX_CONTROLLERS; hci++)
++    {
++        if (!g_uhci_inited[hci]) continue;
++        uhci_hc_t *uhc = &uhci_hcs[hci];
++        usb_hc_t hcw = { USB_HC_UHCI, uhc };
++        for (int port = 0; port < uhci_hc_ports(uhc); port++)
++            usb_update_root_port(&hcw, hci, port, &added, &removed);
++    }
++
++    //--- Хабы: пересмотреть нижние порты живых хабов ---
++    for (int i = 0; i < USB_REGISTRY_MAX; i++)
++    {
++        usb_live_t *hub = &g_live[i];
++        if (!hub->used || hub->rec.dev_class != 0x09) continue;
++
++        usb_hc_t hcw;
++        hcw.type = hub->type;
++        hcw.hc   = (hub->type == USB_HC_UHCI) ? (void *)&uhci_hcs[hub->hc_idx]
++                                              : (void *)&ehci_hcs[hub->hc_idx];
++
++        uint8_t nports = 0;
++        if (usb_hub_probe(&hcw, hub->dev_addr, &nports) != 0) continue;
++
++        for (uint8_t hp = 1; hp <= nports; hp++)
++        {
++            int conn = usb_hub_port_connected(&hcw, hub->dev_addr, hp);
++            usb_live_t *lv = usb_live_find(hub->type, hub->hc_idx,
++                                           hub->root_port, hub->dev_addr, hp);
++            if (!conn && lv)
++            {
++                usb_live_remove_recursive(lv);
++                removed++;
++            }
++            else if (conn && !lv)
++            {
++                usb_port_path_t cp;
++                cp.hc        = hcw;
++                cp.root_port = hub->root_port;
++                cp.hub_addr  = hub->dev_addr;
++                cp.hub_port  = hp;
++                usb_enum_device_at(&cp, "hotplug", 1);
++                added++;
++            }
++        }
++    }
++
++    usb_rebuild_registry();
++
++    if (we) *lock = 0;
++
++    //Сводка последнего rescan: (added << 8) | removed — для отладки
++    api_ptr->last_error = (uint32_t)((added << 8) | removed);
++    return (int)api_ptr->device_count;
++}
++
+ int device_usb_start(void)
+ {
+     api_ptr->device_count = 0;
+     api_ptr->last_error   = 0;
+     memset(api_ptr->devices, 0, sizeof(api_ptr->devices));
++
++    //Полный сброс состояния hotplug-подсистемы
++    memset(g_live, 0, sizeof(g_live));
++    memset(usb_addr_used, 0, sizeof(usb_addr_used));
++    memset(g_uhci_inited, 0, sizeof(g_uhci_inited));
++    memset(g_ehci_inited, 0, sizeof(g_ehci_inited));
+     for (int i = 0; i < USB_MAX_MSC_DEVS; i++) g_msc[i].in_use = 0;
+-    g_msc_name_counter = 0;
+ 
+     if (uhci_alloc_structures() != 0){ api_ptr->last_error = 0xBAD6; return -1; }
+     if (ehci_alloc_structures() != 0){ api_ptr->last_error = 0xBAD7; return -1; }
+@@ -213,6 +493,7 @@ int device_usb_start(void)
+                                         eci, ir, ehc->mmio_base,
+                                         ehc->op_base, (int)ehc->n_ports);*/
+         if (ir != 0) continue;
++        g_ehci_inited[eci] = 1;
+ 
+         usb_hc_t hc_wrap = { USB_HC_EHCI, ehc };
+         for (int port = 1; port <= (int)ehc->n_ports; port++){
+@@ -234,6 +515,7 @@ int device_usb_start(void)
+     for (int hci = 0; hci < uhci_count; hci++){
+         uhci_hc_t *uhc = &uhci_hcs[hci];
+         if (uhci_init(uhc) != 0) continue;
++        g_uhci_inited[hci] = 1;
+ 
+         usb_hc_t hc_wrap = { USB_HC_UHCI, uhc };
+         for (int port = 0; port < 2; port++){
+@@ -247,6 +529,15 @@ int device_usb_start(void)
+         }
+     }
+ 
++    //Реестр драйвера теперь всегда собирается из таблицы живых устройств —
++    //и после старта, и после каждого rescan
++    usb_rebuild_registry();
++
++    //Статус старта для device_usb_update: разрешён rescan только если
++    //хоть один контроллер реально проинициализировался
++    for (int i = 0; i < 4; i++) if (g_ehci_inited[i]) g_usb_started = 1;
++    for (int i = 0; i < UHCI_MAX_CONTROLLERS; i++) if (g_uhci_inited[i]) g_usb_started = 1;
++
+     if (api_ptr->device_count == 0){ api_ptr->last_error = 0xBAD3; return -1; }
+     return 0;
+ }
+@@ -271,7 +562,8 @@ void driver_main(struct boot_info *boot)
+     (void)boot;
+ 
+     api_ptr = &api;
+-    api_ptr->usb_start = device_usb_start;
++    api_ptr->usb_start  = device_usb_start;
++    api_ptr->usb_update = device_usb_update;
+ 
+     descr_api.struct_ptr = (void *)&api;
+     descr_api.type       = DESCR_USB_DRIVER;
+diff --git a/drivers/usb_driver/usb_msc.c b/drivers/usb_driver/usb_msc.c
+index fe0f82b..9bdf642 100644
+--- a/drivers/usb_driver/usb_msc.c
++++ b/drivers/usb_driver/usb_msc.c
+@@ -185,6 +185,24 @@ int usb_msc_read_capacity(usb_hc_t *hc, uint8_t dev_addr,
+     return 0;
+ }
+ 
++//REQUEST SENSE(18): снять CHECK CONDITION (unit attention) и забрать sense-данные.
++//По SPC unit attention НЕ репортится на INQUIRY и НЕ снимается им — поэтому
++//первая после подключения реальная команда (READ CAPACITY) ловит CSW status=1.
++//На hotplug-вставке это штатный путь, без request_sense MSC не инициализируется
++static int usb_msc_request_sense(usb_hc_t *hc, uint8_t dev_addr,
++                                 usb_msc_iface_t *iface){
++    uint8_t cb[6] = {
++        0x03,        //REQUEST SENSE
++        0x00, 0x00, 0x00,
++        18,          //allocation length
++        0x00
++    };
++    uint8_t buf[18];
++    memset(buf, 0, sizeof(buf));
++    int r = usb_msc_bot_transfer(hc, dev_addr, iface, cb, 6, buf, 18, 1);
++    return (r > 0) ? 0 : -1;
++}
++
+ int usb_msc_init(usb_hc_t *hc, uint8_t dev_addr,
+                  usb_msc_iface_t *iface,
+                  uint32_t *out_sector_count, uint32_t *out_sector_size){
+@@ -197,9 +215,19 @@ int usb_msc_init(usb_hc_t *hc, uint8_t dev_addr,
+ 
+     if (usb_msc_inquiry(hc, dev_addr, iface) != 0) return -2;
+ 
++    //Unit attention: первая non-INQUIRY команда после подключения устройства
++    //возвращает CHECK CONDITION (CSW status=1). Снимаем REQUEST SENSE'ом
++    //и повторяем READ CAPACITY. На бутовом пути sense не нужен (первый проход),
++    //но и не вредит — попадаем сюда только при ошибке
+     if (usb_msc_read_capacity(hc, dev_addr, iface,
+                               out_sector_count, out_sector_size) != 0)
+-        return -3;
++    {
++        usb_msc_request_sense(hc, dev_addr, iface);
++
++        if (usb_msc_read_capacity(hc, dev_addr, iface,
++                                  out_sector_count, out_sector_size) != 0)
++            return -3;
++    }
+ 
+     return 0;
+ }
+diff --git a/include-kernel/use_drivers.h b/include-kernel/use_drivers.h
+index 20c6170..8582e35 100644
+--- a/include-kernel/use_drivers.h
++++ b/include-kernel/use_drivers.h
+@@ -48,6 +48,10 @@ extern kbd_driver_api_t *kbd_driver_api;
+ 
+ extern block_driver_api_t *blockdevice_driver;
+ 
++//API USB-стека (заполняется drivers_init из модуля DESCR_USB_DRIVER).
++//Нужен systemcall_usb_rescan (SYS_USB_RESCAN) для ручного hotplug
++extern usb_stack_driver_api_t *usb_driver_api;
++
+ //Универсальный DMA-аллокатор (uncached, физически непрерывный).
+ //Используется USB-стеком; через sound_layer внедряется звуковым драйверам
+ //под DMA-кольца (AC'97 BDL, SB16).
+diff --git a/syscalls.c b/syscalls.c
+index ff5bc72..1210146 100644
+--- a/syscalls.c
++++ b/syscalls.c
+@@ -2025,6 +2025,37 @@ void systemcall_usb_get_dev(struct regs *r)
+ }
+ 
+ 
++// ---- USB ручной hotplug ----
++//   SYS_USB_RESCAN (lsusb -update): драйвер пересматривает порты активных
++//   контроллеров (добавляет вставленное, снимает вынутое вместе с его
++//   block-регистрацией), после чего ядро переложит devices[] в реестр.
++//   -> eax = число устройств после обновления или отрицательный код.
++//   Вызов долгий (порт-reset, перечисление, SCSI-инициализация — секунды):
++//   драйвер сам держит schedule_lock, как долгая дисковая операция
++void systemcall_usb_rescan(struct regs *r)
++{
++    if (!usb_driver_api || !usb_driver_api->usb_update)
++    {
++        r->eax = -1;   //USB-драйвер не загружен или без usb_update
++        return;
++    }
++
++    int n = usb_driver_api->usb_update();
++    if (n < 0)
++    {
++        r->eax = n;
++        return;
++    }
++
++    //Пересобрать ядерный реестр из devices[] для SYS_USB_COUNT/GET_DEV
++    usb_registry_clear();
++    for (uint32_t i = 0; i < usb_driver_api->device_count && i < USB_REGISTRY_MAX; i++)
++        usb_registry_add(&usb_driver_api->devices[i]);
++
++    r->eax = usb_registry_count();
++}
++
++
+ 
+ // ---- PCI ----
+ //   SYS_PCI_COUNT: eax = число устройств (при первом вызове ядро сканирует шины)
+@@ -2405,6 +2436,7 @@ void syscalls_table_init(void)
+     syscalls_table[SYS_CLIPBOARD].func = &systemcall_clipboard;
+     syscalls_table[SYS_USB_COUNT].func = &systemcall_usb_count;
+     syscalls_table[SYS_USB_GET_DEV].func = &systemcall_usb_get_dev;
++    syscalls_table[SYS_USB_RESCAN].func = &systemcall_usb_rescan;
+     syscalls_table[SYS_GET_CURSOR_POS].func = &systemcall_get_tty_cursor_pos;
+     syscalls_table[SYS_TTY_LINE_EDIT].func = &systemcall_tty_line_edit;
+     syscalls_table[SYS_GET_MOUNT_COUNT].func = &systemcall_get_mount_count;
+diff --git a/userspace/include/syscall.h b/userspace/include/syscall.h
+index 0017ffe..ab51441 100644
+--- a/userspace/include/syscall.h
++++ b/userspace/include/syscall.h
+@@ -91,6 +91,12 @@
+ #define SYS_PCI_GET_DEV           68   //ebx = idx, ecx = pci_dev_record_t*
+ #define SYS_PCI_READ_CFG          69   //ebx = PCI_BDF(bus,dev,func), ecx = offset; -> eax = dword или -1
+ 
++//Ручной USB-hotplug: пересмотреть порты активных USB-контроллеров
++//(вставлено/вынуто), перестроить реестр устройств и блок-слой.
++//Вызывается lsusb -update; -> eax = число устройств после обновления
++//или отрицательный код ошибки
++#define SYS_USB_RESCAN            70
++
+ //op-коды для SYS_GRAPH_INFO (ebx = op)
+ #define GRAPH_INFO_DRIVER   0   //ecx = u_gr_driver_info_t*
+ #define GRAPH_INFO_MODE     1   //ecx = индекс режима, edx = u_gr_mode_info_t*
+diff --git a/userspace/include/udevices.h b/userspace/include/udevices.h
+index 9397d30..036d8cb 100644
+--- a/userspace/include/udevices.h
++++ b/userspace/include/udevices.h
+@@ -28,6 +28,12 @@ int u_usb_count(void);
+ //Возвращает 0 при успехе, -1 при неверном idx
+ int u_usb_get_dev(int idx, u_usb_dev_t *out);
+ 
++//Ручной hotplug (SYS_USB_RESCAN): ядро пересматривает порты USB-контроллеров
++//(добавляет вставленное, снимает вынутое) и пересобирает реестр.
++//Вызов долгий (до нескольких секунд).
++//Возвращает число устройств после обновления или отрицательный код ошибки
++int u_usb_rescan(void);
++
+ //Утилита: возвращает строковое имя класса устройства (без malloc)
+ const char* u_usb_class_name(uint8_t dev_class);
+ 
+diff --git a/userspace/lib/udevices.c b/userspace/lib/udevices.c
+index 5027017..27f0636 100644
+--- a/userspace/lib/udevices.c
++++ b/userspace/lib/udevices.c
+@@ -36,6 +36,14 @@ int u_usb_get_dev(int idx, u_usb_dev_t *out)
+     return ret;
+ }
+ 
++int u_usb_rescan(void)
++{
++    int ret;
++    __asm__ __volatile__("int $0x80" : "=a"(ret)
++                         : "a"(SYS_USB_RESCAN) : "memory");
++    return ret;
++}
++
+ const char* u_usb_class_name(uint8_t c)
+ {
+     switch (c)
+diff --git a/userspace/system procs/lsusb/lsusb.c b/userspace/system procs/lsusb/lsusb.c
+index beafdaf..45b9e36 100644
+--- a/userspace/system procs/lsusb/lsusb.c	
++++ b/userspace/system procs/lsusb/lsusb.c	
+@@ -18,6 +18,14 @@
+ #include "../../include/ustd.h"
+ #include "../../include/udevices.h"
+ 
++//Локальное сравнение строк: lsusb.elf линкуется без u_lib_elf.o,
++//где живёт strcmp
++static int streq(const char *a, const char *b)
++{
++    while (*a && *a == *b) { a++; b++; }
++    return (*a == *b);
++}
++
+ //Формат вывода — плотный, без огромных отступов, чтобы читалось и на 80-колоночном VGA, и в pipe
+ static void print_hex4(uint32_t v)
+ {
+@@ -31,23 +39,59 @@ static void print_hex4(uint32_t v)
+     printf("%s", b);
+ }
+ 
+-int main(int argc, char *argv[])
++//printf в ARHeOS не поддерживает ширину/zero-pad (%03d печатает "3d"),
++//поэтому все числовые поля печатаем вручную
++static void print_hex2(uint32_t v)
++{
++    const char *hx = "0123456789abcdef";
++    char b[3];
++    b[0] = hx[(v >> 4) & 0xF];
++    b[1] = hx[ v      & 0xF];
++    b[2] = '\0';
++    printf("%s", b);
++}
++
++static void print_dec3(int v)
+ {
+-    (void)argc;
+-    (void)argv;
++    char b[4];
++    if (v < 0) v = 0;
++    if (v > 999) v = 999;
++    b[0] = (char)('0' + (v / 100) % 10);
++    b[1] = (char)('0' + (v / 10) % 10);
++    b[2] = (char)('0' + v % 10);
++    b[3] = '\0';
++    printf("%s", b);
++}
++
++//Снимок реестра в статический массив (не на стеке — записи по ~100 байт)
++static u_usb_dev_t snap_before[USB_REGISTRY_MAX];
++static u_usb_dev_t snap_after[USB_REGISTRY_MAX];
+ 
++static int take_snapshot(u_usb_dev_t *dst, int max)
++{
+     int n = u_usb_count();
+-    if (n < 0)
++    if (n < 0) return -1;
++    if (n > max) n = max;
++    for (int i = 0; i < n; i++)
+     {
+-        printf("lsusb: kernel returned error\n");
+-        return 1;
++        if (u_usb_get_dev(i, &dst[i]) != 0) return i;   //что успели, то успели
+     }
+-    if (n == 0)
++    return n;
++}
++
++//Есть ли в снимке устройство с тем же vid:pid на том же порту
++static int snap_contains(const u_usb_dev_t *arr, int n, const u_usb_dev_t *d)
++{
++    for (int i = 0; i < n; i++)
+     {
+-        printf("lsusb: no USB devices registered\n");
+-        return 0;
++        if (arr[i].vid == d->vid && arr[i].pid == d->pid &&
++            arr[i].port == d->port) return 1;
+     }
++    return 0;
++}
+ 
++static void print_list(int n)
++{
+     for (int i = 0; i < n; i++)
+     {
+         u_usb_dev_t d;
+@@ -57,7 +101,9 @@ int main(int argc, char *argv[])
+             continue;
+         }
+ 
+-        printf("Bus 000 Device %03d: ID ", i + 1);
++        printf("Bus 000 Device ");
++        print_dec3(i + 1);
++        printf(": ID ");
+         print_hex4(d.vid);
+         printf(":");
+         print_hex4(d.pid);
+@@ -70,15 +116,114 @@ int main(int argc, char *argv[])
+         }
+ 
+         if (d.product[0]) printf(" %s", d.product);
+-        printf(" (class %02x, port %d)", d.dev_class, d.port);
++        printf(" (class ");
++        print_hex2(d.dev_class);
++        printf(", port %d)", d.port);
+ 
+         if (d.serial[0]) printf(" sn:%s", d.serial);
+         if (d.block_id != 0xFFFFFFFF) printf(" [usb%d]", d.block_id);
+ 
+         printf("\n");
+-
+     }
+ 
+     printf("\n%d device%s found.\n", n, (n == 1) ? "" : "s");
++}
++
++int main(int argc, char *argv[])
++{
++    int do_update = 0;
++
++    for (int i = 1; i < argc; i++)
++    {
++        if (streq(argv[i], "-update") || streq(argv[i], "--update"))
++        {
++            do_update = 1;
++        }
++        else
++        {
++            printf("usage: lsusb [-update]\n");
++            printf("  lsusb         показать USB-устройства из реестра ядра\n");
++            printf("  lsusb -update пересмотреть порты контроллеров (вставлено/\n");
++            printf("                вынуто) и показать свежий список\n");
++            return 1;
++        }
++    }
++
++    if (!do_update)
++    {
++        int n = u_usb_count();
++        if (n < 0)
++        {
++            printf("lsusb: kernel returned error\n");
++            return 1;
++        }
++        if (n == 0)
++        {
++            printf("lsusb: no USB devices registered\n");
++            return 0;
++        }
++        print_list(n);
++        return 0;
++    }
++
++    //--- lsusb -update: ручной hotplug через SYS_USB_RESCAN ---
++
++    int n0 = take_snapshot(snap_before, USB_REGISTRY_MAX);
++
++    printf("lsusb: rescanning USB ports...\n");
++
++    int n = u_usb_rescan();
++    if (n < 0)
++    {
++        printf("lsusb: rescan failed (%d)\n", n);
++        printf("  (-1: USB driver not loaded, other: enumeration error)\n");
++        return 1;
++    }
++
++    int n1 = take_snapshot(snap_after, USB_REGISTRY_MAX);
++    if (n1 < 0) n1 = n;
++
++    //Diff по (vid:pid, порт): что появилось и что исчезло с последнего списка
++    int added = 0, removed = 0;
++    for (int i = 0; i < n1; i++)
++    {
++        if (!snap_contains(snap_before, n0, &snap_after[i]))
++        {
++            printf("+ ");
++            print_hex4(snap_after[i].vid);
++            printf(":");
++            print_hex4(snap_after[i].pid);
++            printf(" new device on port %d (class ",
++                   snap_after[i].port);
++            print_hex2(snap_after[i].dev_class);
++            printf(")\n");
++            added++;
++        }
++    }
++    for (int i = 0; i < n0; i++)
++    {
++        if (!snap_contains(snap_after, n1, &snap_before[i]))
++        {
++            printf("- ");
++            print_hex4(snap_before[i].vid);
++            printf(":");
++            print_hex4(snap_before[i].pid);
++            printf(" device removed from port %d\n", snap_before[i].port);
++            removed++;
++        }
++    }
++
++    if (added || removed)
++        printf("lsusb: rescan done: +%d -%d\n", added, removed);
++    else
++        printf("lsusb: rescan done: no changes\n");
++
++    if (n1 == 0)
++    {
++        printf("lsusb: no USB devices registered\n");
++        return 0;
++    }
++
++    print_list(n1);
+     return 0;
+ }

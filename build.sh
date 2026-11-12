@@ -129,6 +129,10 @@ nasm -f elf32 drivers/kbd_driver/kbd_start.asm -o bin/kbd_start.o
 $CC $DRVFLAGS -fno-pie -c drivers/vesa_fb/vesa_fb.c  -o bin/vesa_fb.o
 nasm -f elf32 drivers/vesa_fb/vesa_start.asm -o bin/vesa_start.o
 
+# geode graphic driver (на базе драйвера VESA: LFB из bootinfo + смена режима через vbe_rm)
+$CC $DRVFLAGS -fno-pie -c drivers/geode_gx1_graphic_driver/geodegx.c  -o bin/geodegx.o
+nasm -f elf32 drivers/geode_gx1_graphic_driver/geode_start.asm -o bin/geode_start.o
+
 # block device driver
 $CC $DRVFLAGS -fno-pie -c drivers/block_driver/block_driver.c  -o bin/block_driver.o
 nasm -f elf32 drivers/block_driver/block_start.asm -o bin/block_start.o
@@ -149,6 +153,9 @@ bin/fb_driver.o bin/dlib.o bin/d_font.o -o bin/fb_driver.elf
 
 $LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
 bin/vesa_start.o bin/vesa_fb.o bin/dlib.o -o bin/vesa_fb.elf
+
+$LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
+bin/geode_start.o bin/geodegx.o bin/dlib.o -o bin/geodegx.elf
 
 $LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
 bin/fat12_start.o bin/fat12_driver.o bin/dlib.o bin/fat12_disk.o \
@@ -348,6 +355,7 @@ create_fat_image() {
     mmd -i "$IMG" ::/ADRV
     mcopy -i "$IMG" bin/kbd_driver.elf ::/ADRV/KBDPS2.DRV
     mcopy -i "$IMG" bin/vesa_fb.elf ::/ADRV/VESA.DRV
+    mcopy -i "$IMG" bin/geodegx.elf ::/ADRV/GEODEGX.DRV
     #пользовательские программы
     mmd -i "$IMG" ::/USBIN
     #mcopy -i "$IMG" bin/hello.bin ::/USBIN/
@@ -454,7 +462,7 @@ e2mkdir tmp_ext2.img:/adrv
 e2cp bin/kbd_driver.elf tmp_ext2.img:/adrv/kbdps2.drv
 e2cp bin/usb_driver.elf tmp_ext2.img:/adrv/usb.drv
 e2cp bin/vesa_fb.elf tmp_ext2.img:/adrv/vesa.drv
-
+e2cp bin/geodegx.elf tmp_ext2.img:/adrv/geodegx.drv
 
 e2mkdir tmp_ext2.img:/usbin
 e2mkdir tmp_ext2.img:/bin

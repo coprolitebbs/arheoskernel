@@ -63,4 +63,7 @@ int gr_blank(int blank);
 int gr_wait_vsync(void);
 int gr_set_palette(uint32_t start, uint32_t count, const uint8_t *rgb);
 
+//Специфичные функции
+int gr_wait_engine_idle(void *priv);
+
 #endif

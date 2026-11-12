@@ -48,6 +48,11 @@ extern kbd_driver_api_t *kbd_driver_api;
 
 extern block_driver_api_t *blockdevice_driver;
 
+//API USB-стека (заполняется drivers_init из модуля DESCR_USB_DRIVER)
+//Нужен systemcall_usb_rescan (SYS_USB_RESCAN) для ручного hotplug
+extern usb_stack_driver_api_t *usb_driver_api;
+
+
 //Универсальный DMA-аллокатор (uncached, физически непрерывный).
 //Используется USB-стеком; через sound_layer внедряется звуковым драйверам
 //под DMA-кольца (AC'97 BDL, SB16).

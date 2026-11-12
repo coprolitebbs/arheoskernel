@@ -49,6 +49,7 @@
 #include "include-kernel/use_drivers.h"
 #include "include-kernel/vbe_rm.h"
 #include "include-kernel/comdebug.h"
+#include "include-kernel/hardware.h"
 
 //---------------- реестр драйверов ----------------
 #define GR_DRIVERS_MAX 8
@@ -58,17 +59,17 @@ static uint32_t gr_driver_count = 0;
 static gr_driver_t *gr_active = 0;
 static int gr_initialized = 0;
 
-/* Кэш текущего режима и fix-информации активного драйвера.
- * Нужен программным реализациям примитивов (LFB-доступ). */
+//Кэш текущего режима и fix-информации активного драйвера
+//Нужен программным реализациям примитивов (LFB-доступ)
 static gr_mode_info_t gr_cur_mode;
 static gr_fix_info_t gr_cur_fix;
 
 //Валидация хранилища обоев (реализация в разделе универсального консольного API)
 static void gr_wallpaper_validate(void);
 
-/* ==================== программные реализации ==================== */
+//==================== программные реализации ====================
 
-/* rgb = 0x00RRGGBB -> значение в формате текущего режима */
+//rgb = 0x00RRGGBB -> значение в формате текущего режима
 static uint32_t gr_scale8(uint32_t v, uint8_t len)
 {
     if (len == 0) return 0;
@@ -104,7 +105,13 @@ static uint32_t gr_unpack_color(uint32_t raw)
     return (r << 16) | (g << 8) | b;
 }
 
-/* Программный доступ возможен только к настоящему LFB */
+static void gr_sync_engine(void)
+{
+    if (gr_active && gr_active->ops && gr_active->ops->wait_engine_idle)
+        gr_active->ops->wait_engine_idle(gr_active->priv);
+}
+
+//Программный доступ возможен только к настоящему LFB
 static int gr_lfb_ready(void)
 {
     if (!gr_active) return 0;
@@ -809,6 +816,7 @@ static void uni_scroll_up(uint32_t start_y, uint32_t end_y, uint32_t line_height
     if (move_h)
         gr_copy_area(0, (int)(start_y + line_height), (int)gr_cur_mode.xres,
                      (int)move_h, 0, (int)start_y);
+    gr_sync_engine();
     gr_fill_rect(0, (int)(end_y - line_height), (int)gr_cur_mode.xres,
                  (int)line_height, gr_bg_color);
 }
@@ -889,6 +897,7 @@ static void gr_universal_api_setup(void)
     gr_universal_api.get_active_locale_ptr = gr_kernel_active_locale;
     gr_universal_api.font_lookup_ptr =
         (const void *(*)(const void *, uint32_t))font_lookup;
+
 }
 
 //==================== реестр драйверов ====================
@@ -917,6 +926,10 @@ static void gr_inject_runtime(gr_driver_t *drv)
         if (drv->ops->get_var(drv->priv, &m) == GR_OK)
             drv->vbe_rm_screen_trace_ptr(m.lfb, m.pitch, (uint8_t)m.bpp);
     }
+    if(!drv->pci_cfg_read_byte_ptr) drv->pci_cfg_read_byte_ptr = pci_cfg_read_byte;
+    if(!drv->pci_cfg_read_dword_ptr) drv->pci_cfg_read_dword_ptr = pci_cfg_read_dword;
+    if(!drv->pci_cfg_read_word_ptr) drv->pci_cfg_read_word_ptr = pci_cfg_read_word;
+    if(!drv->pci_cfg_write_dword_ptr) drv->pci_cfg_write_dword_ptr = pci_cfg_write_dword;
 }
 
 int graphic_layer_register_driver(gr_driver_t *drv)
@@ -1062,8 +1075,10 @@ int gr_set_mode(uint32_t index)
     //вышел; тишина после этой строки означает зависание внутри set_mode
     com_puts("[GR] set_mode idx=");
     com_puthex(index);
+
     if (gr_active->ops && gr_active->ops->set_mode)
     {
+        gr_sync_engine();
         int rc = gr_active->ops->set_mode(gr_active->priv, index);
         com_puts(" rc=");
         com_puthex((uint32_t)rc);
@@ -1115,6 +1130,7 @@ int gr_get_pixel(int x, int y, uint32_t *out)
     if (x < 0 || y < 0 ||
         (uint32_t)x >= gr_cur_mode.xres || (uint32_t)y >= gr_cur_mode.yres)
         return GR_ERR_BADARG;
+    gr_sync_engine();
     if (gr_active->ops && gr_active->ops->get_pixel)
         return gr_active->ops->get_pixel(gr_active->priv, x, y, out);
     return gr_lfb_get_pixel(x, y, out);
@@ -1159,7 +1175,12 @@ int gr_draw_rect(int x, int y, int w, int h, uint32_t color)
 int gr_draw_line(int x0, int y0, int x1, int y1, uint32_t color)
 {
     if (!gr_active) return GR_ERR_NODEV;
-    /* Брезенхэм; отсечением по экрану не заморачиваемся — put_pixel сам отбросит */
+
+    //Если драйвер умеет рисовать линии аппаратно — используем его
+    if (gr_active->ops && gr_active->ops->draw_line)
+        return gr_active->ops->draw_line(gr_active->priv, x0, y0, x1, y1, color);
+
+    //Брезенхэм; отсечением по экрану не заморачиваемся — put_pixel сам отбросит
     int dx = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
     int dy = (y1 >= y0) ? (y1 - y0) : (y0 - y1);
     int sx = (x1 >= x0) ? 1 : -1;
@@ -1183,6 +1204,7 @@ int gr_blit(int x, int y, int w, int h, const void *src)
     if (x < 0 || y < 0 ||
         (uint32_t)(x + w) > gr_cur_mode.xres || (uint32_t)(y + h) > gr_cur_mode.yres)
         return GR_ERR_BADARG;
+    gr_sync_engine();
     if (gr_active->ops && gr_active->ops->blit)
         return gr_active->ops->blit(gr_active->priv, x, y, w, h, src);
     return gr_lfb_blit(x, y, w, h, src);
@@ -1232,4 +1254,12 @@ int gr_set_palette(uint32_t start, uint32_t count, const uint8_t *rgb)
     if (!gr_active->ops || !gr_active->ops->set_palette) return GR_ERR_UNSUPPORTED;
     if (!rgb && count) return GR_ERR_BADARG;
     return gr_active->ops->set_palette(gr_active->priv, start, count, rgb);
+}
+
+
+int gr_wait_engine_idle(void *priv)
+{
+    if (!gr_active) return GR_ERR_NODEV;
+    if (!gr_active->ops || !gr_active->ops->wait_engine_idle) return GR_ERR_UNSUPPORTED;
+    return gr_active->ops->wait_engine_idle(priv);
 }
