@@ -299,6 +299,14 @@ fdc_read_lba:
         ; Одноразовый щуп шины 0x3F4: два чтения подряд возвращают
         ; 0xFF — легаси-FDC не декодируется (CF-18/USB-FDD и т.п.).
         ; Это лишь ЗАПРЕЩАЕТ PIO-ярус: BIOS-ярус работает всегда.
+        ; РЕД.11: прежний щуп дал ложную тревогу на TA-NC529 — все
+        ; чтения молча ушли в BIOS, и машина «умерла» на первом
+        ; дальнем цилиндре без единого маркера. Решающий тест:
+        ; пишем SENSE INTERRUPT (0x08) в FIFO и перечитываем MSR.
+        ; Живой чип ПРИМЕТ байт и войдёт в фазу результата (DIO=1);
+        ; шина-призрак останется 0xFF. Вердикт печатаем ('D'+hex) —
+        ; без него BIOS-only режим неотличим на экране от старого
+        ; BIOS-primary образа (та же тишина после 'Y').
         cmp byte [cs:fdc_probed], 0
         jne .probe_done
         mov byte [cs:fdc_probed], 1
@@ -309,8 +317,27 @@ fdc_read_lba:
         cmp al, bl
         jne .probe_done         ; значение дрожит — FDC живой
         cmp al, 0xFF
-        jne .probe_done
+        jne .probe_alive        ; стабильный 0x80/0x81 — живой
+        ; MSR «застрял» на 0xFF — решающий тест через FIFO:
+        mov dx, FDC_FIFO
+        mov al, 0x08            ; SENSE INTERRUPT STATUS
+        out dx, al
+        FDC_IOWAIT
+        mov dx, FDC_MSR
+        in  al, dx
+        cmp al, 0xFF
+        jne .probe_alive        ; MSR отреагировал — FDC декодируется
         mov byte [cs:fdc_pio_dead], 1
+        pusha
+        mov al, 'D'             ; PIO-ярус запрещён: шина-призрак
+        call debug_char
+        mov al, bl
+        call screen_hex_byte
+        mov al, ' '
+        call debug_char
+        popa
+        jmp .probe_done
+.probe_alive:
 .probe_done:
 
         ; ---------------- ЛЕСТНИЦА (8 шагов) ----------------
@@ -334,6 +361,17 @@ fdc_read_lba:
         mov byte [cs:fdc_escalated], 1
         cmp byte [cs:fdc_pio_dead], 0
         jne .sw_stay_bios       ; PIO запрещён — BIOS и только BIOS
+        ; РЕД.11: смена яруса «вниз» на BIOS допустима только для
+        ; C<=2: на TA-NC529 int 13h на дальних цилиндрах ждёт IRQ6
+        ; ВЕЧНО (без таймаута) — уход туда = тихая смерть загрузки.
+        mov al, [cs:fdc_tier]
+        xor al, 1               ; целевой ярус
+        test al, al
+        jnz .sw_do              ; целевой PIO — меняем всегда
+        mov al, [cs:fdc_C]
+        cmp al, 2
+        ja  .sw_stay_pio        ; C>2: в BIOS нельзя — держим PIO
+.sw_do:
         xor byte [cs:fdc_tier], 1
         pusha
         mov al, 'L'
@@ -345,6 +383,18 @@ fdc_read_lba:
         call debug_char
         popa
         call fdc_recover_cur    ; подготовка НОВОГО яруса
+        jmp .try
+.sw_stay_pio:
+        pusha
+        mov al, 'p'             ; BIOS заблокирован для дальнего цилиндра
+        call debug_char
+        mov al, [cs:fdc_step]
+        add al, '0'
+        call debug_char
+        mov al, ' '
+        call debug_char
+        popa
+        call fdc_recover_cur    ; реанимация ТЕКУЩЕГО (PIO) яруса
         jmp .try
 .sw_stay_bios:
         mov byte [cs:fdc_tier], 0
@@ -389,6 +439,26 @@ fdc_read_lba:
 .try:
         cmp byte [cs:fdc_tier], 0
         jne .try_pio
+        ; РЕД.11: BIOS-ярус на TA-NC529 ждёт IRQ6 ВЕЧНО на цилиндрах
+        ; >2 (int 13h без таймаута). Пока FDC декодируется, дальние
+        ; цилиндры читаем ТОЛЬКО PIO: принудительно возвращаем ярус.
+        ; BIOS остаётся для C<=2 (доказано stage1) и для машин без
+        ; легаси-FDC (pio_dead=1: CF-18/USB-FDD — их BIOS не виснет).
+        cmp byte [cs:fdc_pio_dead], 0
+        jne .try_bios           ; FDC не декодируется — BIOS единственный
+        mov al, [cs:fdc_C]
+        cmp al, 2
+        jbe .try_bios           ; C<=2: BIOS доказанно работает
+        mov byte [cs:fdc_tier], 1 ; дальний цилиндр — назад в PIO
+        pusha
+        mov al, 'p'             ; BIOS заблокирован: держим PIO
+        call debug_char
+        mov al, ' '
+        call debug_char
+        popa
+        call fdc_recover_cur
+        jmp .try_pio
+.try_bios:
         call fdc_bios_read      ; ЯРУС BIOS
         jmp .tried
 .try_pio:
@@ -1072,6 +1142,18 @@ fdc_wait_seek_done:
 fdc_recal:
         push bx
         mov byte [cs:fdc_ph], PH_RECAL
+        ; РЕД.11: страховка — RECALIBRATE тоже с ND=0. После нашего
+        ; fdc_reset ND=0 и так стоит, но после чужого READ с ND=1
+        ; (fdc_read_op) recal на CS5530 не завершается.
+        mov bl, 0x03
+        call fdc_out
+        jc .rc_fail
+        mov bl, 0xCF
+        call fdc_out
+        jc .rc_fail
+        mov bl, 0x04            ; ND=0 (бит 0=0)
+        call fdc_out
+        jc .rc_fail
         mov bl, 0x07
         call fdc_out
         jc .rc_fail
@@ -1107,6 +1189,22 @@ fdc_seek:
         mov byte [cs:fdc_ph], PH_SEEK
         mov al, bl
         mov [cs:fdc_stmp], al
+        ; РЕД.11: fdc_read_op оставляет в контроллере SPECIFY ND=1
+        ; (0x15) — non-DMA нужен ТОЛЬКО фазе данных чтения. Следующий
+        ; SEEK после чтений на CS5530 с ND=1 НЕ ЗАВЕРШАЕТСЯ вовсе
+        ; ('f5 81': MSR=0x81, SENSE INTERRUPT вечно INVALID) —
+        ; дальние цилиндры выжигали лестницу на таймаутах и
+        ; сталкивали её на зависающий BIOS. Возвращаем ND=0 перед
+        ; каждой командой перемещения головки (3 байта, дёшево).
+        mov bl, 0x03
+        call fdc_out
+        jc .sk_fail
+        mov bl, 0xCF
+        call fdc_out
+        jc .sk_fail
+        mov bl, 0x04            ; HLT как в fdc_reset, ND=0 (бит 0=0)
+        call fdc_out
+        jc .sk_fail
         mov bl, 0x0F
         call fdc_out
         jc .sk_fail
