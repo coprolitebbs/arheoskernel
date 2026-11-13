@@ -71,7 +71,7 @@ void pmm_init(uint16_t num_entries, struct e820_entry *entries)
     //Фиксированный размер физической памяти
     //uintptr_t min_addr = 0x100000;          //1 МБ
     //uintptr_t max_addr = 1536 * 1024 * 1024; //128 МБ
-    // Собираем реальный верхний край RAM из E820
+    //Собираем реальный верхний край RAM из E820
     uint64_t max_phys = 0;
     for (uint16_t i = 0; i < num_entries; i++)
     {
@@ -100,7 +100,7 @@ void pmm_init(uint16_t num_entries, struct e820_entry *entries)
 
     uintptr_t total_mem = max_addr - min_addr;
 
-    //bitmap покрывает ВСЮ физическую память от 0 до max_addr,
+    //bitmap покрывает всю физическую память от 0 до max_addr,
     //чтобы иметь возможность освобождать низкие адреса (образы модулей)
     memory_start = 0;
     total_pages = max_addr / PAGE_SIZE;
@@ -372,7 +372,7 @@ void graphics_init_uma_address(uint32_t total_mem, int lfb_available, uint32_t l
     //Доверяем адресу от загрузчика, даже если флаг LFB в graphics_flags не выставлен
     //Причина: некоторые BIOS (в т.ч. VGABIOS-lgpl в Bochs) успешно активируют LFB,
     //но не выставляют/неправильно сообщают флаг VBE mode attributes
-    // Если lfb_addr от stage2 ненулевой — значит, PhysBasePtr был валидным, и писать туда безопасно
+    //Если lfb_addr от stage2 ненулевой — значит, PhysBasePtr был валидным, и писать туда безопасно
     //Платформы без LFB (VGA text) присылают lfb_addr = 0 — их не задеваем
     if (lfb_addr_from_boot != 0)
     {

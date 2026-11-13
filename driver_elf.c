@@ -85,20 +85,12 @@ static uint32_t section_base_for_shndx(Elf32_Shdr *sections, uint32_t shndx,
 
 
 
-
-// ============================================================
-// Общая реализация загрузки, релокации и вызова драйвера.
+//Общая реализация загрузки, релокации и вызова драйвера
 //
-// free_image = true  — образ прочитан с диска через kmalloc,
-//                       освобождаем его через kfree после вызова
-//                       driver_main()/get_api().
-// free_image = false — образ уже лежит в памяти (модуль
-//                       загрузчика/ядро), не трогаем.
-//
-// file_size используется только для sanity-проверки границы
-// области драйверов. Для вызовов без известного размера
-// (load_driver_elf) передаём 0 — проверка пропускается.
-// ============================================================
+//free_image = true  — образ прочитан с диска через kmalloc, освобождаем его через kfree после вызова driver_main()/get_api()
+//free_image = false — образ уже лежит в памяти (модуль загрузчика/ядро), не трогаем
+//file_size используется только для sanity-проверки границы области драйверов. Для вызовов без известного размера
+//(load_driver_elf) передаём 0 — проверка пропускается
 static void *load_driver_elf_common(uint8_t *elf_image, uint32_t file_size,
                                     struct boot_info *boot, bool free_image)
 {
@@ -108,7 +100,7 @@ static void *load_driver_elf_common(uint8_t *elf_image, uint32_t file_size,
         return NULL;
     }
 
-    // ---- Магия ----
+    //---- Магия ----
     Elf32_Ehdr *ehdr = (Elf32_Ehdr *)elf_image;
     if (ehdr->ident[0] != 0x7F || ehdr->ident[1] != 'E' ||
             ehdr->ident[2] != 'L'  || ehdr->ident[3] != 'F')
@@ -119,9 +111,8 @@ static void *load_driver_elf_common(uint8_t *elf_image, uint32_t file_size,
     }
 
     //Защита области драйверов
-    //Область 12..16 MB (DRIVER_LOAD_ADDR..0x1000000) — 4 MB.
-    //file_size >= суммарный offset (в ELF есть заголовки/reloc),
-    //поэтому проверка по file_size — консервативная и безопасная.
+    //Область 12..16 MB (DRIVER_LOAD_ADDR..0x1000000) — 4 MB
+    //file_size >= суммарный offset (в ELF есть заголовки/reloc), поэтому проверка по file_size
     if (file_size != 0 && driver_start_load_addr + file_size > 0x1000000)
     {
         if (free_image) kfree(elf_image);
@@ -223,7 +214,7 @@ static void *load_driver_elf_common(uint8_t *elf_image, uint32_t file_size,
 
             Elf32_Sym *sym = &syms[sym_idx];
 
-            //Диагностика на случай, если забыли -fno-common
+            //Диагностика на случай, если забыли флаг -fno-common при компиляции
             if (sym->st_shndx == 0xFFF2)  //SHN_COMMON
             {
                 com_puts("[LD] WARN: COMMON symbol (нужен -fno-common): ");

@@ -33,7 +33,8 @@
 #define DRV_STATUS_LOAD_ERROR    -2
 #define DRV_STATUS_NOT_SUPPORTED -3
 
-typedef struct{
+typedef struct
+{
     uint32_t type;
     fs_driver_api_t *api;
 } fs_driver_t;
@@ -49,13 +50,11 @@ extern kbd_driver_api_t *kbd_driver_api;
 extern block_driver_api_t *blockdevice_driver;
 
 //API USB-стека (заполняется drivers_init из модуля DESCR_USB_DRIVER)
-//Нужен systemcall_usb_rescan (SYS_USB_RESCAN) для ручного hotplug
 extern usb_stack_driver_api_t *usb_driver_api;
 
 
 //Универсальный DMA-аллокатор (uncached, физически непрерывный).
-//Используется USB-стеком; через sound_layer внедряется звуковым драйверам
-//под DMA-кольца (AC'97 BDL, SB16).
+//Используется USB-стеком; через sound_layer внедряется звуковым драйверам под DMA-кольца
 void *kernel_usb_dma_alloc(uint32_t size, uint32_t *phys_out);
 void  kernel_usb_dma_free(void *virt, uint32_t size);
 

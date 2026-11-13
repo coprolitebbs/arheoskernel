@@ -43,15 +43,15 @@ static spinlock_t sched_spinlock = {0};
 
 //Барьер вытеснения для CR3-окон спавна (task_spawn_elf / task_spawn_builtin)
 //Внутри окна CR3 указывает на каталог новой задачи
-//Если в этот момент придёт IRQ0 и schedule() переключит контекст, то после возврата
-//в продолжение спавна планировщик выставит CR3 = каталог родителя, и остаток окна
-//(memcpy сегментов ELF, запись argv на user-стек по VA 0x80000000−…) продолжит писать
-//в чужое адресное пространство: молча портить стек родителя или ловить PAGE FAULT
-//ERR=0x2, если текущий контекст — kernel-поток с kernel_directory (там PDE 511
-//с user-стеком отсутствует вовсе, CR2 попадает в самый верх user-стека,
-//например 0x7FFFFFF4/0x7FFFFFFD). Поэтому окно делается атомарным по прерываниям:
-//IF=0 на время окна, IRQ0 копится в PIC и доставляется сразу после восстановления
-//флагов. Save/restore вместо cli/sti — чтобы не потерять вложенное cli вызывающего
+//Если в этот момент придёт IRQ0 и schedule() переключит контекст, то после возврата в продолжение
+//спавна планировщик выставит CR3 = каталог родителя, и остаток окна (memcpy сегментов ELF,
+//запись argv на user-стек по VA 0x80000000−...) продолжит писать в чужое адресное пространство:
+//молча портить стек родителя или ловить PAGE FAULT ERR=0x2, если текущий контекст — kernel-поток
+//с kernel_directory (там PDE 511 с user-стеком отсутствует вовсе, CR2 попадает в самый верх user-стека,
+//например 0x7FFFFFF4/0x7FFFFFFD)
+//Поэтому окно делается атомарным по прерываниям:
+//IF=0 на время окна, IRQ0 копится в PIC и доставляется сразу после восстановления флагов.
+//Save/restore вместо cli/sti — чтобы не потерять вложенное cli вызывающего
 static inline uint32_t task_irq_barrier_begin(void)
 {
     uint32_t efl;
@@ -164,8 +164,7 @@ void schedule(struct regs *r)
     task_t *next_task = NULL;
     if (ready_queue)
     {
-        //Используем сохраненные копии old_state/old_pid, а не повторное чтение
-        //old_task->state
+        //Используем сохраненные копии old_state/old_pid, а не повторное чтение old_task->state
         //если задача завершилась, cleanup_tasks() уже освободил  ее task_t (kfree) —
         //повторное чтение полей из освобожденного блока кучи могло вернуть мусор
         //(блок уже переиспользован kmalloc'ом) и уводило обход кольца по битому указателю next
@@ -289,17 +288,17 @@ task_t* create_task(uint32_t entry)
     memset(task,0,sizeof(task_t));
 
     //Инициализация STDIN STDOUT STDERR
-    task->fds[0] = 0;  // Локальный STDIN (Клавиатура TTY) -> Глобальный 0
-    task->fds[1] = 1;  // Локальный STDOUT (Экран Видео)  -> Глобальный 1
-    task->fds[2] = 2;  // Локальный STDERR (Лог Ошибок)   -> Глобальный 2
+    task->fds[0] = 0;  //Локальный STDIN (Клавиатура TTY) -> Глобальный 0
+    task->fds[1] = 1;  //Локальный STDOUT (Экран Видео)  -> Глобальный 1
+    task->fds[2] = 2;  //Локальный STDERR (Лог Ошибок)   -> Глобальный 2
     //Все остальные дескрипторы по умолчанию закрыты
     for (int i = 3; i < MAX_PROCESS_FDS; i++)
     {
         task->fds[i] = -1;
     }
-    //Выделяем KERNEL_STACK_PAGES страниц под kernel stack (16KB).
+    //Выделяем KERNEL_STACK_PAGES страниц под kernel stack (16KB)
     //Одна страница не вмещает глубокие syscall-цепочки (spawn) с вложенными IRQ:
-    //переполнение тихо затирает живую страницу ниже (см. task.h).
+    //переполнение тихо затирает живую страницу ниже
     task->kernel_stack_phys = (uint32_t)pmm_alloc_pages(KERNEL_STACK_PAGES);
     if(!task->kernel_stack_phys)
     {
@@ -313,7 +312,7 @@ task_t* create_task(uint32_t entry)
     task->state = TASK_READY;
     task->parameter = 0;
     task->heap_next = 0x50000000;//0x40001000;
-    task->tty_flags = TTY_DEFAULT;   // по умолчанию — ASCII
+    task->tty_flags = TTY_DEFAULT;   //по умолчанию — ASCII
 
     //task->heap_next = virt_addr + pages * PAGE_SIZE;
     uint32_t pd_phys;
@@ -343,7 +342,6 @@ task_t* create_task(uint32_t entry)
 void cleanup_tasks(void)
 {
     if(!ready_queue) return;
-
     //Освобождаем PD текущей задачи -> CR3 не должен на неё указывать
     //Принудительно переключаемся на kernel_directory: там все page tables ядра
     //(identity map, LFB/MMIO, kernel heap) гарантированно живы
@@ -463,8 +461,6 @@ void cleanup_tasks(void)
 
 static uint32_t create_user_stack(task_t *task)
 {
-    //USER_STACK_PAGES/USER_STACK_VA_TOP заданы в task.h — тот же источник правды,
-    //что и лимиты кучи Ring 3 в systemcall_alloc_page/sbrk/free_page
     uint32_t virt = USER_STACK_VA_TOP - USER_STACK_PAGES * PAGE_SIZE;
 
     for (uint32_t i = 0; i < USER_STACK_PAGES; i++)
@@ -557,11 +553,10 @@ void vm_pages_free_all(task_t *task)
         vm_page_t *next = cur->next;
         //Убираем виртуальное отображение из таблиц страниц этого процесса
         vmm_unmap_page(task->page_dir, cur->virt);
-        //Возвращаем физическую страницу менеджеру PMM только если это
-        //реальная оперативная память пользовательского процесса Ring 3.
+        //Возвращаем физическую страницу менеджеру PMM только если это реальная оперативная память пользовательского процесса Ring 3
         //Если физический адрес cur->phys указывает на область выше 128 МБ (0x08000000),
-        //или равен адресу LFB (0xFD22B000), ядру запрещено
-        //стирать его из PMM, иначе это уничтожит видеоадаптер и вызовет Page Fault
+        //или равен адресу LFB (0xFD22B000), ядру запрещено стирать его из PMM,
+        //иначе это уничтожит видеоадаптер и вызовет Page Fault
         //if (cur->phys && (uint32_t)cur->phys < 0x08000000) {
         //    pmm_free_page((void*)cur->phys);
         //}
@@ -655,8 +650,6 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
     }
     memset(args_tokens, 0, 16 * 64);
 
-    //FIX: окно CR3 атомарно по прерываниям — IRQ0 не может уйти в schedule()
-    //посреди записи argv в адресное пространство ребёнка
     uint32_t ksl_efl = task_irq_barrier_begin();
 
     __asm__ __volatile__("mov %0, %%cr3" : : "r"(task->page_dir_phys));
@@ -833,14 +826,12 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
                 com_puts("[ELF] vaddr out of user range: ");
                 com_puthex(vaddr);
                 com_puts("\n");
-                /*pmm_free_page((void*)task->kernel_stack_phys);
-                pmm_free_page((void*)task->page_dir_phys);
-                pmm_free_page((void*)task->user_stack_phys);*/
-                vm_pages_free_all(task);                       /* вернёт user leaf pages */
-                vmm_destroy_address_space(task->page_dir);     /* вернёт PD + PT */
+
+                vm_pages_free_all(task);                       //вернёт user leaf pages
+                vmm_destroy_address_space(task->page_dir);     //вернёт PD + PT
                 pmm_free_pages((void*)task->kernel_stack_phys, KERNEL_STACK_PAGES);
                 kfree(task);
-                return NULL;   // refuse to corrupt kernel identity
+                return NULL;
             }
             uint32_t memsize = phdr[i].memsz;
             uint32_t filesize = phdr[i].filesz;
@@ -857,8 +848,6 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
                 //Проверяем именно USER-доступность PTE, а не просто PRESENT
                 //Для critical user-PDE (LFB/MMIO) vmm_create_address_space скопировал PTE
                 //без PAGE_USER — Ring 3 туда не достанет
-                //Если бы мы полагались на vmm_get_phys_addr() != 0, загрузчик увидел бы LFB
-                //как уже замапленную страницу и не создал бы свежую user-страницу -> #PF в Ring 3
                 uint32_t pd_i = page_vaddr >> 22;
                 uint32_t pt_i = (page_vaddr >> 12) & 0x3FF;
                 uint32_t pt_e = 0;
@@ -1101,7 +1090,7 @@ task_t *task_spawn_from_file(const char *path, uint32_t entry_virt, const char *
     }
     memset(kernel_load_buf, 0, file_size);
 
-    //Поблочно считываем весь исполняемый файл с диска в кучу ядра (фикс обрезания хвостов)
+    //Поблочно считываем весь исполняемый файл с диска в кучу ядра
     uint32_t total_bytes_read = 0;
     bool read_error = false;
     while (total_bytes_read < file_size)
@@ -1446,7 +1435,7 @@ void kernel_init_thread(void)
         : : : "memory"
     );
 
-    //Сюда процессор больше никогда не вернется
+
     for(;;);
 }
 

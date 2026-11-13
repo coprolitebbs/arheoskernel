@@ -15,20 +15,20 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-//graphic_layer.c — реализация высокоуровневого слоя графики (Ring 0).
-//API описан в drivers/include_drivers/driver_graphic_layer.h.
+//graphic_layer.c — реализация высокоуровневого слоя графики (Ring 0)
+//API описан в drivers/include_drivers/driver_graphic_layer.h
 //
 //Что здесь есть:
-//  - реестр gr_driver_t с автопереключением активного драйвера по priority;
-//  - init_graphic_layer(): если внешних драйверов нет — fb-совместимый
-//    fallback поверх штатного fb_driver (legacy LFB из boot_info);
+//  - реестр gr_driver_t с автопереключением активного драйвера по priority
+//  - init_graphic_layer(): если внешних драйверов нет — fb-совместимый fallback
+//    поверх штатного fb_driver (legacy LFB из boot_info)
 //  - программные реализации всех примитивов через LFB текущего режима:
-//    если у драйвера какая-то операция отсутствует, слой подставляет свою;
+//    если у драйвера какая-то операция отсутствует, слой подставляет свою
 //  - универсальный консольный API (текст/тайлы/обои/скролл): реализация
-//    «солянки» fb_driver_api_t поверх примитивов слоя. После
-//    init_graphic_layer() глобальный fb из use_drivers.c указывает на
-//    эту таблицу, поэтому всё ядро рисует через слой при любом активном
-//    драйвере — отдельных проверок gr_active в вызывающем коде не нужно.
+//    солянки fb_driver_api_t поверх примитивов слоя
+//    После init_graphic_layer() глобальный fb из use_drivers.c указывает на эту таблицу,
+//    поэтому всё ядро рисует через слой при любом активном драйвере —
+//    отдельных проверок gr_active в вызывающем коде не нужно
 
 #include <stdint.h>
 #include <stddef.h>
@@ -51,7 +51,7 @@
 #include "include-kernel/comdebug.h"
 #include "include-kernel/hardware.h"
 
-//---------------- реестр драйверов ----------------
+//реестр драйверов
 #define GR_DRIVERS_MAX 8
 
 static gr_driver_t *gr_registry[GR_DRIVERS_MAX];
@@ -59,17 +59,17 @@ static uint32_t gr_driver_count = 0;
 static gr_driver_t *gr_active = 0;
 static int gr_initialized = 0;
 
-/* Кэш текущего режима и fix-информации активного драйвера.
- * Нужен программным реализациям примитивов (LFB-доступ). */
+//Кэш текущего режима и fix-информации активного драйвера
+//Нужен программным реализациям примитивов (LFB-доступ)
 static gr_mode_info_t gr_cur_mode;
 static gr_fix_info_t gr_cur_fix;
 
 //Валидация хранилища обоев (реализация в разделе универсального консольного API)
 static void gr_wallpaper_validate(void);
 
-/* ==================== программные реализации ==================== */
+//Программные реализации
 
-/* rgb = 0x00RRGGBB -> значение в формате текущего режима */
+//rgb = 0x00RRGGBB -> значение в формате текущего режима
 static uint32_t gr_scale8(uint32_t v, uint8_t len)
 {
     if (len == 0) return 0;
@@ -87,13 +87,13 @@ static uint32_t gr_unscale8(uint32_t v, uint8_t len)
 
 static uint32_t gr_pack_color(uint32_t rgb)
 {
-    if (gr_cur_mode.bpp >= 24) return rgb;   /* 24/32bpp — уже XRGB8888 */
+    if (gr_cur_mode.bpp >= 24) return rgb;   //24/32bpp — уже XRGB8888
     uint32_t r = (rgb >> 16) & 0xFF;
     uint32_t g = (rgb >> 8)  & 0xFF;
     uint32_t b =  rgb        & 0xFF;
     return (gr_scale8(r, gr_cur_mode.red.length)   << gr_cur_mode.red.offset)
-         | (gr_scale8(g, gr_cur_mode.green.length) << gr_cur_mode.green.offset)
-         | (gr_scale8(b, gr_cur_mode.blue.length)  << gr_cur_mode.blue.offset);
+           | (gr_scale8(g, gr_cur_mode.green.length) << gr_cur_mode.green.offset)
+           | (gr_scale8(b, gr_cur_mode.blue.length)  << gr_cur_mode.blue.offset);
 }
 
 static uint32_t gr_unpack_color(uint32_t raw)
@@ -105,14 +105,20 @@ static uint32_t gr_unpack_color(uint32_t raw)
     return (r << 16) | (g << 8) | b;
 }
 
-/* Программный доступ возможен только к настоящему LFB */
+static void gr_sync_engine(void)
+{
+    if (gr_active && gr_active->ops && gr_active->ops->wait_engine_idle)
+        gr_active->ops->wait_engine_idle(gr_active->priv);
+}
+
+//Программный доступ возможен только к настоящему LFB
 static int gr_lfb_ready(void)
 {
     if (!gr_active) return 0;
     if (gr_cur_mode.lfb == 0 || gr_cur_mode.lfb == 0xFFFFFFFF) return 0;
     if (gr_cur_mode.pitch == 0) return 0;
     if (gr_cur_mode.bpp != 8 && gr_cur_mode.bpp != 16 &&
-        gr_cur_mode.bpp != 24 && gr_cur_mode.bpp != 32) return 0;
+            gr_cur_mode.bpp != 24 && gr_cur_mode.bpp != 32) return 0;
     return 1;
 }
 
@@ -120,8 +126,8 @@ static int gr_lfb_put_pixel(int x, int y, uint32_t color)
 {
     if (!gr_lfb_ready()) return GR_ERR_UNSUPPORTED;
     uint8_t *p = (uint8_t *)gr_cur_mode.lfb
-               + (uint32_t)y * gr_cur_mode.pitch
-               + (uint32_t)x * (gr_cur_mode.bpp / 8);
+                 + (uint32_t)y * gr_cur_mode.pitch
+                 + (uint32_t)x * (gr_cur_mode.bpp / 8);
     switch (gr_cur_mode.bpp)
     {
     case 32:
@@ -136,7 +142,7 @@ static int gr_lfb_put_pixel(int x, int y, uint32_t color)
         *(volatile uint16_t *)p = (uint16_t)gr_pack_color(color);
         break;
     case 8:
-        /* палитра: layer не знает соответствие цвет<->индекс, пишем индекс */
+        //палитра: layer не знает соответствие цвет<->индекс, пишем индекс
         *p = (uint8_t)(color & 0xFF);
         break;
     default:
@@ -149,8 +155,8 @@ static int gr_lfb_get_pixel(int x, int y, uint32_t *out)
 {
     if (!gr_lfb_ready() || !out) return GR_ERR_UNSUPPORTED;
     const uint8_t *p = (const uint8_t *)gr_cur_mode.lfb
-                     + (uint32_t)y * gr_cur_mode.pitch
-                     + (uint32_t)x * (gr_cur_mode.bpp / 8);
+                       + (uint32_t)y * gr_cur_mode.pitch
+                       + (uint32_t)x * (gr_cur_mode.bpp / 8);
     switch (gr_cur_mode.bpp)
     {
     case 32:
@@ -163,7 +169,7 @@ static int gr_lfb_get_pixel(int x, int y, uint32_t *out)
         *out = gr_unpack_color(*(const volatile uint16_t *)p);
         break;
     case 8:
-        *out = *p;   /* индекс палитры без преобразования */
+        *out = *p;   //индекс палитры без преобразования
         break;
     default:
         return GR_ERR_UNSUPPORTED;
@@ -178,27 +184,33 @@ static int gr_lfb_fill_rect(int x, int y, int w, int h, uint32_t color)
     for (int row = 0; row < h; row++)
     {
         uint8_t *line = (uint8_t *)gr_cur_mode.lfb
-                      + (uint32_t)(y + row) * gr_cur_mode.pitch
-                      + (uint32_t)x * (gr_cur_mode.bpp / 8);
+                        + (uint32_t)(y + row) * gr_cur_mode.pitch
+                        + (uint32_t)x * (gr_cur_mode.bpp / 8);
         for (int col = 0; col < w; col++)
         {
             switch (gr_cur_mode.bpp)
             {
-            case 32: ((volatile uint32_t *)line)[col] = packed; break;
+            case 32:
+                ((volatile uint32_t *)line)[col] = packed;
+                break;
             case 24:
                 line[col * 3 + 0] =  packed        & 0xFF;
                 line[col * 3 + 1] = (packed >> 8)  & 0xFF;
                 line[col * 3 + 2] = (packed >> 16) & 0xFF;
                 break;
-            case 16: ((volatile uint16_t *)line)[col] = (uint16_t)packed; break;
-            case 8:  line[col] = (uint8_t)(color & 0xFF); break;
+            case 16:
+                ((volatile uint16_t *)line)[col] = (uint16_t)packed;
+                break;
+            case 8:
+                line[col] = (uint8_t)(color & 0xFF);
+                break;
             }
         }
     }
     return GR_OK;
 }
 
-/* RAM -> FB: пиксели упакованы в формате текущего bpp, строки без padding */
+//RAM -> FB: пиксели упакованы в формате текущего bpp, строки без padding
 static int gr_lfb_blit(int x, int y, int w, int h, const void *src)
 {
     if (!gr_lfb_ready() || !src) return GR_ERR_UNSUPPORTED;
@@ -208,14 +220,14 @@ static int gr_lfb_blit(int x, int y, int w, int h, const void *src)
     for (int i = 0; i < h; i++)
     {
         uint8_t *d = (uint8_t *)gr_cur_mode.lfb
-                   + (uint32_t)(y + i) * gr_cur_mode.pitch
-                   + (uint32_t)x * bpp;
+                     + (uint32_t)(y + i) * gr_cur_mode.pitch
+                     + (uint32_t)x * bpp;
         memcpy(d, s + (uint32_t)i * row_bytes, row_bytes);
     }
     return GR_OK;
 }
 
-/* Копирование прямоугольника внутри LFB с учётом перекрытия */
+//Копирование прямоугольника внутри LFB с учётом перекрытия
 static int gr_lfb_copy_area(int sx, int sy, int w, int h, int dx, int dy)
 {
     if (!gr_lfb_ready()) return GR_ERR_UNSUPPORTED;
@@ -245,20 +257,28 @@ static int gr_lfb_copy_area(int sx, int sy, int w, int h, int dx, int dy)
     return GR_OK;
 }
 
-/* Обрезка прямоугольника по границам экрана */
+//Обрезка прямоугольника по границам экрана
 static int gr_clip(int *x, int *y, int *w, int *h)
 {
     if (!gr_active) return GR_ERR_NODEV;
     if (*w <= 0 || *h <= 0) return GR_ERR_BADARG;
-    if (*x < 0) { *w += *x; *x = 0; }
-    if (*y < 0) { *h += *y; *y = 0; }
+    if (*x < 0)
+    {
+        *w += *x;
+        *x = 0;
+    }
+    if (*y < 0)
+    {
+        *h += *y;
+        *y = 0;
+    }
     if ((uint32_t)(*x + *w) > gr_cur_mode.xres) *w = (int)gr_cur_mode.xres - *x;
     if ((uint32_t)(*y + *h) > gr_cur_mode.yres) *h = (int)gr_cur_mode.yres - *y;
     if (*w <= 0 || *h <= 0) return GR_ERR_BADARG;
     return GR_OK;
 }
 
-/* ==================== кэш текущего режима ==================== */
+//Кэш текущего режима
 
 static int gr_cache_current_mode(void)
 {
@@ -284,7 +304,7 @@ static int gr_cache_current_mode(void)
         return GR_ERR_UNSUPPORTED;
     }
 
-    /* fix-информация: из драйвера или синтез из mode */
+    //fix-информация: из драйвера или синтез из mode
     memset(&gr_cur_fix, 0, sizeof(gr_cur_fix));
     if (gr_active->ops && gr_active->ops->get_fix)
     {
@@ -296,21 +316,20 @@ static int gr_cache_current_mode(void)
         gr_cur_fix.smem_len    = gr_cur_mode.pitch * gr_cur_mode.yres;
         gr_cur_fix.type        = GR_TYPE_PACKED_PIXELS;
         gr_cur_fix.visual      = (gr_cur_mode.bpp == 8) ? GR_VISUAL_PSEUDOCOLOR
-                                                        : GR_VISUAL_TRUECOLOR;
+                                 : GR_VISUAL_TRUECOLOR;
         gr_cur_fix.line_length = gr_cur_mode.pitch;
     }
 
-    //Обои привязаны к размеру и формату конкретного режима: если режим
-    //сменён (другой драйвер, другое разрешение) — сбрасываем несовпадающий
+    //Обои привязаны к размеру и формату конкретного режима: если режим сменён
+    //(другой драйвер, другое разрешение) — сбрасываем несовпадающий
     //буфер, чтобы не вернуть на экран чужие пиксели
     gr_wallpaper_validate();
     return GR_OK;
 }
 
-/* ==================== fb-совместимый fallback ====================
- * Обёртка над штатным fb_driver (fb_driver_api_t *fb из use_drivers.c).
- * Всё, чего нет в старом API, остаётся NULL: слой подставит заглушки
- * (GR_ERR_UNSUPPORTED) или программные реализации через LFB. */
+//fb-совместимый fallback
+//Обёртка над штатным fb_driver (fb_driver_api_t *fb из use_drivers.c)
+//Всё, чего нет в старом API, остаётся NULL: слой подставит заглушки (GR_ERR_UNSUPPORTED) или программные реализации через LFB
 
 typedef struct fb_compat_ctx
 {
@@ -323,12 +342,15 @@ static fb_compat_ctx_t fb_compat_ctx;
 static gr_driver_t     fb_compat_driver;
 
 //Нативная таблица fb_driver, захваченная ДО перепривязки глобального fb
-//на универсальную таблицу слоя. Обёртки fbw_* обязаны звать именно её:
-//вызов через глобальный fb после перепривязки дал бы бесконечную
-//рекурсию (обёртка -> gr_* -> обёртка -> ...).
+//на универсальную таблицу слоя
+//Обёртки fbw_* обязаны звать именно её
 static fb_driver_api_t *fb_native = 0;
 
-static int fbw_get_mode_count(void *priv) { (void)priv; return 1; }
+static int fbw_get_mode_count(void *priv)
+{
+    (void)priv;
+    return 1;
+}
 
 static int fbw_get_mode(void *priv, uint32_t index, gr_mode_info_t *out)
 {
@@ -378,9 +400,9 @@ static int fbw_blit(void *priv, int x, int y, int w, int h, const void *src)
     return (fb_native->blit(x, y, w, h, src) == 0) ? GR_OK : GR_ERR_IO;
 }
 
-/* set_mode/get_pixel/copy_area/pan/blank/vsync/palette сознательно NULL:
- * режим фиксирован загрузчиком, get_pixel и copy_area выполняются
- * программно слоем поверх того же LFB, остальное — честные заглушки. */
+//set_mode/get_pixel/copy_area/pan/blank/vsync/palette сознательно NULL:
+//режим фиксирован загрузчиком, get_pixel и copy_area выполняются
+//программно слоем поверх того же LFB, остальное — честные заглушки
 
 static void fb_compat_setup(void)
 {
@@ -401,15 +423,21 @@ static void fb_compat_setup(void)
     m->bpp = bpp;
     if (bpp == 16)
     {
-        m->red.offset = 11; m->red.length = 5;
-        m->green.offset = 5; m->green.length = 6;
-        m->blue.offset = 0; m->blue.length = 5;
+        m->red.offset = 11;
+        m->red.length = 5;
+        m->green.offset = 5;
+        m->green.length = 6;
+        m->blue.offset = 0;
+        m->blue.length = 5;
     }
     else if (bpp >= 24)
     {
-        m->red.offset = 16; m->red.length = 8;
-        m->green.offset = 8; m->green.length = 8;
-        m->blue.offset = 0; m->blue.length = 8;
+        m->red.offset = 16;
+        m->red.length = 8;
+        m->green.offset = 8;
+        m->green.length = 8;
+        m->blue.offset = 0;
+        m->blue.length = 8;
     }
     m->lfb = boot_info->framebuffer;
     m->pitch = boot_info->pitch;
@@ -441,28 +469,25 @@ static void fb_compat_setup(void)
     fb_compat_driver.ops = &fb_compat_ctx.ops;
     fb_compat_driver.priv = &fb_compat_ctx;
 
-    //Захватываем нативную таблицу fb_driver. Сразу кладём её и в
-    //native_driver_api: это «люк» в специфичные функции конкретного
-    //драйвера, не попавшие в gr_ops_t. Каналом совместимости ядра с
-    //fb_driver он не является — для этого служит универсальная таблица
-    //слоя (см. gr_universal_api).
+    //Захватываем нативную таблицу fb_driver. Сразу кладём её и в native_driver_api:
+    //это люк в специфичные функции конкретного драйвера, не попавшие в gr_ops_t.
+    //Каналом совместимости ядра с fb_driver он не является — для этого служит универсальная таблица
+    //слоя (см. gr_universal_api)
     fb_native = fb;
     fb_compat_driver.native_driver_api = (void *)fb_native;
 }
 
-//==================== универсальный консольный API ====================
-//Текст, тайлы, обои и скролл — это политика консоли, а не работа железа,
-//поэтому они НЕ входят в контракт драйвера (gr_ops_t) и реализуются здесь
+//Универсальный консольный API
+//Текст, тайлы, обои и скролл — это политика консоли, поэтому они реализуются здесь
 //один раз, поверх примитивов слоя (gr_*). Любой драйвер — fb_driver,
-//будущие VESA/Geode — получает их бесплатно, как fbcon поверх fbdev в
-//Linux. Драйвер не должен уметь рисовать символы и хранить обои.
+//будущие VESA/Geode — получает их
 
 //Состояние цветов слоя: единый источник для uni_scroll_up и get_fg/get_bg
 static uint32_t gr_fg_color = 0x00FFFFFF;
 static uint32_t gr_bg_color = 0x00000000;
 
-//Хранилище обоев слоя: полная копия экрана в формате текущего режима.
-//Сменой режимов и валидацией размера ведает сам слой, драйверу знать
+//Хранилище обоев слоя: полная копия экрана в формате текущего режима
+//Сменой режимов и валидацией размера занимается сам слой, драйверу знать
 //об обоях не нужно
 static uint8_t  *gr_wallpaper_raw = 0;
 static uint32_t  gr_wallpaper_size = 0;
@@ -485,22 +510,23 @@ static uint32_t gr_screen_bytes(void)
     return gr_cur_mode.pitch * gr_cur_mode.yres;
 }
 
-//Сброс/пересчет обоев, не соответствующих текущему режиму (после смены
-//режима). Буфер обоев хранится в формате режима на момент установки, поэтому
+//Сброс/пересчет обоев, не соответствующих текущему режиму (после смены режима)
+//Буфер обоев хранится в формате режима на момент установки, поэтому
 //при смене разрешения перепаковываем пиксели в новый формат: читаем пиксель
 //в старом bpp, распаковываем в 0x00RRGGBB по bitfields источника, пакуем
-//в новый bpp и пишем с масштабом nearest-neighbor. Пересчитать нечем
-//(формат источника неизвестен, 8bpp, не хватило памяти) — только тогда
-//обои сбрасываются, чтобы не вернуть на экран чужие пиксели
+//в новый bpp и пишем с масштабом nearest-neighbor
 static void gr_wp_forget_format(void)
 {
     gr_wp_w = 0;
     gr_wp_h = 0;
     gr_wp_bpp = 0;
     gr_wp_pitch = 0;
-    gr_wp_r_len = 0; gr_wp_r_off = 0;
-    gr_wp_g_len = 0; gr_wp_g_off = 0;
-    gr_wp_b_len = 0; gr_wp_b_off = 0;
+    gr_wp_r_len = 0;
+    gr_wp_r_off = 0;
+    gr_wp_g_len = 0;
+    gr_wp_g_off = 0;
+    gr_wp_b_len = 0;
+    gr_wp_b_off = 0;
 }
 
 //распаковка пикселя буфера обоев в 0x00RRGGBB по формату источника
@@ -512,7 +538,7 @@ static uint32_t gr_wp_read_rgb(const uint8_t *row, uint32_t x)
     {
     case 32:
         raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
-            | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+              | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
         break;
     case 24:
         raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
@@ -548,7 +574,7 @@ static void gr_wp_write_px(uint8_t *row, uint32_t x, uint32_t rgb)
     }
 }
 
-//запоминание формата источника обоев — вызывается после установки.
+//запоминание формата источника обоев — вызывается после установки
 //источник обязан совпадать по размеру с текущим экраном: setbg строит
 //буфер из данных SYS_GET_FB_INFO, и те теперь всегда актуальны
 static void gr_wp_capture_format(void)
@@ -562,9 +588,12 @@ static void gr_wp_capture_format(void)
     gr_wp_h = gr_cur_mode.yres;
     gr_wp_bpp = gr_cur_mode.bpp;
     gr_wp_pitch = gr_cur_mode.pitch;
-    gr_wp_r_len = gr_cur_mode.red.length;   gr_wp_r_off = gr_cur_mode.red.offset;
-    gr_wp_g_len = gr_cur_mode.green.length; gr_wp_g_off = gr_cur_mode.green.offset;
-    gr_wp_b_len = gr_cur_mode.blue.length;  gr_wp_b_off = gr_cur_mode.blue.offset;
+    gr_wp_r_len = gr_cur_mode.red.length;
+    gr_wp_r_off = gr_cur_mode.red.offset;
+    gr_wp_g_len = gr_cur_mode.green.length;
+    gr_wp_g_off = gr_cur_mode.green.offset;
+    gr_wp_b_len = gr_cur_mode.blue.length;
+    gr_wp_b_off = gr_cur_mode.blue.offset;
 }
 
 static void gr_wallpaper_validate(void)
@@ -578,8 +607,8 @@ static void gr_wallpaper_validate(void)
     //обои остаются без пересчета только при полном совпадении геометрии
     //и формата с текущим режимом
     if (gr_wallpaper_size == need &&
-        gr_wp_w == gr_cur_mode.xres && gr_wp_h == gr_cur_mode.yres &&
-        gr_wp_bpp == gr_cur_mode.bpp && gr_wp_pitch == gr_cur_mode.pitch)
+            gr_wp_w == gr_cur_mode.xres && gr_wp_h == gr_cur_mode.yres &&
+            gr_wp_bpp == gr_cur_mode.bpp && gr_wp_pitch == gr_cur_mode.pitch)
         return;
 
     bool can_remap = gr_wp_w != 0 && gr_wp_h != 0 &&
@@ -613,7 +642,7 @@ static void gr_wallpaper_validate(void)
     for (uint32_t ny = 0; ny < nh; ny++)
     {
         const uint8_t *srow = gr_wallpaper_raw
-                            + (uint32_t)(ny * gr_wp_h / nh) * gr_wp_pitch;
+                              + (uint32_t)(ny * gr_wp_h / nh) * gr_wp_pitch;
         uint8_t *drow = nbuf + (uint32_t)ny * gr_cur_mode.pitch;
         for (uint32_t nx = 0; nx < nw; nx++)
             gr_wp_write_px(drow, nx, gr_wp_read_rgb(srow, nx * gr_wp_w / nw));
@@ -626,12 +655,15 @@ static void gr_wallpaper_validate(void)
     gr_wp_h = nh;
     gr_wp_bpp = gr_cur_mode.bpp;
     gr_wp_pitch = gr_cur_mode.pitch;
-    gr_wp_r_len = gr_cur_mode.red.length;   gr_wp_r_off = gr_cur_mode.red.offset;
-    gr_wp_g_len = gr_cur_mode.green.length; gr_wp_g_off = gr_cur_mode.green.offset;
-    gr_wp_b_len = gr_cur_mode.blue.length;  gr_wp_b_off = gr_cur_mode.blue.offset;
+    gr_wp_r_len = gr_cur_mode.red.length;
+    gr_wp_r_off = gr_cur_mode.red.offset;
+    gr_wp_g_len = gr_cur_mode.green.length;
+    gr_wp_g_off = gr_cur_mode.green.offset;
+    gr_wp_b_len = gr_cur_mode.blue.length;
+    gr_wp_b_off = gr_cur_mode.blue.offset;
 }
 
-//Декодирует один кодпойнт UTF-8, возвращает число потреблённых байт (>=1).
+//Декодирует один кодпойнт UTF-8, возвращает число потреблённых байт (>=1)
 //Некорректные последовательности читаются как одиночный байт, как в fb_driver
 static uint32_t gr_utf8_decode(const char *s, int *consumed)
 {
@@ -646,14 +678,14 @@ static uint32_t gr_utf8_decode(const char *s, int *consumed)
     else if ((p[0] & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80)
     {
         cp = ((uint32_t)(p[0] & 0x0F) << 12) | ((uint32_t)(p[1] & 0x3F) << 6)
-           | (uint32_t)(p[2] & 0x3F);
+             | (uint32_t)(p[2] & 0x3F);
         n = 3;
     }
     else if ((p[0] & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 &&
              (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80)
     {
         cp = ((uint32_t)(p[0] & 0x07) << 18) | ((uint32_t)(p[1] & 0x3F) << 12)
-           | ((uint32_t)(p[2] & 0x3F) << 6) | (uint32_t)(p[3] & 0x3F);
+             | ((uint32_t)(p[2] & 0x3F) << 6) | (uint32_t)(p[3] & 0x3F);
         n = 4;
     }
     *consumed = n;
@@ -718,14 +750,13 @@ static void uni_draw_hex(uint32_t value, int x, int y)
     }
 }
 
-//«Очистить» с обоями = вернуть обои на весь экран, как в fb_driver.fb_clear
+//Очистить с обоями = вернуть обои на весь экран
 static void uni_clear(uint32_t color)
 {
     if (gr_wallpaper_present && gr_wallpaper_raw &&
-        gr_wallpaper_size >= gr_screen_bytes())
+            gr_wallpaper_size >= gr_screen_bytes())
     {
-        //Построчно: буфер обоев хранится с шагом pitch, а gr_blit ждёт
-        //упакованные строки без padding
+        //Построчно: буфер обоев хранится с шагом pitch, а gr_blit ждёт упакованные строки без padding
         for (uint32_t row = 0; row < gr_cur_mode.yres; row++)
             gr_blit(0, (int)row, (int)gr_cur_mode.xres, 1,
                     gr_wallpaper_raw + row * gr_cur_mode.pitch);
@@ -754,7 +785,7 @@ static int uni_blit(int x, int y, int w, int h, const void *src)
 static void uni_set_wallpaper(const void *src, uint32_t size)
 {
     if (!src || size == 0) return;
-    if (size > (4 * 1024 * 1024)) return;   //тот же лимит, что в fb_driver
+    if (size > (4 * 1024 * 1024)) return;
     if (gr_wallpaper_raw)
     {
         kfree(gr_wallpaper_raw);
@@ -778,15 +809,14 @@ static bool uni_has_wallpaper(void)
     return gr_wallpaper_present;
 }
 
-//Тайл 8x8, как в fb_driver: с обоями возвращаем пиксели обоев,
-//без — заливаем цветом фона консоли
+//Тайл 8x8, как в fb_driver: с обоями возвращаем пиксели обоев, без — заливаем цветом фона консоли
 static void uni_clear_tile(int x, int y, uint32_t fallback_color)
 {
     if (x < 0 || y < 0 ||
-        (uint32_t)x + 8 > gr_cur_mode.xres || (uint32_t)y + 8 > gr_cur_mode.yres)
+            (uint32_t)x + 8 > gr_cur_mode.xres || (uint32_t)y + 8 > gr_cur_mode.yres)
         return;
     if (gr_wallpaper_present && gr_wallpaper_raw &&
-        gr_wallpaper_size >= gr_screen_bytes())
+            gr_wallpaper_size >= gr_screen_bytes())
     {
         for (int row = 0; row < 8; row++)
             gr_blit(x, y + row, 8, 1,
@@ -810,6 +840,7 @@ static void uni_scroll_up(uint32_t start_y, uint32_t end_y, uint32_t line_height
     if (move_h)
         gr_copy_area(0, (int)(start_y + line_height), (int)gr_cur_mode.xres,
                      (int)move_h, 0, (int)start_y);
+    gr_sync_engine();
     gr_fill_rect(0, (int)(end_y - line_height), (int)gr_cur_mode.xres,
                  (int)line_height, gr_bg_color);
 }
@@ -842,18 +873,28 @@ static int uni_scroll_rect(int x, int y, int w, int h, int dy, uint32_t fill)
     return 0;
 }
 
-static void uni_set_fg(uint32_t color) { gr_fg_color = color; }
-static void uni_set_bg(uint32_t color) { gr_bg_color = color; }
-static uint32_t uni_get_fg(void) { return gr_fg_color; }
-static uint32_t uni_get_bg(void) { return gr_bg_color; }
+static void uni_set_fg(uint32_t color)
+{
+    gr_fg_color = color;
+}
+static void uni_set_bg(uint32_t color)
+{
+    gr_bg_color = color;
+}
+static uint32_t uni_get_fg(void)
+{
+    return gr_fg_color;
+}
+static uint32_t uni_get_bg(void)
+{
+    return gr_bg_color;
+}
 
-//Универсальная таблица вида fb_driver_api_t: ЕДИНАЯ точка диспетчеризации
-//всего рисования ядра. После init_graphic_layer() глобальный fb из
-//use_drivers.c указывает сюда: примитивы уходят в gr_* (нативные операции
-//активного драйвера или программные реализации через LFB), текст/тайлы/
-//обои/скролл — в универсальные реализации выше. Когда завтра активируется
-//VESA или Geode, ядро и эта таблица не меняются — под драйвером меняется
-//только gr_active.
+//Универсальная таблица вида fb_driver_api_t: единая точка диспетчеризации
+//всего рисования ядра.
+//После init_graphic_layer() глобальный fb из use_drivers.c указывает сюда:
+//примитивы уходят в gr_* (нативные операции активного драйвера или программные реализации через LFB), текст/тайлы/
+//обои/скролл — в универсальные реализации выше
 static fb_driver_api_t gr_universal_api;
 
 static void gr_universal_api_setup(void)
@@ -893,7 +934,7 @@ static void gr_universal_api_setup(void)
 
 }
 
-//==================== реестр драйверов ====================
+//реестр драйверов
 
 static void gr_inject_runtime(gr_driver_t *drv)
 {
@@ -903,11 +944,11 @@ static void gr_inject_runtime(gr_driver_t *drv)
     if (!drv->vmm_map_pages_ptr)          drv->vmm_map_pages_ptr          = vmm_map_pages;
     if (!drv->vmm_map_pages_uncached_ptr) drv->vmm_map_pages_uncached_ptr = vmm_map_pages_uncached;
     if (!drv->printf_ptr) drv->printf_ptr = kprintf;
-    //Сервис вызова BIOS int 10h через real-mode тримплин: нужен драйверам
-    //со сменой видеорежима на ходу (vesa_fb -> 4F02); остальным не мешает
+    //Сервис вызова BIOS int 10h через real-mode трамплин: нужен драйверам
+    //со сменой видеорежима на ходу (vesa_fb -> 4F02), остальным не мешает
     if (!drv->vbe_rm_exec_ptr) drv->vbe_rm_exec_ptr = vbe_rm_exec;
     //on-screen маяки тримплина: стадии смены режима рисуются в угол
-    //видимого LFB, отладка доступна и без COM-порта (реальные машины).
+    //видимого LFB, отладка доступна и без COM-порта (реальные машины)
     //сразу запрашиваем геометрию у драйвера — до первой смены режима
     //маркеры уже видны на экране
     if (!drv->vbe_rm_screen_trace_ptr)
@@ -968,7 +1009,11 @@ int graphic_layer_unregister_driver(const char *name)
                 for (uint32_t k = 0; k < gr_driver_count; k++)
                     if (!best || gr_registry[k]->priority > best->priority)
                         best = gr_registry[k];
-                if (best) { gr_active = best; gr_cache_current_mode(); }
+                if (best)
+                {
+                    gr_active = best;
+                    gr_cache_current_mode();
+                }
             }
             return GR_OK;
         }
@@ -989,17 +1034,23 @@ int graphic_layer_activate_driver(const char *name)
     return GR_ERR_NOTFOUND;
 }
 
-gr_driver_t *graphic_layer_get_active(void) { return gr_active; }
-uint32_t graphic_layer_get_driver_count(void) { return gr_driver_count; }
+gr_driver_t *graphic_layer_get_active(void)
+{
+    return gr_active;
+}
+uint32_t graphic_layer_get_driver_count(void)
+{
+    return gr_driver_count;
+}
 
-/* ==================== инициализация слоя ==================== */
+//Инициализация слоя
 
 void init_graphic_layer(void)
 {
     if (gr_initialized) return;
     gr_initialized = 1;
 
-    //Внешние драйверы могли зарегистрироваться раньше нас.
+    //Внешние драйверы могли зарегистрироваться раньше
     gr_driver_t *best = 0;
     for (uint32_t i = 0; i < gr_driver_count; i++)
         if (!best || gr_registry[i]->priority > best->priority)
@@ -1015,7 +1066,7 @@ void init_graphic_layer(void)
     {
         //Никакого иного драйвера не загружено — подключаем штатный fb_driver.
         //native_driver_api с нативной таблицей fb_driver выставляется внутри
-        //fb_compat_setup() до перепривязки fb.
+        //fb_compat_setup() до перепривязки fb
         fb_compat_setup();
         graphic_layer_register_driver(&fb_compat_driver);
         if (boot_info)
@@ -1027,15 +1078,15 @@ void init_graphic_layer(void)
     }
 
     //Единая точка диспетчеризации: перенаправляем глобальный fb на
-    //универсальную таблицу слоя. Все вызовы fb->... в ядре с этого
-    //момента идут через слой при любом активном драйвере, проверки
-    //gr_active в вызывающем коде не нужны. Нативная таблица fb_driver
-    //уже захвачена в fb_native и доступна через native_driver_api.
+    //универсальную таблицу слоя
+    //Все вызовы fb->... в ядре с этого момента идут через слой при любом активном драйвере,
+    //проверки gr_active в вызывающем коде не нужны. Нативная таблица fb_driver
+    //уже захвачена в fb_native и доступна через native_driver_api
     gr_universal_api_setup();
     fb = &gr_universal_api;
 }
 
-/* ==================== API режимов ==================== */
+//API режимов
 
 int gr_get_mode_count(void)
 {
@@ -1065,11 +1116,13 @@ int gr_set_mode(uint32_t index)
 {
     if (!gr_active) return GR_ERR_NODEV;
     //трасса смены режима: видно, дошел ли вызов до драйвера и с каким кодом
-    //вышел; тишина после этой строки означает зависание внутри set_mode
+    //вышел, тишина после этой строки означает зависание внутри set_mode
     com_puts("[GR] set_mode idx=");
     com_puthex(index);
+
     if (gr_active->ops && gr_active->ops->set_mode)
     {
+        gr_sync_engine();
         int rc = gr_active->ops->set_mode(gr_active->priv, index);
         com_puts(" rc=");
         com_puthex((uint32_t)rc);
@@ -1102,16 +1155,20 @@ int gr_get_fix_info(gr_fix_info_t *out)
     return GR_OK;
 }
 
-/* ==================== API примитивов ==================== */
+//API примитивов
 
 int gr_put_pixel(int x, int y, uint32_t color)
 {
     if (!gr_active) return GR_ERR_NODEV;
     if (x < 0 || y < 0 ||
-        (uint32_t)x >= gr_cur_mode.xres || (uint32_t)y >= gr_cur_mode.yres)
+            (uint32_t)x >= gr_cur_mode.xres || (uint32_t)y >= gr_cur_mode.yres)
         return GR_ERR_BADARG;
     if (gr_active->ops && gr_active->ops->put_pixel)
         return gr_active->ops->put_pixel(gr_active->priv, x, y, color);
+    //Прямой доступ к LFB: дождаться возможной аппаратной операции
+    //(асинхронный BLT geode может затирать пикселы после того, как
+    //слой их уже записал). Для драйверов без wait_engine_idle — no-op
+    gr_sync_engine();
     return gr_lfb_put_pixel(x, y, color);
 }
 
@@ -1119,8 +1176,9 @@ int gr_get_pixel(int x, int y, uint32_t *out)
 {
     if (!gr_active) return GR_ERR_NODEV;
     if (x < 0 || y < 0 ||
-        (uint32_t)x >= gr_cur_mode.xres || (uint32_t)y >= gr_cur_mode.yres)
+            (uint32_t)x >= gr_cur_mode.xres || (uint32_t)y >= gr_cur_mode.yres)
         return GR_ERR_BADARG;
+    gr_sync_engine();
     if (gr_active->ops && gr_active->ops->get_pixel)
         return gr_active->ops->get_pixel(gr_active->priv, x, y, out);
     return gr_lfb_get_pixel(x, y, out);
@@ -1131,7 +1189,14 @@ int gr_fill_rect(int x, int y, int w, int h, uint32_t color)
     int rc = gr_clip(&x, &y, &w, &h);
     if (rc != GR_OK) return rc;
     if (gr_active->ops && gr_active->ops->fill_rect)
-        return gr_active->ops->fill_rect(gr_active->priv, x, y, w, h, color);
+    {
+        rc = gr_active->ops->fill_rect(gr_active->priv, x, y, w, h, color);
+        if (rc == GR_OK) return rc;
+        //Драйвер отказался (нет движка, pitch не в классе ширины движка,
+        //аргументы) — откат на программную заливку, экран не должен
+        //остаться без прямоугольника
+    }
+    gr_sync_engine();
     return gr_lfb_fill_rect(x, y, w, h, color);
 }
 
@@ -1168,9 +1233,15 @@ int gr_draw_line(int x0, int y0, int x1, int y1, uint32_t color)
 
     //Если драйвер умеет рисовать линии аппаратно — используем его
     if (gr_active->ops && gr_active->ops->draw_line)
-        return gr_active->ops->draw_line(gr_active->priv, x0, y0, x1, y1, color);
+    {
+        int rc = gr_active->ops->draw_line(gr_active->priv, x0, y0, x1, y1, color);
+        if (rc == GR_OK) return rc;
+        //Аппаратная линия не удалась (вне экрана, движок занят чужим pitch) —
+        //дорисовываем программным Брезенхэмом, put_pixel сам синхронизируется
+        //с движком
+    }
 
-    //Брезенхэм; отсечением по экрану не заморачиваемся — put_pixel сам отбросит
+    //Брезенхэм, отсечением по экрану не заморачиваемся — put_pixel сам отбросит
     int dx = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
     int dy = (y1 >= y0) ? (y1 - y0) : (y0 - y1);
     int sx = (x1 >= x0) ? 1 : -1;
@@ -1181,8 +1252,16 @@ int gr_draw_line(int x0, int y0, int x1, int y1, uint32_t color)
         gr_put_pixel(x0, y0, color);
         if (x0 == x1 && y0 == y1) break;
         int e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x0 += sx; }
-        if (e2 <  dx) { err += dx; y0 += sy; }
+        if (e2 > -dy)
+        {
+            err -= dy;
+            x0 += sx;
+        }
+        if (e2 <  dx)
+        {
+            err += dx;
+            y0 += sy;
+        }
     }
     return GR_OK;
 }
@@ -1192,8 +1271,9 @@ int gr_blit(int x, int y, int w, int h, const void *src)
     if (!gr_active) return GR_ERR_NODEV;
     if (w <= 0 || h <= 0) return GR_ERR_BADARG;
     if (x < 0 || y < 0 ||
-        (uint32_t)(x + w) > gr_cur_mode.xres || (uint32_t)(y + h) > gr_cur_mode.yres)
+            (uint32_t)(x + w) > gr_cur_mode.xres || (uint32_t)(y + h) > gr_cur_mode.yres)
         return GR_ERR_BADARG;
+    gr_sync_engine();
     if (gr_active->ops && gr_active->ops->blit)
         return gr_active->ops->blit(gr_active->priv, x, y, w, h, src);
     return gr_lfb_blit(x, y, w, h, src);
@@ -1204,15 +1284,20 @@ int gr_copy_area(int sx, int sy, int w, int h, int dx, int dy)
     if (!gr_active) return GR_ERR_NODEV;
     if (w <= 0 || h <= 0) return GR_ERR_BADARG;
     if (sx < 0 || sy < 0 || dx < 0 || dy < 0 ||
-        (uint32_t)(sx + w) > gr_cur_mode.xres || (uint32_t)(sy + h) > gr_cur_mode.yres ||
-        (uint32_t)(dx + w) > gr_cur_mode.xres || (uint32_t)(dy + h) > gr_cur_mode.yres)
+            (uint32_t)(sx + w) > gr_cur_mode.xres || (uint32_t)(sy + h) > gr_cur_mode.yres ||
+            (uint32_t)(dx + w) > gr_cur_mode.xres || (uint32_t)(dy + h) > gr_cur_mode.yres)
         return GR_ERR_BADARG;
     if (gr_active->ops && gr_active->ops->copy_area)
-        return gr_active->ops->copy_area(gr_active->priv, sx, sy, w, h, dx, dy);
+    {
+        int rc = gr_active->ops->copy_area(gr_active->priv, sx, sy, w, h, dx, dy);
+        if (rc == GR_OK) return rc;
+        //Драйвер отказался — программное копирование
+    }
+    gr_sync_engine();
     return gr_lfb_copy_area(sx, sy, w, h, dx, dy);
 }
 
-/* ==================== управление выводом ==================== */
+//управление выводом
 
 int gr_pan_display(uint32_t yoffset)
 {
@@ -1248,7 +1333,8 @@ int gr_set_palette(uint32_t start, uint32_t count, const uint8_t *rgb)
 
 int gr_wait_engine_idle(void *priv)
 {
+    (void)priv; //движок принадлежит активному драйверу, его priv и передаем
     if (!gr_active) return GR_ERR_NODEV;
     if (!gr_active->ops || !gr_active->ops->wait_engine_idle) return GR_ERR_UNSUPPORTED;
-    return gr_active->ops->wait_engine_idle(priv);
+    return gr_active->ops->wait_engine_idle(gr_active->priv);
 }

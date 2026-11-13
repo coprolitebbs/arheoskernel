@@ -40,5 +40,6 @@ char *strtok_r(char *str, const char *delim, char **saveptr);
 char *strcat(char *dest, const char *src);
 int strcasecmp(const char *s1, const char *s2);
 void trim(char *out, const char *in);
+int streq(const char *a, const char *b);
 
 #endif

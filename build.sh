@@ -240,9 +240,8 @@ $CC $USER_CCFLAGS -c userspace/examples/allocram/allocram.c -o bin/u_allocram.o
 $CC $USER_CCFLAGS_ELF -c userspace/examples/arr_test/arr_test.c -o bin/u_arr_test.o
 #kbd test
 $CC $USER_CCFLAGS_ELF -c userspace/examples/scanf_check/scanf_check.c -o bin/u_scanf_check.o
-#gpu test — тест аппаратного ускорения графики (на Geode — GP)
+#gpu test
 $CC $USER_CCFLAGS_ELF -c userspace/examples/gputest/gputest.c -o bin/u_gputest.o
-
 
 #Утилиты
 #Командный процессор sekhmet
@@ -300,7 +299,7 @@ $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x400
 #Линковка elf-файлов
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_arr_test.o -o bin/arr_test.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_scanf_check.o -o bin/sc_test.elf
-
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_gputest.o bin/u_ugraph_elf.o -o bin/gputest.elf
 
 #$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 \
 #-e _start bin/u_std.o bin/u_memory.o bin/u_lib.o bin/u_uconfig.o bin/u_sekhmet.o \
@@ -317,11 +316,10 @@ $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x400
 $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_lib.o bin/u_memory.o bin/u_uimage.o bin/u_setbg.o -o bin/setbg.bin
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_uconfig_elf.o bin/u_uimage_elf.o bin/u_sekhmet.o -o bin/sekhmet.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_thoth.o bin/u_thoth_platform.o -o bin/thoth.elf
-$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lsusb.o -o bin/lsusb.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_lsusb.o -o bin/lsusb.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lspci.o -o bin/lspci.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_uimage_elf.o bin/u_arfetch.o -o bin/arfetch.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_ugraph_elf.o bin/u_graphinfo.o -o bin/graphinfo.elf
-$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_ugraph_elf.o bin/u_gputest.o -o bin/gputest.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_lib_elf.o bin/u_df.o -o bin/df.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_arcom_ui.o bin/u_arcom_core.o bin/u_arcom_ah.o bin/u_arcom_am.o -o bin/arcom.elf
 
@@ -386,7 +384,6 @@ create_fat_image() {
     mcopy -i "$IMG" bin/df.elf ::/BIN/
     mcopy -i "$IMG" bin/arcom.elf ::/BIN/
     mcopy -i "$IMG" bin/graphinfo.elf ::/BIN/GRINFO.ELF
-    mcopy -i "$IMG" bin/gputest.elf ::/BIN/GPUTEST.ELF
 
     mmd -i "$IMG" ::/CONFIG
     mmd -i "$IMG" ::/CONFIG/BOOT
@@ -478,6 +475,7 @@ e2cp bin/kb_check.bin tmp_ext2.img:/usbin/kb_check.bin
 #e2cp bin/ucat.bin tmp_ext2.img:/usbin/ucat.bin
 e2cp bin/arr_test.elf tmp_ext2.img:/usbin/arr_test.elf
 e2cp bin/sc_test.elf tmp_ext2.img:/usbin/sc_test.elf
+e2cp bin/gputest.elf tmp_ext2.img:/usbin/gputest.elf
 
 e2cp bin/sekhmet.elf tmp_ext2.img:/bin/sekhmet.elf
 e2cp bin/halt.bin tmp_ext2.img:/bin/halt.bin
@@ -498,7 +496,6 @@ e2cp bin/arfetch.elf tmp_ext2.img:/bin/arfetch.elf
 e2cp bin/df.elf tmp_ext2.img:/bin/df.elf
 e2cp bin/arcom.elf tmp_ext2.img:/bin/arcom.elf
 e2cp bin/graphinfo.elf tmp_ext2.img:/bin/grinfo.elf
-e2cp bin/gputest.elf tmp_ext2.img:/bin/gputest.elf
 
 e2mkdir tmp_ext2.img:/config
 e2mkdir tmp_ext2.img:/config/boot
@@ -541,7 +538,7 @@ echo -e "${GREEN}Все образы собраны в output/${NC}"
 # ---- Запуск QEMU с дискетой или hdd ----
 #qemu-system-i386 -drive file=output/fat12_720.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 #qemu-system-i386 -drive file=output/fat12_1440.img,format=raw,if=floppy -vga std -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
-#qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
+qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 
 #USB FLOPPY drive
@@ -572,7 +569,7 @@ echo -e "${GREEN}Все образы собраны в output/${NC}"
 #sudo qemu-system-i386 -device ich9-usb-ehci1,id=ehci -drive id=usbdisk,file=/dev/rdisk4,if=none,format=raw -device usb-bot,bus=ehci.0,id=bot1 -device scsi-hd,bus=bot1.0,drive=usbdisk,bootindex=1 -vga std -m 1536 -display cocoa -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 #qemu EHCI
-qemu-system-i386 -M pc -device usb-ehci,id=ehci -drive id=d1,file=output/usbimage.img,if=none,format=raw -device usb-storage,bus=ehci.0,drive=d1 -vga std -m 1536 -debugcon stdio -global isa-debugcon.iobase=0xe9
+#qemu-system-i386 -M pc -device usb-ehci,id=ehci -drive id=d1,file=output/usbimage.img,if=none,format=raw -device usb-storage,bus=ehci.0,drive=d1 -vga std -m 1536 -debugcon stdio -global isa-debugcon.iobase=0xe9
 
 #file bin/kernel.elf
 #target symbols add bin/kernel.elf

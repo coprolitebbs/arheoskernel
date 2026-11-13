@@ -116,11 +116,10 @@ void systemcall_draw_string(struct regs *r)
     r->eax = 0;
 }
 
-//текущая геометрия экрана из кэша графического слоя. boot_info описывает
-//только режим, выставленный загрузчиком: после смены разрешения на ходу
-//(SYS_GRAPH_INFO SET_MODE) он уже не соответствует действительности, и
-//рисование по его числам уезжает в чужие строки LFB — артефакты,
-//дублирование и триплирование картинки по горизонтали
+//текущая геометрия экрана из кэша графического слоя
+//boot_info описывает только режим, выставленный загрузчиком: после смены разрешения на ходу
+//(SYS_GRAPH_INFO SET_MODE) он уже не соответствует действительности, и рисование по его числам
+//уезжает в чужие строки LFB — артефакты, дублирование и триплирование картинки по горизонтали
 static void gr_sys_screen_dims(uint32_t *w, uint32_t *h)
 {
     gr_mode_info_t m;
@@ -406,11 +405,10 @@ void systemcall_readdir(struct regs *r)
     r->eax = FS_OK;
 }
 
-//================ Канонический редактор строки ядра (cooked STDIN) ================
+//Канонический редактор строки ядра (cooked STDIN)
 //SYS_READ(STDIN) в cooked-режиме сам набирает строку до Enter: печатает эхо,
-//правит её (Backspace/DEL, стрелки, HOME/END), отменяет по Ctrl+C и мигает
-//курсором. Приложение получает готовую UTF-8 строку, завершённую '\n'
-//(пользовательский scanf/u_read этого даже не замечают — они читают байты).
+//правит её (Backspace/DEL, стрелки, HOME/END), отменяет по Ctrl+C и мигает курсором
+//Приложение получает готовую UTF-8 строку, завершённую '\n' (пользовательский scanf/u_read этого даже не замечают — они читают байты).
 
 //Число Unicode-кодпойнтов в первых bytes байтах UTF-8 строки
 static uint32_t cooked_cp_count(const char *buf, uint32_t bytes)
@@ -452,7 +450,7 @@ static int cooked_utf8_encode(uint32_t cp, uint8_t *out)
     return n;
 }
 
-//Начало кодпойнта, ПРЕДШЕСТВУЮЩЕГО байту pos (pos всегда на границе кодпойнтов)
+//Начало кодпойнта, предшествующего байту pos (pos всегда на границе кодпойнтов)
 static uint32_t cooked_prev_cp(const char *buf, uint32_t pos)
 {
     if (pos == 0) return 0;
@@ -461,7 +459,7 @@ static uint32_t cooked_prev_cp(const char *buf, uint32_t pos)
     return i;
 }
 
-//Индекс ЗА кодпойнтом, начинающимся в pos (не дальше len)
+//Индекс за кодпойнтом, начинающимся в pos (не дальше len)
 static uint32_t cooked_next_cp(const char *buf, uint32_t pos, uint32_t len)
 {
     uint32_t i = pos + 1;
@@ -469,9 +467,8 @@ static uint32_t cooked_next_cp(const char *buf, uint32_t pos, uint32_t len)
     return i;
 }
 
-//Первая свободная ячейка за последним символом строки — по фактическому
-//текстовому курсору ядра (он после печати всегда стоит ровно там, включая
-//автоперенос на новую строку и скролл)
+//Первая свободная ячейка за последним символом строки — по фактическому текстовому курсору ядра
+//(он после печати всегда стоит ровно там, включая автоперенос на новую строку и скролл)
 static void cooked_track_end_from_cursor(tty_t *t)
 {
     t->kernel_end_row = (int32_t)(t->cursor_y / t->cell_h);
@@ -479,8 +476,7 @@ static void cooked_track_end_from_cursor(tty_t *t)
 }
 
 //Ячейка экрана для байта pos внутри набираемой строки.
-//Считаем ОТ КОНЦА строки (kernel_end_row/col актуальны после каждого
-//изменения), поэтому переносы и скроллы позицию не сбивают
+//Считаем от конца строки (kernel_end_row/col актуальны после каждого изменения), поэтому переносы и скроллы позицию не сбивают
 static void cooked_calc_cursor_cell(const tty_t *t, uint32_t pos, int32_t *out_row, int32_t *out_col)
 {
     int cols = (int)t->console_cols;
@@ -502,7 +498,7 @@ static void cooked_calc_cursor_cell(const tty_t *t, uint32_t pos, int32_t *out_r
     *out_col = c;
 }
 
-//Служебное: дописать десятичное число в буфер
+//дописать десятичное число в буфер
 static int cooked_emit_uint(char *out, int n, uint32_t v)
 {
     char tmp[8];
@@ -525,7 +521,7 @@ static int cooked_emit_uint(char *out, int n, uint32_t v)
 }
 
 //CUP-последовательность \x1B[row+1;col+1H прямо в STDOUT ядра
-//(координаты 1-based, как требует ANSI; парсер ядра сам клампит за экран)
+//(координаты 1-based, как требует ANSI, парсер ядра сам клампит за экран)
 static void cooked_emit_cup(int32_t row, int32_t col)
 {
     char seq[24];
@@ -545,8 +541,8 @@ static void cooked_emit_cup(int32_t row, int32_t col)
 }
 
 //Перерисовка хвоста строки: CUP к ячейке (row,col), печать line_buffer[from..),
-//фиксация нового конца строки и EL-очистка остатка ряда (вместо пробела —
-//чтобы не уехать за нижнюю границу экрана и не вызвать лишний скролл).
+//фиксация нового конца строки и EL-очистка остатка ряда (вместо пробела — чтобы не уехать за
+//нижнюю границу экрана и не вызвать лишний скролл)
 //При отключенном эхе (TTY_ECHO снят) печать не производится вовсе
 static void cooked_repaint_from(tty_t *t, uint32_t from, int32_t row, int32_t col, bool echo)
 {
@@ -578,7 +574,7 @@ static void cooked_sync_cursor(tty_t *t, uint32_t pos, bool echo)
     if (echo) kconsole_line_cursor_draw_at((uint32_t)col, (uint32_t)row, true);
 }
 
-//Перестановка курсора БЕЗ перерисовки текста (стрелки, HOME/END):
+//Перестановка курсора без перерисовки текста (стрелки, HOME/END):
 //CUP + глиф курсора, ни одна ячейка текста не трогается
 static void cooked_move_cursor(tty_t *t, bool echo)
 {
@@ -595,7 +591,7 @@ static void cooked_move_cursor(tty_t *t, bool echo)
     }
 }
 
-//Отдаёт приложению кусок готовой строки (UTF-8 байты + завершающий '\n').
+//Отдаёт приложению кусок готовой строки (UTF-8 байты + завершающий '\n')
 //Возвращает число отданных байт или -1, если строка ещё не готова
 static int cooked_deliver_line(tty_t *t, uint8_t *user_buf, uint32_t count)
 {
@@ -679,7 +675,7 @@ void systemcall_file_read(struct regs *r)
             }
             return;
         }
-        //=== COOKED: канонический редактор строки ядра ===
+        //COOKED: канонический редактор строки ядра
         tty_t *tty = current_tty;
         if (!tty)
         {
@@ -707,11 +703,8 @@ void systemcall_file_read(struct regs *r)
             tty->line_sent_bytes    = 0;
             tty->kernel_ctrl_down   = false;
             tty->kernel_e0_prefix   = false;
-            //Конец строки сейчас = сам якорь. Без этой синхронизации позиция
-            //курсора считается от устаревшего kernel_end (при первом чтении это
-            //0,0, при повторном — конец ПРЕДЫДУЩЕЙ строки), и курсор рисуется
-            //не там, где закончился вывод. После первого же нажатия он "отлетал"
-            //к правильному месту — теперь стоит там с самого начала
+            //Конец строки сейчас = сам якорь. Без этой синхронизации позиция курсора считается от
+            //устаревшего kernel_end (при первом чтении это 0,0, при повторном — конец предыдущей строки)
             cooked_track_end_from_cursor(tty);
             //Мигание и глиф — только при включенном эхе (ввод без эха — невидимый)
             tty->kernel_line_active = echo;
@@ -769,7 +762,7 @@ void systemcall_file_read(struct regs *r)
             uint32_t pos = tty->line_cursor_pos;
             uint32_t len = tty->copied_bytes;
 
-            //--- Enter: строка готова ---
+            //Enter: строка готова
             if (sc == 0x1C)
             {
                 if (echo) kernel_stdout_write_codepoint('\n', console_fgcolor);
@@ -781,7 +774,7 @@ void systemcall_file_read(struct regs *r)
                 break;
             }
 
-            //--- Расширенные клавиши: стрелки, HOME/END, DEL ---
+            //Расширенные клавиши: стрелки, HOME/END, DEL
             if (e0)
             {
                 if (sc == 0x4B) //стрелка влево — на кодпойнт влево
@@ -826,7 +819,7 @@ void systemcall_file_read(struct regs *r)
                     {
                         uint32_t nxt = cooked_next_cp(tty->line_buffer, pos, len);
                         int32_t row, col;
-                        //Ячейку pos считаем ДО модификации (конец строки ещё старый)
+                        //Ячейку pos считаем до модификации (конец строки ещё старый)
                         cooked_calc_cursor_cell(tty, pos, &row, &col);
                         for (uint32_t i = nxt; i <= len; i++)
                         {
@@ -845,14 +838,14 @@ void systemcall_file_read(struct regs *r)
             uint32_t cp = kbd_translate_event(packed);
             if (cp == 0) continue;
 
-            //--- Backspace: удалить кодпойнт ПЕРЕД курсором ---
+            //Backspace: удалить кодпойнт перед курсором
             if (sc == 0x0E || cp == '\b')
             {
                 if (pos > 0)
                 {
                     uint32_t prev = cooked_prev_cp(tty->line_buffer, pos);
                     int32_t row, col;
-                    //Ячейку prev считаем ДО модификации (конец строки ещё старый)
+                    //Ячейку prev считаем до модификации (конец строки ещё старый)
                     cooked_calc_cursor_cell(tty, prev, &row, &col);
                     for (uint32_t i = pos; i <= len; i++)
                     {
@@ -866,7 +859,7 @@ void systemcall_file_read(struct regs *r)
                 continue;
             }
 
-            //--- Печатные символы: вставка кодпойнта в позицию курсора ---
+            //Печатные символы: вставка кодпойнта в позицию курсора
             if (cp >= 0x20 && cp != 0x7F)
             {
                 uint8_t utf8[4];
@@ -877,7 +870,7 @@ void systemcall_file_read(struct regs *r)
                     {
                         //Вставка в середину: сдвиг хвоста вправо и перерисовка
                         int32_t row, col;
-                        //Ячейку pos считаем ДО модификации
+                        //Ячейку pos считаем до модификации
                         cooked_calc_cursor_cell(tty, pos, &row, &col);
                         for (int32_t i = (int32_t)len; i >= (int32_t)pos; i--)
                         {
@@ -903,10 +896,8 @@ void systemcall_file_read(struct regs *r)
                         tty->line_cursor_pos = len + (uint32_t)step;
                         if (echo)
                         {
-                            //Текстовый курсор ядра мог остаться где угодно
-                            //(после вставки в середину строки или стрелок) —
-                            //сначала ставим его в первую свободную ячейку за
-                            //строкой и только затем печатаем символ. Иначе
+                            //Текстовый курсор ядра мог остаться где угодно (после вставки в середину строки или стрелок) —
+                            //сначала ставим его в первую свободную ячейку за строкой и только затем печатаем символ. Иначе
                             //символ ложится поверх середины строки
                             cooked_emit_cup(tty->kernel_end_row, tty->kernel_end_col);
                             kernel_stdout_write_codepoint(cp, console_fgcolor);
@@ -995,8 +986,7 @@ void systemcall_file_write(struct regs *r)
         return;
     }
 
-    //Копируем данные через нативный memcpy,
-    //это гарантирует корректный маршалинг страниц Ring 3 текущего процесса
+    //Копируем данные через нативный memcpy, это гарантирует корректный маршалинг страниц Ring 3 текущего процесса
     memcpy(kernel_buf_wr, user_src, count_wr);
     kernel_buf_wr[count_wr] = '\0';
 
@@ -1228,8 +1218,7 @@ void systemcall_spawn_process(struct regs *r)
     //   молча запишет в чужую память
     //2) spawn — самый глубокий syscall, вложенный IRQ0+schedule()+cleanup_tasks()
     //   на том же kernel stack лишний раз съедают его запас
-    //Приоритет сохраняем: если спавн запущен из контекста, где блокировка уже
-    //была выставлена, наружу выйдет с тем же значением.
+    //Если спавн запущен из контекста, где блокировка уже была выставлена, наружу выйдет с тем же значением.
     uint8_t saved_sched_lock = kernel_schedule_lock;
     kernel_schedule_lock = 1;
 
@@ -1301,7 +1290,7 @@ void systemcall_spawn_process(struct regs *r)
 
     if (do_out_redirect && out_redirect_file[0] != '\0')
     {
-        // Резолвим относительный путь к абсолютному на базе CWD текущего процесса
+        //Резолвим относительный путь к абсолютному на базе CWD текущего процесса
         char *abs_redirect = (char *)kmalloc(VFS_PATH_MAX);
 
         if (abs_redirect)
@@ -1363,8 +1352,7 @@ void systemcall_wait_process_with_pid(struct regs *r)
             t = t->next;
         }
         while (t != start);
-        //Если процесс найден в кольце и он еще выполняет свой код,
-        //возвращаем статус PROCESS_IS_ACTIVE
+        //Если процесс найден в кольце и он еще выполняет свой код, возвращаем статус PROCESS_IS_ACTIVE
         if (found && t->state != TASK_TERMINATED)
         {
             r->eax = PROCESS_IS_ACTIVE;
@@ -1517,7 +1505,7 @@ void systemcall_sbrk(struct regs *r)
             {
                 vmm_unmap_page(current_task->page_dir, virt);
                 pmm_free_page((void*)(phys & 0xFFFFF000));
-                vm_page_remove(current_task, virt);   // ← теперь освобождает
+                vm_page_remove(current_task, virt);
             }
         }
     }
@@ -1534,7 +1522,7 @@ void systemcall_sbrk(struct regs *r)
     }
 }
 
-// ebx = const char *path
+//ebx = const char *path
 void systemcall_chdir(struct regs *r)
 {
     const char *user_path = (const char *)r->ebx;
@@ -1560,7 +1548,7 @@ void systemcall_chdir(struct regs *r)
     }
     vfs_resolve_relative_path(kernel_path, absolute_path);
     kfree(kernel_path);
-    //Проверяем, что путь существует и является каталогом — БЕЗ открытия fd
+    //Проверяем, что путь существует и является каталогом — без открытия fd
     fs_stat_t st;
     memset(&st, 0, sizeof(st));
     int st_res = vfs_stat(absolute_path, &st);
@@ -1663,7 +1651,7 @@ void systemcall_system_halt(struct regs *r)
         r->eax = shutdown_res;
         return;
     }
-    // Теперь имеем полное право намертво заблокировать планировщик
+    //Теперь имеем полное право намертво заблокировать планировщик
     kernel_halt_all();
     for(;;);
 }
@@ -1703,7 +1691,7 @@ void systemcall_dup2(struct regs *r)
             {
                 if (i != newfd && current_task->fds[i] == global_new_fd) refs++;
             }
-            // Закрываем только если это последняя ссылка
+            //Закрываем только если это последняя ссылка
             if (refs == 0) vfs_close(global_new_fd);
         }
     }
@@ -1733,7 +1721,7 @@ void systemcall_tty_get_flags(struct regs *r)
 
 void systemcall_tty_set_flags(struct regs *r)
 {
-    // ebx = new_flags, ecx = mask (0 = писать все биты)
+    //ebx = new_flags, ecx = mask (0 = писать все биты)
     uint32_t new_flags = r->ebx;
     uint32_t mask      = r->ecx;
     if (mask == 0) mask = 0xFFFFFFFF;
@@ -1869,9 +1857,8 @@ void systemcall_scroll_rect(struct regs *r)
         r->eax = -1;
         return;
     }
-    //границы берем из активного режима слоя, а не из bootinfo: после
-    //смены разрешения bootinfo описывает несуществующий режим и валидные
-    //скроллы отбрасывались бы как "выходящие за экран"
+    //границы берем из активного режима слоя, а не из bootinfo:
+    //после смены разрешения bootinfo описывает несуществующий режим и валидные скроллы отбрасывались бы как "выходящие за экран"
     uint32_t scr_w = 0, scr_h = 0;
     gr_sys_screen_dims(&scr_w, &scr_h);
     if (x + w > (int32_t)scr_w)
@@ -1900,8 +1887,7 @@ void systemcall_scroll_rect(struct regs *r)
 //   ecx = y
 //   edx = w
 //   esi = h
-//   edi = const void *src  (буфер в пространстве пользователя,
-//пиксели в формате текущего bpp, row-pitch = w * bytes_pp)
+//   edi = const void *src  (буфер в пространстве пользователя, пиксели в формате текущего bpp, row-pitch = w * bytes_pp)
 void systemcall_fb_blit(struct regs *r)
 {
     if (!fb || !fb->blit)
@@ -1946,52 +1932,6 @@ void systemcall_fb_blit(struct regs *r)
         return;
     }
     r->eax = fb->blit(x, y, w, h, src);
-}
-
-
-//SYS_GR_PRIM: примитивы графического слоя из Ring-3 — заливка, линия
-//(диагонали на Geode идут аппаратным векторным движком GP), копирование
-//области внутри экрана (GP BLT) и блит RAM->FB. Примитивы сознательно
-//идут через gr_* активного драйвера, а не через fb-драйвер: после смены
-//разрешения fb-драйвер держит геометрию bootinfo, а слой — фактическую.
-//gr_* сами возвращают GR_ERR_NODEV (-2), если активного драйвера нет.
-//eax = SYS_GR_PRIM, ebx = op (GR_PRIM_*), ecx = указатель задачи на
-//int32[6] с параметрами (раскладка в userspace/include/syscall.h)
-void systemcall_gr_prim(struct regs *r)
-{
-    //параметры читаются из памяти задачи: указатель обязан быть из
-    //пространства Ring-3 (та же защита, что в fb_blit/draw_string)
-    if ((uint32_t)r->ecx < 0x40000000)
-    {
-        r->eax = -1;
-        return;
-    }
-    const volatile int32_t *p = (const volatile int32_t *)r->ecx;
-    int32_t a0 = p[0], a1 = p[1], a2 = p[2], a3 = p[3], a4 = p[4], a5 = p[5];
-
-    switch (r->ebx)
-    {
-    case GR_PRIM_FILL_RECT:      //x, y, w, h, color
-        r->eax = gr_fill_rect(a0, a1, a2, a3, (uint32_t)a4);
-        break;
-    case GR_PRIM_DRAW_LINE:      //x0, y0, x1, y1, color
-        r->eax = gr_draw_line(a0, a1, a2, a3, (uint32_t)a4);
-        break;
-    case GR_PRIM_COPY_AREA:      //sx, sy, w, h, dx, dy
-        r->eax = gr_copy_area(a0, a1, a2, a3, a4, a5);
-        break;
-    case GR_PRIM_BLIT:           //x, y, w, h, указатель на буфер пикселей
-        if ((uint32_t)a4 < 0x40000000)
-        {
-            r->eax = -1;
-            return;
-        }
-        r->eax = gr_blit(a0, a1, a2, a3, (const void *)(uintptr_t)a4);
-        break;
-    default:
-        r->eax = -1;
-        break;
-    }
 }
 
 
@@ -2071,13 +2011,13 @@ void systemcall_usb_get_dev(struct regs *r)
 }
 
 
-// ---- USB ручной hotplug ----
-//   SYS_USB_RESCAN (lsusb -update): драйвер пересматривает порты активных
-//   контроллеров (добавляет вставленное, снимает вынутое вместе с его
-//   block-регистрацией), после чего ядро переложит devices[] в реестр
-//   -> eax = число устройств после обновления или отрицательный код
-//   Вызов долгий (порт-reset, перечисление, SCSI-инициализация — секунды):
-//   драйвер сам держит schedule_lock, как долгая дисковая операция
+//USB ручной hotplug
+//SYS_USB_RESCAN (lsusb -update): драйвер пересматривает порты активных контроллеров
+//(добавляет вставленное, снимает вынутое вместе с его block-регистрацией),
+//после чего ядро переложит devices[] в реестр
+//-> eax = число устройств после обновления или отрицательный код
+//Вызов долгий (порт-reset, перечисление, SCSI-инициализация — секунды):
+//драйвер сам держит schedule_lock, как долгая дисковая операция
 void systemcall_usb_rescan(struct regs *r)
 {
     if (!usb_driver_api || !usb_driver_api->usb_update)
@@ -2102,13 +2042,12 @@ void systemcall_usb_rescan(struct regs *r)
 }
 
 
-// ---- PCI ----
-//   SYS_PCI_COUNT: eax = число устройств (при первом вызове ядро сканирует шины)
-//   SYS_PCI_GET_DEV: ebx = idx, ecx = u_pci_dev_t*; -> 0/-1
-//   SYS_PCI_READ_CFG: ebx = PCI_BDF(bus,dev,func), ecx = offset (0..255);
-//                     -> eax = dword из конфиг-пространства или -1.
-//                     Читаются только устройства из реестра — userspace не может
-//                     тыкать произвольные конфиг-циклы в живую шину
+//PCI
+//SYS_PCI_COUNT: eax = число устройств (при первом вызове ядро сканирует шины)
+//SYS_PCI_GET_DEV: ebx = idx, ecx = u_pci_dev_t*; -> 0/-1
+//SYS_PCI_READ_CFG: ebx = PCI_BDF(bus,dev,func), ecx = offset (0..255);
+//-> eax = dword из конфиг-пространства или -1
+//Читаются только устройства из реестра — userspace не может тыкать произвольные конфиг-циклы в живую шину
 
 void systemcall_pci_count(struct regs *r){
     r->eax = (uint32_t)pci_scan_all();
@@ -2179,8 +2118,8 @@ void systemcall_tty_line_edit(struct regs *r)
     }
     else if (r->ebx == 1)
     {
-        //Сначала стираем глиф со СТАРОЙ ячейки (иначе при сдвиге курсора
-        //влево/HOME/END в старой ячейке остается блочный след),
+        //Сначала стираем глиф со старой ячейки (иначе при сдвиге курсора влево/HOME/END
+        //в старой ячейке остается блочный след),
         //затем обновляем якорь/смещение и рисуем курсор на новом месте
         kconsole_line_cursor_hide();
         current_tty->line_anchor_x = (r->ecx & 0xFFFFu) * current_tty->cell_w;
@@ -2310,10 +2249,8 @@ void systemcall_graph_info(struct regs *r)
 
     uint32_t user_ptr = (op == GRAPH_INFO_MODE) ? r->edx : r->ecx;
 
-    //Указатель Ring 3 обязан лежать в пользовательском диапазоне VA
-    //(процессы с 0x40000000, ядро с 0xC0000000). SET_MODE указателя не
-    //передает: в ecx лежит индекс целевого режима, проверка диапазона
-    //к нему не применяется
+    //Указатель Ring 3 обязан лежать в пользовательском диапазоне VA (процессы с 0x40000000, ядро с 0xC0000000)
+    //SET_MODE указателя не передает: в ecx лежит индекс целевого режима, проверка диапазона к нему не применяется
     if (op != GRAPH_INFO_SET_MODE &&
         (user_ptr < 0x40000000 || user_ptr >= 0xC0000000))
     {
@@ -2389,24 +2326,23 @@ void systemcall_graph_info(struct regs *r)
             break;
         }
 
-        //Смена режима активного драйвера на ходу: ecx = индекс режима
-        //(0 .. mode_count-1). Указателя нет — операция только переключает
-        //режим. Возврат не -1, а сам отрицательный код GR_ERR_*: Ring 3
-        //может отличить "нет такого режима" (-9) от "драйвер не умеет
-        //менять режим" (-3, fbdrv-fallback) и "ошибка ввода-вывода" (-7)
+        //Смена режима активного драйвера на ходу: ecx = индекс режима (0 .. mode_count-1)
+        // Указателя нет — операция только переключает режим
+        //Возврат не -1, а сам отрицательный код GR_ERR_*: Ring 3
+        //может отличить "нет такого режима" (-9) от "драйвер не умеет менять режим"
+        //(-3, fbdrv-fallback) и "ошибка ввода-вывода" (-7)
         case GRAPH_INFO_SET_MODE:
         {
             //трасса: syscall дошел до ядра с нужным индексом
             com_puts("[GINFO] set_mode idx=");
             com_puthex(r->ecx);
             com_puts("\n");
-            //смена режима — атомарная секция ядра: таймер не должен
-            //вытеснять контекст задачи посреди gr_set_mode. внутри нее
-            //ядро меняет глобальное состояние графического слоя, а
-            //тримплин real mode (vbe_rm_exec) уходит в BIOS int 10h;
-            //прилетевший посреди этого IRQ0 с schedule() переключает
-            //CR3/esp, и контекст продолжения смены режима становится
-            //мусором. держим блокировку до конца redraw консолей
+            //смена режима — атомарная секция ядра: таймер не должен вытеснять контекст задачи
+            //посреди gr_set_mode
+            //Внутри нее ядро меняет глобальное состояние графического слоя, а трамплин real mode
+            //(vbe_rm_exec) уходит в BIOS int 10h.
+            //прилетевший посреди этого IRQ0 с schedule() переключает CR3/esp, и контекст продолжения
+            //смены режима становится мусором. держим блокировку до конца redraw консолей
             uint8_t saved_sched_lock = kernel_schedule_lock;
             kernel_schedule_lock = 1;
 
@@ -2418,8 +2354,7 @@ void systemcall_graph_info(struct regs *r)
                 r->eax = (uint32_t)rc;
                 return;
             }
-            //геометрия консолей привязана к разрешению: пересчитываем окна
-            //TTY под новый режим и очищаем экран
+            //геометрия консолей привязана к разрешению: пересчитываем окна TTY под новый режим и очищаем экран
             kconsole_mode_changed();
             kernel_schedule_lock = saved_sched_lock;
             r->eax = 0;
@@ -2431,6 +2366,51 @@ void systemcall_graph_info(struct regs *r)
             break;
     }
 }
+
+
+
+//SYS_GR_PRIM: примитивы графического слоя из Ring-3 — заливка, линия (диагонали на Geode идут аппаратным векторным движком GP),
+//копирование области внутри экрана (GP BLT) и блит RAM->FB.
+//Примитивы сознательно идут через gr_* активного драйвера, а не через fb-драйвер: после смены
+//разрешения fb-драйвер держит геометрию bootinfo, а слой — фактическую.
+//gr_* сами возвращают GR_ERR_NODEV (-2), если активного драйвера нет.
+//eax = SYS_GR_PRIM, ebx = op (GR_PRIM_*), ecx = указатель задачи на int32[6] с параметрами (раскладка в userspace/include/syscall.h)
+void systemcall_gr_prim(struct regs *r)
+{
+    //параметры читаются из памяти задачи: указатель обязан быть из пространства Ring-3 (та же защита, что в fb_blit/draw_string)
+    if ((uint32_t)r->ecx < 0x40000000)
+    {
+        r->eax = -1;
+        return;
+    }
+    const volatile int32_t *p = (const volatile int32_t *)r->ecx;
+    int32_t a0 = p[0], a1 = p[1], a2 = p[2], a3 = p[3], a4 = p[4], a5 = p[5];
+
+    switch (r->ebx)
+    {
+    case GR_PRIM_FILL_RECT:      //x, y, w, h, color
+        r->eax = gr_fill_rect(a0, a1, a2, a3, (uint32_t)a4);
+        break;
+    case GR_PRIM_DRAW_LINE:      //x0, y0, x1, y1, color
+        r->eax = gr_draw_line(a0, a1, a2, a3, (uint32_t)a4);
+        break;
+    case GR_PRIM_COPY_AREA:      //sx, sy, w, h, dx, dy
+        r->eax = gr_copy_area(a0, a1, a2, a3, a4, a5);
+        break;
+    case GR_PRIM_BLIT:           //x, y, w, h, указатель на буфер пикселей
+        if ((uint32_t)a4 < 0x40000000)
+        {
+            r->eax = -1;
+            return;
+        }
+        r->eax = gr_blit(a0, a1, a2, a3, (const void *)(uintptr_t)a4);
+        break;
+    default:
+        r->eax = -1;
+        break;
+    }
+}
+
 
 
 void syscalls_table_init(void)
@@ -2487,8 +2467,8 @@ void syscalls_table_init(void)
     syscalls_table[SYS_GET_MOUNT_COUNT].func = &systemcall_get_mount_count;
     syscalls_table[SYS_GET_MOUNT_INFO].func = &systemcall_get_mount_info;
     syscalls_table[SYS_GRAPH_INFO].func = &systemcall_graph_info;
-    syscalls_table[SYS_GR_PRIM].func = &systemcall_gr_prim;
     syscalls_table[SYS_PCI_COUNT].func = &systemcall_pci_count;
     syscalls_table[SYS_PCI_GET_DEV].func = &systemcall_pci_get_dev;
     syscalls_table[SYS_PCI_READ_CFG].func = &systemcall_pci_read_cfg;
+    syscalls_table[SYS_GR_PRIM].func = &systemcall_gr_prim;
 }

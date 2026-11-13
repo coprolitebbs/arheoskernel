@@ -175,13 +175,20 @@ static const char *gr_err_text(int rc)
 {
     switch (rc)
     {
-    case -1: return "generic error";
-    case -2: return "no active graphics driver";
-    case -3: return "driver cannot change mode";
-    case -4: return "bad argument";
-    case -7: return "io error during modeset";
-    case -9: return "no such mode index";
-    default: return "unknown error";
+    case -1:
+        return "generic error";
+    case -2:
+        return "no active graphics driver";
+    case -3:
+        return "driver cannot change mode";
+    case -4:
+        return "bad argument";
+    case -7:
+        return "io error during modeset";
+    case -9:
+        return "no such mode index";
+    default:
+        return "unknown error";
     }
 }
 
@@ -196,7 +203,7 @@ static void print_usage(void)
 
 //обработка "graphinfo -set СПЕЦ": смена режима активного драйвера.
 //СПЕЦ — десятичный индекс режима или строка геометрии.
-//возвращает 0 при успехе, 1 при ошибке (сообщение уже выведено)
+//Возвращает 0 при успехе, 1 при ошибке (сообщение уже выведено)
 static int cmd_set_mode(const char *spec)
 {
     u_gr_driver_info_t drv;

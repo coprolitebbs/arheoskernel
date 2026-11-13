@@ -38,9 +38,8 @@
 #define KERNEL_STACK_PAGES 4
 
 //User stack: единая точка правды для create_user_stack() и лимитов кучи Ring 3
-//(systemcall_alloc_page / systemcall_sbrk / systemcall_free_page). Раньше лимиты
-//были захардкожены 0x7FFF0000/0x7FFFF000 под 16 страниц стека; при 64 страницах
-//куча могла налезть на нижние страницы стека.
+//(systemcall_alloc_page / systemcall_sbrk / systemcall_free_page).
+
 #define USER_STACK_VA_TOP    0x80000000u
 #define USER_STACK_PAGES     64u
 #define USER_STACK_VA_FLOOR  (USER_STACK_VA_TOP - USER_STACK_PAGES * PAGE_SIZE)

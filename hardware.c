@@ -48,21 +48,25 @@ static uint8_t g_bus_scanned[32];
 
 
 //Проверка сигнатуры и контрольной суммы RSDP
-static unsigned int *acpiCheckRSDPtr(unsigned int *ptr) {
+static unsigned int *acpiCheckRSDPtr(unsigned int *ptr)
+{
     char *sig = "RSD PTR ";
     struct RSDPtr *rsdp = (struct RSDPtr *)ptr;
     uint8_t *bptr;
     uint8_t check = 0;
     int i;
 
-    if (memcmp(sig, rsdp, 8) == 0) {
+    if (memcmp(sig, rsdp, 8) == 0)
+    {
         // Проверка контрольной суммы первых 20 байт
         bptr = (uint8_t *)ptr;
-        for (i = 0; i < (int)sizeof(struct RSDPtr); i++) {
+        for (i = 0; i < (int)sizeof(struct RSDPtr); i++)
+        {
             check += *bptr;
             bptr++;
         }
-        if (check == 0) {
+        if (check == 0)
+        {
             return (unsigned int *)rsdp->RsdtAddress;
         }
     }
@@ -70,7 +74,8 @@ static unsigned int *acpiCheckRSDPtr(unsigned int *ptr) {
 }
 
 //Поиск RSDP: сначала в области EBDA, потом в 0xE0000–0xFFFFF
-static unsigned int *acpiGetRSDPtr(void) {
+static unsigned int *acpiGetRSDPtr(void)
+{
     unsigned int *addr;
     unsigned int *rsdp;
 
@@ -80,16 +85,18 @@ static unsigned int *acpiGetRSDPtr(void) {
     if (ebda < 0x400 || ebda > 0xA0000) ebda = 0x9FC00; //fallback
 
     for (addr = (unsigned int *)ebda;
-         (uint32_t)addr < ebda + 1024;
-         addr += 0x10 / sizeof(addr)) {
+            (uint32_t)addr < ebda + 1024;
+            addr += 0x10 / sizeof(addr))
+    {
         rsdp = acpiCheckRSDPtr(addr);
         if (rsdp) return rsdp;
     }
 
     //2) Область BIOS ROM 0xE0000–0xFFFFF
     for (addr = (unsigned int *)0x000E0000;
-         (uint32_t)addr < 0x00100000;
-         addr += 0x10 / sizeof(addr)) {
+            (uint32_t)addr < 0x00100000;
+            addr += 0x10 / sizeof(addr))
+    {
         rsdp = acpiCheckRSDPtr(addr);
         if (rsdp) return rsdp;
     }
@@ -98,12 +105,15 @@ static unsigned int *acpiGetRSDPtr(void) {
 }
 
 //Проверка заголовка таблицы ACPI (сигнатура + контрольная сумма)
-static int acpiCheckHeader(unsigned int *ptr, char *sig) {
-    if (memcmp(ptr, sig, 4) == 0) {
+static int acpiCheckHeader(unsigned int *ptr, char *sig)
+{
+    if (memcmp(ptr, sig, 4) == 0)
+    {
         char *checkPtr = (char *)ptr;
         int len = *(ptr + 1);  //Length
         char check = 0;
-        while (0 < len--) {
+        while (0 < len--)
+        {
             check += *checkPtr;
             checkPtr++;
         }
@@ -113,14 +123,18 @@ static int acpiCheckHeader(unsigned int *ptr, char *sig) {
 }
 
 //Включение ACPI (если BIOS этого не сделал)
-static int acpiEnable(void) {
+static int acpiEnable(void)
+{
     //Проверяем SCI_EN (бит 0 в PM1a_CNT)
-    if ((inw((uint32_t)(uintptr_t)PM1a_CNT) & SCI_EN) == 0) {
-        if (SMI_CMD != 0 && ACPI_ENABLE != 0) {
+    if ((inw((uint32_t)(uintptr_t)PM1a_CNT) & SCI_EN) == 0)
+    {
+        if (SMI_CMD != 0 && ACPI_ENABLE != 0)
+        {
             outb((uint32_t)SMI_CMD, ACPI_ENABLE);
 
             //Ждём до 3 секунд, пока SCI_EN не станет 1
-            for (int i = 0; i < 300; i++) {
+            for (int i = 0; i < 300; i++)
+            {
                 if ((inw((uint32_t)(uintptr_t)PM1a_CNT) & SCI_EN) == 1) break;
                 for (volatile int j = 0; j < 100000; j++);
             }
@@ -236,7 +250,8 @@ void find_and_prepare_s3_trio64(void)
 }
 
 //Вызывается один раз при инициализации ядра (после vmm_init, до включения задач)
-void acpi_init(void) {
+void acpi_init(void)
+{
     unsigned int *rsdp = acpiGetRSDPtr();
     if (!rsdp) return;                       //ACPI недоступен
 
@@ -249,8 +264,10 @@ void acpi_init(void) {
 
     struct FACP *facp = 0;
 
-    while (entries-- > 0) {
-        if (acpiCheckHeader((unsigned int *)*entry_ptr, "FACP") == 0) {
+    while (entries-- > 0)
+    {
+        if (acpiCheckHeader((unsigned int *)*entry_ptr, "FACP") == 0)
+        {
             facp = (struct FACP *)*entry_ptr;
             break;
         }
@@ -263,9 +280,10 @@ void acpi_init(void) {
 
     //Поиск \_S5 в DSDT (AML-сканер)
     char *S5Addr = (char *)facp->DSDT + 36;       //пропускаем заголовок DSDT
-    int dsdtLength = ((uint32_t *)facp->DSDT)[1] - 36;   // Length DSDT (поле Length в заголовке) минус 36
+    int dsdtLength = ((uint32_t *)facp->DSDT)[1] - 36;   //Length DSDT (поле Length в заголовке) минус 36
 
-    while (dsdtLength-- > 0) {
+    while (dsdtLength-- > 0)
+    {
         if (memcmp(S5Addr, "_S5_", 4) == 0) break;
         S5Addr++;
     }
@@ -274,8 +292,9 @@ void acpi_init(void) {
 
     //Проверяем, что это действительно Name(\_S5, Package(...))
     if ((*(S5Addr - 1) == 0x08 ||
-        (*(S5Addr - 2) == 0x08 && *(S5Addr - 1) == '\\')) &&
-        *(S5Addr + 4) == 0x12) {
+            (*(S5Addr - 2) == 0x08 && *(S5Addr - 1) == '\\')) &&
+            *(S5Addr + 4) == 0x12)
+    {
 
         S5Addr += 5;
         S5Addr += ((*S5Addr & 0xC0) >> 6) + 2; //PkgLength size
@@ -296,7 +315,8 @@ void acpi_init(void) {
 }
 
 
-void acpi_poweroff(void) {
+void acpi_poweroff(void)
+{
     if (!acpi_ready) return;
 
     acpiEnable();  //если BIOS не включил ACPI
@@ -305,7 +325,8 @@ void acpi_poweroff(void) {
     outw((uint32_t)(uintptr_t)PM1a_CNT, SLP_TYPa | SLP_EN);
 
     //Если есть PM1b_CNT — повторяем для него
-    if (PM1b_CNT != 0) {
+    if (PM1b_CNT != 0)
+    {
         outw((uint32_t)(uintptr_t)PM1b_CNT, SLP_TYPb | SLP_EN);
     }
 }
@@ -314,10 +335,11 @@ void acpi_poweroff(void) {
 //PCI-подсистема ядра: доступ к конфигурационному пространству (механизм #1),
 //сканирование шин (включая PCI-to-PCI мосты) и реестр устройств для userspace
 
-//--------------- Доступ к конфигурационному пространству ---------------
+//Доступ к конфигурационному пространству
 
 //Чтение выровненного dword. offset маскируется по границе dword
-uint32_t pci_cfg_read_dword(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset){
+uint32_t pci_cfg_read_dword(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset)
+{
     uint32_t address = 0x80000000u |
                        (bus    << 16) |
                        (dev    << 11) |
@@ -327,7 +349,8 @@ uint32_t pci_cfg_read_dword(uint32_t bus, uint32_t dev, uint32_t func, uint8_t o
     return inl(PCI_CONFIG_DATA_PORT);
 }
 
-void pci_cfg_write_dword(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset, uint32_t value){
+void pci_cfg_write_dword(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset, uint32_t value)
+{
     uint32_t address = 0x80000000u |
                        (bus    << 16) |
                        (dev    << 11) |
@@ -337,42 +360,49 @@ void pci_cfg_write_dword(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offs
     outl(PCI_CONFIG_DATA_PORT, value);
 }
 
-uint16_t pci_cfg_read_word(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset){
+uint16_t pci_cfg_read_word(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset)
+{
     uint32_t v = pci_cfg_read_dword(bus, dev, func, offset);
     return (uint16_t)(v >> ((offset & 2) * 8));
 }
 
-uint8_t pci_cfg_read_byte(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset){
+uint8_t pci_cfg_read_byte(uint32_t bus, uint32_t dev, uint32_t func, uint8_t offset)
+{
     uint32_t v = pci_cfg_read_dword(bus, dev, func, offset);
     return (uint8_t)(v >> ((offset & 3) * 8));
 }
 
-//--------------- Реестр ---------------
+//Реестр
 
-int pci_registry_count(void){
+int pci_registry_count(void)
+{
     return g_pci_devs_count;
 }
 
-int pci_registry_get(int idx, pci_dev_record_t *out){
+int pci_registry_get(int idx, pci_dev_record_t *out)
+{
     if (idx < 0 || idx >= g_pci_devs_count || !out) return -1;
     *out = g_pci_devs[idx];
     return 0;
 }
 
-static int pci_registry_add(const pci_dev_record_t *rec){
+static int pci_registry_add(const pci_dev_record_t *rec)
+{
     if (!rec) return -1;
     if (g_pci_devs_count >= PCI_REGISTRY_MAX) return -1;
     g_pci_devs[g_pci_devs_count++] = *rec;
     return g_pci_devs_count - 1;
 }
 
-//Чтение конфиг-пространства устройства, уже присутствующего в реестре.
-//Userspace не может читать произвольные (bus,dev,func) — только перечисленные.
-int pci_registry_read_cfg(uint32_t bdf, uint8_t offset, uint32_t *out_value){
+//Чтение конфиг-пространства устройства, уже присутствующего в реестре
+//Userspace не может читать произвольные (bus,dev,func) — только перечисленные
+int pci_registry_read_cfg(uint32_t bdf, uint8_t offset, uint32_t *out_value)
+{
     if (!out_value) return -1;
     if (offset > PCI_CFG_OFF_MAX) return -1;
 
-    for (int i = 0; i < g_pci_devs_count; i++){
+    for (int i = 0; i < g_pci_devs_count; i++)
+    {
         uint32_t dev_bdf = PCI_BDF(g_pci_devs[i].bus, g_pci_devs[i].dev, g_pci_devs[i].func);
         if (dev_bdf != bdf) continue;
 
@@ -385,9 +415,10 @@ int pci_registry_read_cfg(uint32_t bdf, uint8_t offset, uint32_t *out_value){
     return -1;
 }
 
-//--------------- Сканирование ---------------
+//Сканирование
 
-static void pci_record_device(uint32_t bus, uint32_t dev, uint32_t func){
+static void pci_record_device(uint32_t bus, uint32_t dev, uint32_t func)
+{
     pci_dev_record_t rec;
     memset(&rec, 0, sizeof(rec));
 
@@ -415,7 +446,8 @@ static void pci_record_device(uint32_t bus, uint32_t dev, uint32_t func){
 
     //BAR-ы: обычное устройство — 6, мост — 2
     int bars = (rec.header_type == PCI_HTYPE_BRIDGE) ? 2 : PCI_BARS_MAX;
-    for (int b = 0; b < PCI_BARS_MAX; b++){
+    for (int b = 0; b < PCI_BARS_MAX; b++)
+    {
         if (b < bars)
             rec.bars[b] = pci_cfg_read_dword(bus, dev, func, PCI_CFG_BAR0 + 4 * b);
         else
@@ -424,7 +456,8 @@ static void pci_record_device(uint32_t bus, uint32_t dev, uint32_t func){
 
     rec.rom_base = pci_cfg_read_dword(bus, dev, func, PCI_CFG_ROM_BASE);
 
-    if (rec.header_type == PCI_HTYPE_NORMAL || rec.header_type == PCI_HTYPE_BRIDGE){
+    if (rec.header_type == PCI_HTYPE_NORMAL || rec.header_type == PCI_HTYPE_BRIDGE)
+    {
         uint32_t subsys = pci_cfg_read_dword(bus, dev, func, PCI_CFG_SUBSYSTEM);
         rec.subsys_vendor_id = (uint16_t)(subsys & 0xFFFF);
         rec.subsys_id        = (uint16_t)(subsys >> 16);
@@ -433,8 +466,9 @@ static void pci_record_device(uint32_t bus, uint32_t dev, uint32_t func){
     //Мост: запоминаем номер вторичной шины для рекурсии
     rec.bridge_secondary = 0xFF;
     if (rec.header_type == PCI_HTYPE_BRIDGE &&
-        rec.class_code == PCI_CLASS_BRIDGE &&
-        rec.subclass == PCI_SUBCLASS_PCI_BRIDGE){
+            rec.class_code == PCI_CLASS_BRIDGE &&
+            rec.subclass == PCI_SUBCLASS_PCI_BRIDGE)
+    {
         rec.bridge_secondary = pci_cfg_read_byte(bus, dev, func, PCI_CFG_BR_SECONDARY);
     }
 
@@ -457,7 +491,8 @@ static void pci_record_device(uint32_t bus, uint32_t dev, uint32_t func){
     com_puthex(rec.subclass);
     com_puts("/");
     com_puthex(rec.prog_if);
-    if (rec.irq != 0xFF){
+    if (rec.irq != 0xFF)
+    {
         com_puts(" irq ");
         com_puthex(rec.irq);
     }
@@ -466,21 +501,24 @@ static void pci_record_device(uint32_t bus, uint32_t dev, uint32_t func){
     pci_registry_add(&rec);
 }
 
-static void pci_scan_bus(uint32_t bus, int depth){
+static void pci_scan_bus(uint32_t bus, int depth)
+{
     if (bus > 255) return;
     if (g_bus_scanned[bus >> 3] & (1u << (bus & 7))) return; //шина уже пройдена
     g_bus_scanned[bus >> 3] |= (1u << (bus & 7));
 
     if (depth > PCI_SCAN_MAX_DEPTH) return;
 
-    for (uint32_t dev = 0; dev < 32; dev++){
+    for (uint32_t dev = 0; dev < 32; dev++)
+    {
         uint32_t id = pci_cfg_read_dword(bus, dev, 0, PCI_CFG_VENDOR_ID);
         if ((id & 0xFFFF) == 0xFFFF) continue; //слот пуст
 
         uint8_t htype = pci_cfg_read_byte(bus, dev, 0, PCI_CFG_HEADER_TYPE);
         uint32_t func_max = (htype & PCI_HTYPE_MULTIFUNC) ? 8 : 1;
 
-        for (uint32_t func = 0; func < func_max; func++){
+        for (uint32_t func = 0; func < func_max; func++)
+        {
             uint32_t fid = pci_cfg_read_dword(bus, dev, func, PCI_CFG_VENDOR_ID);
             if ((fid & 0xFFFF) == 0xFFFF) continue; //функции нет
 
@@ -492,10 +530,12 @@ static void pci_scan_bus(uint32_t bus, int depth){
             uint8_t fht  = pci_cfg_read_byte(bus, dev, func, PCI_CFG_HEADER_TYPE);
             uint32_t cls = pci_cfg_read_dword(bus, dev, func, PCI_CFG_REV_CLASS);
             if ((fht & ~PCI_HTYPE_MULTIFUNC) == PCI_HTYPE_BRIDGE &&
-                ((cls >> 24) & 0xFF) == PCI_CLASS_BRIDGE &&
-                ((cls >> 16) & 0xFF) == PCI_SUBCLASS_PCI_BRIDGE){
+                    ((cls >> 24) & 0xFF) == PCI_CLASS_BRIDGE &&
+                    ((cls >> 16) & 0xFF) == PCI_SUBCLASS_PCI_BRIDGE)
+            {
                 uint8_t secondary = pci_cfg_read_byte(bus, dev, func, PCI_CFG_BR_SECONDARY);
-                if (secondary != 0 && secondary != bus){
+                if (secondary != 0 && secondary != bus)
+                {
                     pci_scan_bus(secondary, depth + 1);
                 }
             }
@@ -504,7 +544,8 @@ static void pci_scan_bus(uint32_t bus, int depth){
 }
 
 //Полное сканирование. Повторные вызовы — no-op
-int pci_scan_all(void){
+int pci_scan_all(void)
+{
     if (g_pci_scanned) return g_pci_devs_count;
     g_pci_scanned = 1;
 
@@ -514,7 +555,8 @@ int pci_scan_all(void){
     //Детект PCI: если на шине 0 нет ни одного устройства,
     //считаем PCI-хост отсутствующим (или механизм #1 не работает)
     uint32_t id0 = pci_cfg_read_dword(0, 0, 0, PCI_CFG_VENDOR_ID);
-    if ((id0 & 0xFFFF) == 0xFFFF){
+    if ((id0 & 0xFFFF) == 0xFFFF)
+    {
         com_puts("[PCI] Mechanism #1: no devices on bus 0, PCI host absent?\n");
         return 0;
     }

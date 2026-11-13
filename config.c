@@ -73,7 +73,7 @@ static int cfg_get_line(cfg_file_t *cfg_file, char *buf, int max_len)
 }
 
 
-//Конструктор: выделение памяти в куче ядра и кэширование
+//Конструктор: выделение памяти 64КБ под конфиг в куче ядра и кэширование
 cfg_file_t *cfg_open(const char *path, uint32_t flags, bool use_bufferisation)
 {
     int fd = vfs_open(path, flags);
@@ -161,7 +161,7 @@ void cfg_close(cfg_file_t *cfg_file)
 }
 
 
-
+//Функция чтения строки из секции конфига
 int cfg_read_string(cfg_file_t *cfg_file, const char *section, const char *key, const char *default_val, char *out_value, int max_len)
 {
     if (!cfg_file || !out_value || max_len <= 0) return 0;
@@ -238,7 +238,7 @@ int cfg_read_string(cfg_file_t *cfg_file, const char *section, const char *key, 
 }
 
 
-
+//Функция чтения int из секции конфига
 int cfg_read_int(cfg_file_t *cfg_file, const char *section, const char *key, int default_val)
 {
     char val_str[64];
@@ -267,7 +267,7 @@ int cfg_read_int(cfg_file_t *cfg_file, const char *section, const char *key, int
 }
 
 
-
+//Функция чтения float из секции конфига
 float cfg_read_float(cfg_file_t *cfg_file, const char *section, const char *key, float default_val)
 {
     char val_str[64];
@@ -308,6 +308,8 @@ float cfg_read_float(cfg_file_t *cfg_file, const char *section, const char *key,
     return default_val;
 }
 
+
+//Функция чтения bool из секции конфига
 bool cfg_read_bool(cfg_file_t *cfg_file, const char *section, const char *key, bool default_val)
 {
     char val_str[64];
@@ -322,6 +324,7 @@ bool cfg_read_bool(cfg_file_t *cfg_file, const char *section, const char *key, b
     return default_val;
 }
 
+//Функция чтения hex-числа формата 0xNN из секции конфига
 uint32_t cfg_read_hex(cfg_file_t *cfg_file, const char *section, const char *key, uint32_t default_val)
 {
     char val_str[64];

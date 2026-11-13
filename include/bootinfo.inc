@@ -69,8 +69,8 @@ BOOT_VBE_CURRENT     equ 80
 BOOT_TOTAL_SIZE      equ 84
 
 ;================= таблица режимов VBE =================
-;Адрес и формат совпадают с include-kernel/bootinfo.h (vbe_table_hdr_t /
-;vbe_mode_rec_t). Таблица лежит в младшей памяти и переживает старт ядра.
+;Адрес и формат совпадают с include-kernel/bootinfo.h (vbe_table_hdr_t / vbe_mode_rec_t)
+;Таблица лежит в младшей памяти и переживает старт ядра
 
 VBE_MODES_ADDR       equ 0x5400
 VBE_MODES_MAX        equ 64

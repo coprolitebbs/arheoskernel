@@ -411,3 +411,13 @@ void trim(char *out, const char *in)
     for (int i = start; i <= end; i++) out[idx++] = in[i];
     out[idx] = '\0';
 }
+
+int streq(const char *a, const char *b)
+{
+    while (*a && *a == *b)
+    {
+        a++;
+        b++;
+    }
+    return (*a == *b);
+}

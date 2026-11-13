@@ -79,11 +79,11 @@ typedef struct tty
     volatile uint32_t copied_bytes;            //Сколько байт накоплено в line_buffer
     volatile bool line_ready;                   //Флаг готовности строки (нажат Enter)
 
-    volatile uint32_t line_cursor_pos;          //Индекс курсора ВНУТРИ line_buffer (0 .. copied_bytes)
+    volatile uint32_t line_cursor_pos;          //Индекс курсора внутри line_buffer (0 .. copied_bytes)
     volatile bool cursor_visible;               //Флаг фазы мигания: true = инверсный блок, false = обычный символ
     uint32_t last_blink_tick;                   //На каком тике таймера последний раз меняли фазу мигания
     uint32_t cursor_tick_count;                 //Максимальное количество тиков таймера для задержки мигания курсора
-    //char cursor_code;                           //Дефолтный код курсорного блока в кодовой таблице
+    //char cursor_code;                          //Дефолтный код курсорного блока в кодовой таблице
     uint32_t cursor_code;                       //Дефолтный код курсорного блока в кодовой таблице
 
     //Координаты начала ввода (отступ Shell)

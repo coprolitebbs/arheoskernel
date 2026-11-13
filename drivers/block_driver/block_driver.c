@@ -387,9 +387,8 @@ int block_resolve_boot_drive(uint32_t bios_drive, uint32_t *out_id)
     uint32_t idx = bios_drive - 0x80;
     if (idx >= (uint32_t)devices_count)
     {
-        // BIOS-порядок разошёлся с ATA-порядком (типично при boot с USB,
-        //когда ATA-дисков нет; Далее USB-драйвер зарегистрирует
-        //своё устройство и сюда встанет правильный id)
+        // BIOS-порядок разошёлся с ATA-порядком (типично при boot с USB, когда ATA-дисков нет,
+        //Далее USB-драйвер зарегистрирует своё устройство и сюда встанет правильный id)
         *out_id = 0;
         return FS_OK;
     }
@@ -431,7 +430,7 @@ int block_register_device(const char *name, uint32_t sector_count, uint32_t flag
 
 //Снять устройство с регистрации (USB-hotplug). id остаётся за слотом:
 //все последующие read/write/get_info по нему возвращают ошибку,
-//enum_devices дырку пропускает. Повторная register_device создаёт НОВЫЙ id
+//enum_devices дырку пропускает. Повторная register_device создаёт новый id
 int block_unregister_device(uint32_t id)
 {
     if (id >= (uint32_t)devices_count || !devices_ptr[id].used) return FS_IO_ERROR;

@@ -492,7 +492,7 @@ int uhci_reset_port(uhci_hc_t *hc, int port)
         inw(hc->io_base + reg);
     }
 
-    //Deassert: читаем СВЕЖИЙ PORTSC, снимаем PR, PED форсируем =1
+    //Deassert: читаем свежий PORTSC, снимаем PR, PED форсируем =1
     uint16_t cur = inw(hc->io_base + reg);
     outw(hc->io_base + reg, (cur & ~PORTSC_PR) | PORTSC_PED);
 

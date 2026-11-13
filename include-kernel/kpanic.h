@@ -23,7 +23,8 @@
 #include "draw.h"
 #include "debug.h"
 
-typedef struct {
+typedef struct
+{
     const char *label;
     uint32_t    value;
 } panic_field_t;

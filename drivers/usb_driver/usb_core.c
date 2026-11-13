@@ -256,7 +256,8 @@ int usb_hub_port_reset(usb_hc_t *hc, uint8_t hub_addr, uint8_t port,
     //Спека: до 20 мс; даём 30 тиков (300 мс) запаса.
     uint32_t t0 = (api_ptr && api_ptr->get_ticks) ? api_ptr->get_ticks() : 0;
     uint16_t wst = 0;
-    for (;;){
+    for (;;)
+    {
         memset(st, 0, sizeof(st));
         if (hub_class_ctrl(hc, hub_addr, 0xA3, HUB_REQ_GET_STATUS,
                            0, port, st, 4) != 0) return -2;
@@ -264,7 +265,7 @@ int usb_hub_port_reset(usb_hc_t *hc, uint8_t hub_addr, uint8_t port,
         uint16_t chg = (uint16_t)(st[2] | ((uint16_t)st[3] << 8));
         if (!(wst & HUB_ST_RESET) || (chg & HUB_CH_C_RESET)) break;
         if (api_ptr && api_ptr->get_ticks &&
-            (api_ptr->get_ticks() - t0) > 30) break;   //таймаут — выходим с тем, что есть
+                (api_ptr->get_ticks() - t0) > 30) break;   //таймаут — выходим с тем, что есть
     }
 
     //Подчистить change-биты
@@ -367,27 +368,30 @@ int usb_enumerate(usb_port_path_t *path, uint8_t want_addr,
     //Корневой порт — через PORTSC HC; порт за хабом — через class-запросы хаба.
     int is_ls = 0;
     uint8_t speed = 0;   // 0=FS, 1=LS, 2=HS
-    if (path->hub_addr == 0){
+    if (path->hub_addr == 0)
+    {
         int rp = usb_hc_port_reset(&path->hc, path->root_port);
         if (rp != 0) return rp;
 
         //UHCI: LSDA бит 8 (QEMU/ICH) или line-status bits 4-5 (D- высокий — LS)
         uint32_t ps = usb_hc_port_status(&path->hc, path->root_port);
-        if (path->hc.type == USB_HC_UHCI){
+        if (path->hc.type == USB_HC_UHCI)
+        {
             is_ls = ((ps & 0x0100u) || ((ps & 0x30) == 0x10)) ? 1 : 0;
             speed = is_ls ? 1 : 0;   // UHCI: FS или LS
-        } else {
-            //EHCI: скорость — ТОЛЬКО по биту Port Enable (PE, бит 2).
+        }
+        else
+        {
+            //EHCI: скорость — только по биту Port Enable (PE, бит 2).
             //PE=1 <=> устройство high-speed (FS/LS EHCI отдаёт companion'у:
             //ehci_port_reset в этом случае вернул бы -3, и мы сюда не дошли).
-            //Поля PSPD (bits 27:26) НЕ читать: QEMU их выставляет (=2 для HS),
+            //Поля PSPD (bits 27:26) не читать: QEMU их выставляет (=2 для HS),
             //а реальный кремний (ICH6/CF-18) держит PSPD=0 даже для включённого
             //HS-порта. Из-за чтения PSPD устройство классифицировалось как FS,
             //QH собирался с EPS=FS/C=1/mps=8 без split-транзакций, и каждый
             //SETUP получал XactErr (CERR 3->0, HALT) — enum r=-12 при живом
             //устройстве и рабочем контроллере (см. лог CF-18: ok=1105, pspd=0).
-            //По EHCI spec и как в Linux (ehci-hub.c скорость нигде не читается):
-            //включённый порт EHCI — всегда HS.
+            //По EHCI spec: включённый порт EHCI — всегда HS.
             speed = (ps & 0x4u) ? 2 : 0;
             is_ls = 0;
         }
@@ -400,11 +404,14 @@ int usb_enumerate(usb_port_path_t *path, uint8_t want_addr,
         {
             uint32_t t0r = (api_ptr && api_ptr->get_ticks) ? api_ptr->get_ticks() : 0;
             uint32_t safety = 1000000;
-            while (((api_ptr->get_ticks() - t0r) < 2) && (safety-- > 0)) {
+            while (((api_ptr->get_ticks() - t0r) < 2) && (safety-- > 0))
+            {
                 __asm__ __volatile__("pause");
             }
         }
-    } else {
+    }
+    else
+    {
         int hr = usb_hub_port_reset(&path->hc, path->hub_addr, path->hub_port, &speed);
         if (hr != 0) return (hr == -3) ? -21 : -22;
         is_ls = (speed == 1) ? 1 : 0;
@@ -441,7 +448,8 @@ int usb_enumerate(usb_port_path_t *path, uint8_t want_addr,
     {
         uint32_t t0 = (api_ptr && api_ptr->get_ticks) ? api_ptr->get_ticks() : 0;
         uint32_t safety = 1000000;
-        while (((api_ptr->get_ticks() - t0) < 1) && (safety-- > 0)) {
+        while (((api_ptr->get_ticks() - t0) < 1) && (safety-- > 0))
+        {
             __asm__ __volatile__("pause");
         }
     }
@@ -461,9 +469,12 @@ int usb_enumerate(usb_port_path_t *path, uint8_t want_addr,
 // Ничего не инициализирует, только читает PCI-конфигурацию.
 void usb_scan_pci_controllers(void)
 {
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t dev = 0; dev < 32; dev++) {
-            for (uint8_t func = 0; func < 8; func++) {
+    for (uint16_t bus = 0; bus < 256; bus++)
+    {
+        for (uint8_t dev = 0; dev < 32; dev++)
+        {
+            for (uint8_t func = 0; func < 8; func++)
+            {
                 uint32_t id = pci_read32((uint8_t)bus, dev, func, 0x00);
                 if ((id & 0xFFFF) == 0xFFFF) continue;
 
@@ -473,7 +484,8 @@ void usb_scan_pci_controllers(void)
                 uint8_t prog_if  = (class >> 8) & 0xFF;
 
                 if (base_cls == PCI_CLASS_SERIAL_BUS &&
-                    sub_cls  == PCI_SUBCLASS_USB) {
+                        sub_cls  == PCI_SUBCLASS_USB)
+                {
 
                     const char *type = "UNKNOWN";
                     if (prog_if == PCI_PROGIF_UHCI) type = "UHCI";
@@ -489,7 +501,8 @@ void usb_scan_pci_controllers(void)
                     //Диагностика портов UHCI: покажет, на каком именно
                     //UHCI-контроллере висит устройство. На ICH6 три UHCI,
                     //и флешка может быть на #2 или #3, а не на #1.
-                    if (prog_if == PCI_PROGIF_UHCI && (bar4 & 0x01)) {
+                    if (prog_if == PCI_PROGIF_UHCI && (bar4 & 0x01))
+                    {
                         uint16_t io = bar4 & 0xFFFC;
                         uint16_t ps0 = inw(io + 0x10);   //PORTSC1
                         uint16_t ps1 = inw(io + 0x12);   //PORTSC2
@@ -507,14 +520,17 @@ void usb_scan_pci_controllers(void)
 // Путь 2: вернуть физические порты от EHCI к UHCI.
 // Ищем EHCI (prog_if = 0x20), включаем MMIO, читаем CONFIGFLAG.
 // Если CF=1 — записываем 0. Это глобально переводит все порты на companion-контроллеры (UHCI).
-// EHCI при этом НЕ запускаем (USBCMD.RS=0), расписание не трогаем.
+// EHCI при этом не запускаем (USBCMD.RS=0), расписание не трогаем.
 // Возвращает 0 при успехе (EHCI найден и CF сброшен, либо EHCI отсутствует),
 // отрицательный код при ошибке доступа к MMIO.
 int ehci_route_ports_to_uhci(void)
 {
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t dev = 0; dev < 32; dev++) {
-            for (uint8_t func = 0; func < 8; func++) {
+    for (uint16_t bus = 0; bus < 256; bus++)
+    {
+        for (uint8_t dev = 0; dev < 32; dev++)
+        {
+            for (uint8_t func = 0; func < 8; func++)
+            {
                 uint32_t id = pci_read32((uint8_t)bus, dev, func, 0x00);
                 if ((id & 0xFFFF) == 0xFFFF) continue;
 
@@ -524,8 +540,9 @@ int ehci_route_ports_to_uhci(void)
                 uint8_t prog_if  = (class >> 8) & 0xFF;
 
                 if (base_cls == PCI_CLASS_SERIAL_BUS &&
-                    sub_cls  == PCI_SUBCLASS_USB &&
-                    prog_if  == 0x20) { // EHCI
+                        sub_cls  == PCI_SUBCLASS_USB &&
+                        prog_if  == 0x20)   // EHCI
+                {
 
                     // Включаем Memory Space + Bus Master
                     uint32_t cmd = pci_read32((uint8_t)bus, dev, func, 0x04);
@@ -544,30 +561,36 @@ int ehci_route_ports_to_uhci(void)
                     //Для MMIO используем некэшируемый маппинг (PCD+PWT).
                     //Обычный vmm_map_pages кеширует, что для EHCI-регистров
                     //приводит к чтению устаревших значений и зависаниям.
-                    if (api_ptr->vmm_map_pages_uncached_ptr) {
+                    if (api_ptr->vmm_map_pages_uncached_ptr)
+                    {
                         api_ptr->vmm_map_pages_uncached_ptr(mmio_base, 0x1000);
-                    } else if (api_ptr->vmm_map_pages_ptr) {
+                    }
+                    else if (api_ptr->vmm_map_pages_ptr)
+                    {
                         api_ptr->vmm_map_pages_ptr(mmio_base, 0x1000);
-                    } else {
+                    }
+                    else
+                    {
                         return -4;
                     }
 
-                    // Читаем CAPLENGTH (первый байт capability-регистров).
-                    // Operational base = MMIO base + CAPLENGTH.
+                    //Читаем CAPLENGTH (первый байт capability-регистров).
+                    //Operational base = MMIO base + CAPLENGTH.
                     uint8_t cap_length = *(volatile uint8_t*)(mmio_base + 0x00);
 
-                    // Если BIOS не инициализировал EHCI, регистры могут читаться
-                    // как 0xFF или 0x00 — это повод не доверять устройству.
+                    //Если BIOS не инициализировал EHCI, регистры могут читаться
+                    //как 0xFF или 0x00 — это повод не доверять устройству.
                     if (cap_length == 0xFF || cap_length == 0x00) return -5;
                     if (cap_length > 0x7F) return -6;
 
                     uint32_t op_base = mmio_base + cap_length;
 
-                    // CONFIGFLAG находится по смещению 0x40 от op_base
+                    //CONFIGFLAG находится по смещению 0x40 от op_base
                     volatile uint32_t *config_flag = (volatile uint32_t*)(op_base + 0x40);
                     uint32_t cf = *config_flag;
 
-                    if (cf & 0x01) {
+                    if (cf & 0x01)
+                    {
                         // CF = 1, порты у EHCI. Сбрасываем — все порты -> UHCI.
                         *config_flag = 0;
                         // Спека: после сброса CF маршрутизация применяется
@@ -588,7 +611,8 @@ int ehci_route_ports_to_uhci(void)
 
                     int owned_by_uhci = 0;
                     int owned_by_ehci = 0;
-                    for (uint32_t p = 1; p <= n_ports; p++) {
+                    for (uint32_t p = 1; p <= n_ports; p++)
+                    {
                         uint32_t portsc_addr = op_base + 0x44 + (p - 1) * 4;
                         uint32_t portsc = *(volatile uint32_t*)portsc_addr;
                         if (portsc & (1u << 13)) owned_by_uhci++;
@@ -596,7 +620,8 @@ int ehci_route_ports_to_uhci(void)
                     }
 
                     // Диагностика: сколько портов реально отдано UHCI
-                    if (api_ptr && api_ptr->load_screen_add_string) {
+                    if (api_ptr && api_ptr->load_screen_add_string)
+                    {
                         api_ptr->load_screen_add_string(
                             "EHCI route: n_ports=%d owned_by_uhci=%d owned_by_ehci=%d",
                             (int)n_ports, owned_by_uhci, owned_by_ehci);

@@ -18,12 +18,9 @@
 
 #include <stdint.h>
 
-//Пользовательские зеркала структур графического слоя
-//(drivers/include_drivers/driver_graphic_layer.h).
-//Используются одновременно ядром (systemcall_graph_info — побайтовый
-//маршалинг через SYS_GRAPH_INFO) и userspace (программа graphinfo).
-//Все стороны договариваются об одном layout: при расхождении полей
-//сработают _Static_assert в syscalls.c
+//Пользовательские зеркала структур графического слоя (drivers/include_drivers/driver_graphic_layer.h).
+//Используются одновременно ядром (systemcall_graph_info — побайтовый маршалинг через SYS_GRAPH_INFO) и userspace (программа graphinfo).
+//Все стороны договариваются об одном layout: при расхождении полей сработают _Static_assert в syscalls.c
 
 //флаги режима (зеркало GR_MODE_*)
 #define U_GR_MODE_LFB      0x01
@@ -117,27 +114,24 @@ int u_gr_fix_info(u_gr_fix_info_t *out);
 
 //Смена режима активного драйвера по индексу (0 .. mode_count-1).
 //Возвращает 0 при успехе, иначе отрицательный код GR_ERR_* ядра:
-//-2 нет активного драйвера, -3 драйвер не умеет менять режим
-//(fbdrv-fallback), -7 ошибка ввода-вывода при modeset, -9 нет такого
-//индекса. После успешной смены ядро само пересчитывает геометрию консолей
-//и очищает экран
+//-2 нет активного драйвера, -3 драйвер не умеет менять режим (fbdrv-fallback),
+//-7 ошибка ввода-вывода при modeset, -9 нет такого индекса.
+//После успешной смены ядро само пересчитывает геометрию консолей и очищает экран
 int u_gr_set_mode(uint32_t index);
 
-//Примитивы графического слоя из Ring-3 (SYS_GR_PRIM): заливка, линия
-//(в том числе диагональные — на Geode это аппаратный векторный движок GP),
-//копирование области внутри экрана и блит RAM->FB.
+//Утилиты: строковые имена полей fix-информации (без malloc)
+const char *u_gr_visual_name(uint32_t visual);
+const char *u_gr_type_name(uint32_t type);
+
+//Примитивы графического слоя из Ring-3 (SYS_GR_PRIM): заливка, линия (в том числе диагональные
+//— на Geode это аппаратный векторный движок GP), копирование области внутри экрана и блит RAM->FB.
 //params — массив int32[6], раскладка по op (см. GR_PRIM_* в syscall.h):
 //  GR_PRIM_FILL_RECT: x, y, w, h, color
 //  GR_PRIM_DRAW_LINE: x0, y0, x1, y1, color
 //  GR_PRIM_COPY_AREA: sx, sy, w, h, dx, dy
 //  GR_PRIM_BLIT:      x, y, w, h, указатель на буфер пикселей
-//color — 0x00RRGGBB; буфер blit — пиксели в формате текущего режима
-//(упакованные строки w*(bpp/8) байт, без padding).
+//color — 0x00RRGGBB; буфер blit — пиксели в формате текущего режима (упакованные строки w*(bpp/8) байт, без padding).
 //Возвращает 0 при успехе, иначе отрицательный код GR_ERR_* ядра
 int u_gr_prim(uint32_t op, const int32_t *params);
-
-//Утилиты: строковые имена полей fix-информации (без malloc)
-const char *u_gr_visual_name(uint32_t visual);
-const char *u_gr_type_name(uint32_t type);
 
 #endif

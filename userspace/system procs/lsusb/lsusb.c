@@ -17,14 +17,7 @@
 
 #include "../../include/ustd.h"
 #include "../../include/udevices.h"
-
-//Локальное сравнение строк: lsusb.elf линкуется без u_lib_elf.o,
-//где живёт strcmp
-static int streq(const char *a, const char *b)
-{
-    while (*a && *a == *b) { a++; b++; }
-    return (*a == *b);
-}
+#include "../../../include-kernel/lib.h"
 
 //Формат вывода — плотный, без огромных отступов, чтобы читалось и на 80-колоночном VGA, и в pipe
 static void print_hex4(uint32_t v)
@@ -85,7 +78,7 @@ static int snap_contains(const u_usb_dev_t *arr, int n, const u_usb_dev_t *d)
     for (int i = 0; i < n; i++)
     {
         if (arr[i].vid == d->vid && arr[i].pid == d->pid &&
-            arr[i].port == d->port) return 1;
+                arr[i].port == d->port) return 1;
     }
     return 0;
 }
@@ -97,7 +90,7 @@ static void print_list(int n)
         u_usb_dev_t d;
         if (u_usb_get_dev(i, &d) != 0)
         {
-            printf("lsusb: idx %d unavailable\n", i);
+            printf("usbscan: idx %d unavailable\n", i);
             continue;
         }
 
@@ -141,9 +134,9 @@ int main(int argc, char *argv[])
         }
         else
         {
-            printf("usage: lsusb [-update]\n");
-            printf("  lsusb         показать USB-устройства из реестра ядра\n");
-            printf("  lsusb -update пересмотреть порты контроллеров (вставлено/\n");
+            printf("usage: usbscan [-update]\n");
+            printf("  usbscan         показать USB-устройства из реестра ядра\n");
+            printf("  usbscan -update пересмотреть порты контроллеров (вставлено/\n");
             printf("                вынуто) и показать свежий список\n");
             return 1;
         }
@@ -154,28 +147,28 @@ int main(int argc, char *argv[])
         int n = u_usb_count();
         if (n < 0)
         {
-            printf("lsusb: kernel returned error\n");
+            printf("usbscan: kernel returned error\n");
             return 1;
         }
         if (n == 0)
         {
-            printf("lsusb: no USB devices registered\n");
+            printf("usbscan: no USB devices registered\n");
             return 0;
         }
         print_list(n);
         return 0;
     }
 
-    //--- lsusb -update: ручной hotplug через SYS_USB_RESCAN ---
+    //usbscan -update: ручной hotplug через SYS_USB_RESCAN
 
     int n0 = take_snapshot(snap_before, USB_REGISTRY_MAX);
 
-    printf("lsusb: rescanning USB ports...\n");
+    printf("usbscan: rescanning USB ports...\n");
 
     int n = u_usb_rescan();
     if (n < 0)
     {
-        printf("lsusb: rescan failed (%d)\n", n);
+        printf("usbscan: rescan failed (%d)\n", n);
         printf("  (-1: USB driver not loaded, other: enumeration error)\n");
         return 1;
     }
@@ -214,13 +207,13 @@ int main(int argc, char *argv[])
     }
 
     if (added || removed)
-        printf("lsusb: rescan done: +%d -%d\n", added, removed);
+        printf("usbscan: rescan done: +%d -%d\n", added, removed);
     else
-        printf("lsusb: rescan done: no changes\n");
+        printf("usbscan: rescan done: no changes\n");
 
     if (n1 == 0)
     {
-        printf("lsusb: no USB devices registered\n");
+        printf("usbscan: no USB devices registered\n");
         return 0;
     }
 

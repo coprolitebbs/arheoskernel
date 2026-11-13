@@ -22,8 +22,7 @@
 //Используется одновременно:
 //- драйвером (usb_stack_driver_api_t->devices[]),
 //- ядром (usb_registry_*),
-//- userspace (SYS_USB_GET_DEV через u_usb_dev_t).
-//Все стороны договариваются об одном layout
+//- userspace (SYS_USB_GET_DEV через u_usb_dev_t)
 typedef struct
 {
     uint32_t vid;
@@ -42,26 +41,26 @@ typedef struct
 //Используется одновременно:
 //   - ядром (pci.c: реестр результатов сканирования шин),
 //   - userspace (SYS_PCI_GET_DEV через u_pci_dev_t).
-//Все стороны договариваются об одном layout
-typedef struct {
-    uint16_t vendor_id;        /* 0x00 */
-    uint16_t device_id;        /* 0x02 */
-    uint16_t subsys_vendor_id; /* 0x2C, 0 если заголовок не 0x00/0x01 */
+typedef struct
+{
+    uint16_t vendor_id;        //0x00
+    uint16_t device_id;        //0x02
+    uint16_t subsys_vendor_id; //0x2C, 0 если заголовок не 0x00/0x01
     uint16_t subsys_id;
     uint8_t  bus;
     uint8_t  dev;
     uint8_t  func;
-    uint8_t  rev;              /* 0x08, байт 0 */
-    uint8_t  class_code;       /* 0x08, байт 3 */
-    uint8_t  subclass;         /* 0x08, байт 2 */
-    uint8_t  prog_if;          /* 0x08, байт 1 */
-    uint8_t  header_type;      /* 0x0E без бита multifunction */
-    uint8_t  irq;              /* 0x3C, 0xFF = не подключено */
-    uint8_t  bridge_secondary; /* 0x19 для мостов 06/04, 0xFF иначе */
-    uint32_t bars[PCI_BARS_MAX]; /* сырые регистры BAR (флаги внутри) */
-    uint32_t rom_base;         /* сырой регистр 0x30 */
-    uint16_t cmd;              /* 0x04 */
-    uint16_t status;           /* 0x06 */
+    uint8_t  rev;              //0x08, байт 0
+    uint8_t  class_code;       //0x08, байт 3
+    uint8_t  subclass;         //0x08, байт 2
+    uint8_t  prog_if;          //0x08, байт 1
+    uint8_t  header_type;      //0x0E без бита multifunction
+    uint8_t  irq;              //0x3C, 0xFF = не подключено
+    uint8_t  bridge_secondary; //0x19 для мостов 06/04, 0xFF иначе
+    uint32_t bars[PCI_BARS_MAX]; //сырые регистры BAR (флаги внутри)
+    uint32_t rom_base;         //сырой регистр 0x30
+    uint16_t cmd;              //0x04
+    uint16_t status;           //0x06
 } __attribute__((packed)) pci_dev_record_t;
 
 

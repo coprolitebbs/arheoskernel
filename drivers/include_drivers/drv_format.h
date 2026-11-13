@@ -230,11 +230,11 @@ typedef struct
     //открывает окно вытеснения внутри спавна -> Page Fault в чужом адресном пространстве.
     //Драйвер становится владельцем только если флаг был 0 и снимает его только если
     //владелец — он сам.  we = KSL_ACQUIRE(p); ...операция...; KSL_RELEASE(p, we);
-    #define KSL_ACQUIRE(p) __extension__ ({ volatile uint8_t *_ksl_p = (p); \
+#define KSL_ACQUIRE(p) __extension__ ({ volatile uint8_t *_ksl_p = (p); \
             uint8_t _ksl_we = 0; \
             if (_ksl_p && *_ksl_p == 0) { *_ksl_p = 1; _ksl_we = 1; } \
             _ksl_we; })
-    #define KSL_RELEASE(p, we) do { volatile uint8_t *_ksl_p = (p); \
+#define KSL_RELEASE(p, we) do { volatile uint8_t *_ksl_p = (p); \
             if (_ksl_p && (we)) *_ksl_p = 0; } while (0)
 
     //Доступен ли block device interface в драйвере
@@ -275,7 +275,7 @@ typedef struct
 
     int (*usb_start)(void);
 
-    //Ручной hotplug-rescan (SYS_USB_RESCAN, см. lsusb -update):
+    //Ручной hotplug-rescan (SYS_USB_RESCAN):
     //пересмотреть порты уже инициализированных контроллеров,
     //добавить появившиеся устройства, снять исчезнувшие (включая
     //разрегистрацию block-устройств) и пересобрать devices[]

@@ -11,12 +11,17 @@
 
 ## Разделы
 
+- [Общие сведения](/DOCS/README.md)
+- [Карта памяти ОС](MEMORY_MAP.md)
 - [Драйвер фреймбуфера](/DOCS/framebuffer/README.md)
 - [Драйвер файловой системы FAT12](/DOCS/fat12_driver/README.md)
 - [Драйвер файловой системы EXT2](/DOCS/ext2_driver/README.md)
 - [Драйвер клавиатуры](/DOCS/kbd_driver/README.md)
 - [Драйвер блочного устройства](/DOCS/block_driver/README.md)
 - [Драйвер usb-стека](/DOCS/usb_driver/README.md)
+
+- [Универсальный драйвер видео VESA](/DOCS/vesa_fb/README.md)
+- [Драйвер видео geodefb](/DOCS/geode/README.md)
 
 ---
 
@@ -83,6 +88,8 @@
 - C (freestanding)
 
 - QEMU
+
+- 86box
 
 - LLDB
 
@@ -213,7 +220,6 @@ jmp 0x08:0x100000
 Требуется:
 
 - nasm
-- qemu
 - dosfstools
 - e2tools
 - e2fsprogs

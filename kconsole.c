@@ -205,7 +205,7 @@ static void parse_and_execute_ansi(char cmd)
         {
             console_fgcolor = DEFAULT_FG_COLOR;
             console_bgcolor = DEFAULT_BG_COLOR;
-            console_bg_active = false;                       // ← сброс
+            console_bg_active = false;                       //сброс
             if (fb && fb->set_fg) fb->set_fg(DEFAULT_FG_COLOR);
             if (fb && fb->set_bg) fb->set_bg(DEFAULT_BG_COLOR);
         }
@@ -222,7 +222,7 @@ static void parse_and_execute_ansi(char cmd)
                 else if (code >= 40 && code <= 47)
                 {
                     console_bgcolor = ansi_color_table[code - 40];
-                    console_bg_active = true;                // ← взвод
+                    console_bg_active = true;                //взвод
                     if (fb && fb->set_bg) fb->set_bg(console_bgcolor);
                 }
             }
@@ -303,9 +303,8 @@ static void parse_and_execute_ansi(char cmd)
 }
 
 
-//Преобразует строковое имя комбинации из конфига в её числовой код HOTKEY_*.
-//Принимает обе формы записи: "ALT_SHIFT" и "HOTKEY_ALT_SHIFT".
-//При опечатке возвращает безопасный дефолт, не падает и не оставляет мусор
+//Преобразует строковое имя комбинации из конфига в её числовой код HOTKEY_*
+//Принимает обе формы записи: "ALT_SHIFT" и "HOTKEY_ALT_SHIFT"
 static uint8_t cfg_parse_hotkey(const char *name)
 {
     if (!name || name[0] == '\0') return HOTKEY_ALT_SHIFT;
@@ -369,12 +368,9 @@ static void kconsole_line_cursor_render_at(uint32_t cell_x, uint32_t cell_y, boo
 
     if (draw_glyph)
     {
-        //Если глиф уже нарисован в ДРУГОЙ ячейке — сначала честно стираем его
-        //(fill_rect цветом фона / clear_tile с обоями). Рисовать поверх нельзя:
-        //глифы печатаются на прозрачном фоне, старые пиксели остались бы на экране
         if (current_tty->line_cursor_drawn &&
-            (current_tty->line_cursor_cell_x != cell_x ||
-             current_tty->line_cursor_cell_y != cell_y))
+                (current_tty->line_cursor_cell_x != cell_x ||
+                 current_tty->line_cursor_cell_y != cell_y))
         {
             kconsole_line_cursor_render_at(current_tty->line_cursor_cell_x,
                                            current_tty->line_cursor_cell_y, false);
@@ -402,7 +398,7 @@ static void kconsole_line_cursor_render_at(uint32_t cell_x, uint32_t cell_y, boo
         }
 
         //Стирание по правилам консоли: активный фон — заливаем им ячейку,
-        //иначе clear_tile (он возвращает на место пиксели ОБОЕВ, а без обоев
+        //иначе clear_tile (он возвращает на место пиксели обоев, а без обоев
         //заливает тайл цветом фона). Пробелом стирать нельзя — глиф пробела
         //на прозрачном фоне не рисует ни одного пикселя
         if (original_bg != 0xFFFFFFFF && fb && fb->fill_rect)
@@ -467,7 +463,7 @@ void kconsole_update_cursor(void)
 
     if (current_tty->kernel_line_active)
     {
-        //--- Курсор канонического редактора ядра (cooked STDIN) ---
+        //Курсор канонического редактора ядра (cooked STDIN)
         //Позиция уже лежит в kernel_cursor_row/col (пересчитана редактором
         //от конца строки, переживает переносы и скролл)
         if (tick_count - current_tty->last_blink_tick >= current_tty->cursor_tick_count)
@@ -487,10 +483,10 @@ void kconsole_update_cursor(void)
 
     if (current_tty->line_edit_active)
     {
-        //--- Курсор редактора строки Ring-3 (Сехмет и др. raw-шеллы) ---
+        //Курсор редактора строки Ring-3 (Сехмет)
         //Позиция = якорь строки + смещение внутри строки (SYS_TTY_LINE_EDIT).
-        //foreground_pid/line_ready здесь НЕ проверяются: это состояние
-        //СОБСТВЕННОГО редактора ядра. foreground_pid для Ring-3 шеллов никогда
+        //foreground_pid/line_ready здесь не проверяются: это состояние
+        //собственного редактора ядра. foreground_pid для Ring-3 шеллов никогда
         //не выставляется, а line_ready залипает в true после первого Enter —
         //с любым из этих флагов курсор Ring-3 не мигал бы никогда
         if (tick_count - current_tty->last_blink_tick >= current_tty->cursor_tick_count)
@@ -507,7 +503,7 @@ void kconsole_update_cursor(void)
         return;
     }
 
-    //--- Курсор собственного строчного редактора ядра (прежнее поведение) ---
+    //Курсор собственного строчного редактора ядра
     if (current_tty->foreground_pid == 0 || current_tty->line_ready) return;
 
     if (tick_count - current_tty->last_blink_tick >= current_tty->cursor_tick_count)
@@ -528,11 +524,6 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
 {
     if (!fb || !current_tty) return;
 
-    //Глиф мигающего курсора строки нарисован ПОВЕРХ прозрачного фона, поэтому
-    //новый текст его сам не затирает — старые пиксели остаются торчать на
-    //напечатанном символе. Перед любым выводом честно восстанавливаем ячейку
-    //курсора (fill_rect цветом фона / clear_tile с обоями), и только потом
-    //рисуем текст на чистое место
     if (current_tty->line_cursor_drawn)
     {
         kconsole_line_cursor_hide();
@@ -564,8 +555,8 @@ void kernel_stdout_write_codepoint(uint32_t cp, uint32_t color)
             if (cell_y < current_tty->console_rows && cell_x < current_tty->console_cols)
                 current_tty->matrix[cell_y][cell_x].codepoint = ' ';
             if (fb && fb->clear_tile) fb->clear_tile(current_tty->cursor_x, current_tty->cursor_y, console_bgcolor);
-            //Пробелом стирать нельзя: его глиф на прозрачном фоне не рисует ни
-            //одного пикселя. Стираем сплошным блоком цвета фона (см. console.c)
+            //Пробелом стирать нельзя: его глиф на прозрачном фоне не рисует ни одного пикселя
+            //Стираем сплошным блоком цвета фона
             else if (fb && fb->draw_codepoint) fb->draw_codepoint(current_tty->cursor_x, current_tty->cursor_y, current_tty->cursor_code, console_bgcolor);
         }
         else if (current_row == current_tty->input_start_y)
@@ -866,8 +857,8 @@ void kconsole_clear_screen(void)
 
     if (console_bg_active && fb->fill_rect)
     {
-        //заливаем по фактическим размерам текущего режима графического
-        //слоя: bootinfo описывает только загрузочный режим и после смены
+        //заливаем по фактическим размерам текущего режима графического слоя:
+        //bootinfo описывает только загрузочный режим и после смены
         //разрешения на ходу (SYS_GRAPH_INFO, GRAPH_INFO_SET_MODE) устаревает
         uint32_t w = boot_info ? boot_info->width : 0;
         uint32_t h = boot_info ? boot_info->height : 0;

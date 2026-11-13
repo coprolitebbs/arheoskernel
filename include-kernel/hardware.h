@@ -57,7 +57,8 @@
 
 //Структуры ACPI
 
-struct RSDPtr {
+struct RSDPtr
+{
     uint8_t  Signature[8];      //"RSD PTR "
     uint8_t  CheckSum;
     uint8_t  OemID[6];
@@ -65,7 +66,8 @@ struct RSDPtr {
     uint32_t RsdtAddress;       //физический адрес RSDT
 } __attribute__((packed));
 
-struct FACP {
+struct FACP
+{
     uint8_t  Signature[4];      //"FACP"
     uint32_t Length;
     uint8_t  unneded1[40 - 8];

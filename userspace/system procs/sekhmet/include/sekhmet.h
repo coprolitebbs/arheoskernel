@@ -18,7 +18,7 @@
 #ifndef SEKHMET_H
 #define SEKHMET_H
 
-//Ђлиасы
+//РђР»РёР°СЃС‹
 #define MAX_ALIASES     64
 #define ALIAS_NAME_LEN  32
 #define ALIAS_CMD_LEN   128

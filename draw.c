@@ -32,8 +32,8 @@ unsigned int pitch;
 unsigned int bytes_pp;
 
 
-//Рисование символа
-//c — байт в CP866. Для ASCII (0x00..0x7F) совпадает с codepoint
+//Рисование символа c — байт в CP866
+//Для ASCII (0x00..0x7F) совпадает с codepoint
 //Для codepoint-based рендера использовать fb->draw_codepoint
 void _draw_char(unsigned int x, unsigned int y,
                 unsigned char c,
@@ -75,11 +75,11 @@ void _draw_char(unsigned int x, unsigned int y,
     //Подготавливаем значения цветов текста и фона для разных BPP
     uint32_t fg_color32 = 0;
     uint16_t fg_color16 = 0;
-    uint8_t  fg_color8  = 0xFF; // Белый для 8-бит по умолчанию
+    uint8_t  fg_color8  = 0xFF; //Белый для 8-бит по умолчанию
 
     uint32_t bg_color32 = 0;
     uint16_t bg_color16 = 0;
-    uint8_t  bg_color8  = 0x00; // Черный для 8-бит по умолчанию
+    uint8_t  bg_color8  = 0x00; //Черный для 8-бит по умолчанию
 
     if (bpp == 16)
     {
@@ -149,6 +149,7 @@ void _draw_char(unsigned int x, unsigned int y,
 }
 
 
+//Системная обертка
 void draw_char(unsigned int x, unsigned int y, unsigned char c)
 {
     _draw_char(x,y,c,0xFF,0xFF,0xFF,1,0,0,0);
@@ -209,14 +210,14 @@ void fill_screen(unsigned char r, unsigned char g, unsigned char b)
         com_puts("\n");
 
         //В режиме без LFB на UMA память часто линейна относительно начала видео-буфера,
-        //даже если BIOS называет это "banked".
+        //даже если BIOS называет это "banked"
         //При переключении в графический режим VESA без флага LFB,
         //доступ к памяти по вычисленному адресу (если он физически верный)
-        //должен работать напрямую в защищенном режиме.
-        //Pitch в этом случае может быть просто шириной * bpp, но, все же, лучше доверять boot->pitch.
+        //должен работать напрямую в защищенном режиме
+        //Pitch в этом случае может быть просто шириной * bpp, но, все же, лучше доверять boot->pitch
     }
 
-    if (bpp == 0 || bpp > 32) bpp = 16; // Защита
+    if (bpp == 0 || bpp > 32) bpp = 16; //Защита от залетания мусора
     com_puts("[FILL] Addr: ");
     com_puthex(addr);
     com_puts(" W: ");
@@ -374,7 +375,7 @@ static void _fill_rect_raw(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint3
     }
 }
 
-//Публичная заливка - через fb-драйвер, если он есть, иначе — через raw LFB.
+//Публичная заливка - через видеодрайвер, если он есть, иначе — через raw LFB.
 //Цвет в формате 0x00RRGGBB, как у fb->fill_rect.
 //После init_graphic_layer() fb указывает на универсальную таблицу слоя
 //графики, поэтому отдельная ветка для gr_active не нужна
@@ -410,11 +411,11 @@ void kernel_fill_screen(uint32_t color)
 }
 
 
-//Fallback: fb-драйвер ещё не загружен.
-//Работаем через font_data[] — таблицу CP866-шрифта из BIOS.
-//Всё, что приходит, конвертируется в CP866-байты для _draw_char.
-//Это низкоуровневый путь для ранних паник; после init_drivers() сюда
-//попасть уже нельзя — fb->draw_string уйдёт в font_draw_codepoint.
+//Fallback: fb-драйвер ещё не загружен
+//Работаем через font_data[] — таблицу CP866-шрифта из BIOS
+//Всё, что приходит, конвертируется в CP866-байты для _draw_char
+//Это низкоуровневый путь для ранних паник, после init_drivers() сюда
+//попасть уже нельзя — fb->draw_string уйдёт в font_draw_codepoint
 void kernel_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t color)
 {
     if (fb && fb->draw_string)
@@ -424,8 +425,8 @@ void kernel_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t color)
     else
     {
         //Драйвер фреймбуфера еще не загружен. Используем низкоуровневую функцию _draw_char(),
-        //которая пишет напрямую по физическому адресу LFB из boot_info.
-        //Добавляем локальный автомат UTF-8 -> CP866, чтобы ранняя отладка кириллицы работала
+        //которая пишет напрямую по физическому адресу LFB из boot_info
+        //Вкорячен локальный автомат UTF-8 -> CP866, чтобы ранняя отладка кириллицы работала
         uint8_t lead_byte = 0;
         while (*str)
         {

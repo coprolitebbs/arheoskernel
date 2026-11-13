@@ -23,7 +23,8 @@
 
 #define PAGE_SIZE 4096
 
-typedef struct {
+typedef struct
+{
     uint32_t total_pages;
     uint32_t free_pages;
     uint32_t used_pages;

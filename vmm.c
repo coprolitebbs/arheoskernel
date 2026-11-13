@@ -48,9 +48,8 @@ static int vmm_pde_is_critical(uint32_t pd_index)
 
 
 
-//Уничтожает PD и все PT, которые ему принадлежат эксклюзивно
-//PT, совпадающие с kernel_directory (шаринг kernel-PDE), не освобождаются
-//PD == kernel_directory игнорируется (защита от идиота)
+//Уничтожает PD и все PT, которые ему принадлежат эксклюзивно PT, совпадающие с kernel_directory
+//(шаринг kernel-PDE), не освобождаются PD == kernel_directory игнорируется (защита от идиота)
 void vmm_destroy_address_space(page_directory_t *dir)
 {
     if (!dir) return;
@@ -167,7 +166,7 @@ void vmm_map_page(page_directory_t *dir, uint32_t virt, uint32_t phys, uint32_t 
         uint32_t pd_flags = PAGE_PRESENT | PAGE_WRITE;
         if (flags & PAGE_USER) pd_flags |= PAGE_USER;
         (*dir)[pd_index] = table_phys | pd_flags;
-        //kernel_directory только что получил НОВЫЙ PDE — зеркалим его во все user-PD,
+        //kernel_directory только что получил новый PDE — зеркалим его во все user-PD,
         //чтобы ядро могло обращаться к этому VA из user-контекста (CR3 = user-PD)
         if (dir == kernel_directory)
         {
@@ -222,8 +221,8 @@ void vmm_map_page(page_directory_t *dir, uint32_t virt, uint32_t phys, uint32_t 
 }
 
 
-//Маппит MMIO-регион как некэшируемый (PCD + PWT). Нужно для регистров
-//контроллеров (EHCI), чтобы CPU не читал устаревшие значения из кэша.
+//Маппит MMIO-регион как некэшируемый (PCD + PWT).
+//Нужно для регистров контроллеров (EHCI), чтобы CPU не читал устаревшие значения из кэша
 void vmm_map_pages_uncached(uint32_t phys, uint32_t size)
 {
     if (phys == 0 || size == 0) return;

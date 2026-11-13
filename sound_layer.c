@@ -38,7 +38,7 @@
 #include "include-kernel/kconsole.h"
 #include "include-kernel/use_drivers.h"
 
-//---------------- реестр драйверов ----------------
+//реестр драйверов
 #define SND_DRIVERS_MAX 8
 
 static snd_driver_t *snd_registry[SND_DRIVERS_MAX];
@@ -56,7 +56,7 @@ static uint32_t snd_layer_get_ticks(void)
     return tick_count;
 }
 
-/* ---------------- внедрение ядерного рантайма ---------------- */
+//Внедрение ядерного рантайма
 
 static void snd_inject_runtime(snd_driver_t *drv)
 {
@@ -64,13 +64,13 @@ static void snd_inject_runtime(snd_driver_t *drv)
     if (!drv->free_ptr)      drv->free_ptr      = kfree;
     if (!drv->yield_ptr)     drv->yield_ptr     = sys_yield;
     if (!drv->get_ticks_ptr) drv->get_ticks_ptr = snd_layer_get_ticks;
-    /* DMA-память: тот же путь, что и у USB-стека (uncached + wbinvd) */
+    //DMA-память: тот же путь, что и у USB-стека (uncached + wbinvd)
     if (!drv->dma_alloc_ptr) drv->dma_alloc_ptr = kernel_usb_dma_alloc;
     if (!drv->dma_free_ptr)  drv->dma_free_ptr  = kernel_usb_dma_free;
     if (!drv->printf_ptr)    drv->printf_ptr    = kprintf;
 }
 
-/* ---------------- реестр драйверов ---------------- */
+//реестр драйверов
 
 int sound_layer_register_driver(snd_driver_t *drv)
 {
@@ -89,7 +89,7 @@ int sound_layer_register_driver(snd_driver_t *drv)
     snd_inject_runtime(drv);
     snd_registry[snd_driver_count++] = drv;
 
-    /* автопереключение: нет активного или новый не менее приоритетный */
+    //автопереключение: нет активного или новый не менее приоритетный
     if (!snd_active || drv->priority >= snd_active->priority)
         snd_active = drv;
     return SND_OK;
@@ -104,7 +104,7 @@ int sound_layer_unregister_driver(const char *name)
             for (uint32_t j = i; j + 1 < snd_driver_count; j++)
                 snd_registry[j] = snd_registry[j + 1];
             snd_driver_count--;
-            /* пересчёт активного: старший по priority из оставшихся */
+            //пересчёт активного: старший по priority из оставшихся
             snd_active = 0;
             for (uint32_t k = 0; k < snd_driver_count; k++)
                 if (!snd_active || snd_registry[k]->priority > snd_active->priority)
@@ -128,10 +128,16 @@ int sound_layer_activate_driver(const char *name)
     return SND_ERR_NOTFOUND;
 }
 
-snd_driver_t *sound_layer_get_active(void) { return snd_active; }
-uint32_t sound_layer_get_driver_count(void) { return snd_driver_count; }
+snd_driver_t *sound_layer_get_active(void)
+{
+    return snd_active;
+}
+uint32_t sound_layer_get_driver_count(void)
+{
+    return snd_driver_count;
+}
 
-/* ---------------- инициализация слоя ---------------- */
+//Инициализация слоя
 
 void init_sound_layer(void)
 {
@@ -139,11 +145,10 @@ void init_sound_layer(void)
     snd_initialized = 1;
     memset(snd_cur_params, 0, sizeof(snd_cur_params));
     memset(snd_stream_open, 0, sizeof(snd_stream_open));
-    /* Звуковых fallback-драйверов в ядре нет; когда ни один драйвер не
-     * зарегистрирован, snd_* функции возвращают SND_ERR_NODEV. */
+    //Звуковых fallback-драйверов в ядре нет; когда ни один драйвер не зарегистрирован, snd_* функции возвращают SND_ERR_NODEV
 }
 
-/* ---------------- PCM ---------------- */
+//PCM
 
 int snd_pcm_open(uint32_t stream)
 {
@@ -183,25 +188,39 @@ int snd_pcm_get_hw_info(uint32_t stream, snd_pcm_hw_info_t *out)
     return SND_OK;
 }
 
-/* частота -> бит SND_RATE_* (для дискретных списков) */
+//Частота -> бит SND_RATE_* (для дискретных списков)
 static uint32_t snd_rate_bit(uint32_t rate)
 {
     switch (rate)
     {
-    case 5512:   return SND_RATE_5512;
-    case 8000:   return SND_RATE_8000;
-    case 11025:  return SND_RATE_11025;
-    case 16000:  return SND_RATE_16000;
-    case 22050:  return SND_RATE_22050;
-    case 32000:  return SND_RATE_32000;
-    case 44100:  return SND_RATE_44100;
-    case 48000:  return SND_RATE_48000;
-    case 64000:  return SND_RATE_64000;
-    case 88200:  return SND_RATE_88200;
-    case 96000:  return SND_RATE_96000;
-    case 176400: return SND_RATE_176400;
-    case 192000: return SND_RATE_192000;
-    default:     return 0;
+    case 5512:
+        return SND_RATE_5512;
+    case 8000:
+        return SND_RATE_8000;
+    case 11025:
+        return SND_RATE_11025;
+    case 16000:
+        return SND_RATE_16000;
+    case 22050:
+        return SND_RATE_22050;
+    case 32000:
+        return SND_RATE_32000;
+    case 44100:
+        return SND_RATE_44100;
+    case 48000:
+        return SND_RATE_48000;
+    case 64000:
+        return SND_RATE_64000;
+    case 88200:
+        return SND_RATE_88200;
+    case 96000:
+        return SND_RATE_96000;
+    case 176400:
+        return SND_RATE_176400;
+    case 192000:
+        return SND_RATE_192000;
+    default:
+        return 0;
     }
 }
 
@@ -212,7 +231,7 @@ int snd_pcm_set_params(uint32_t stream, const snd_pcm_params_t *params)
     if (!snd_stream_open[stream]) return SND_ERR_NOTOPEN;
     if (!snd_active->pcm->hw_params) return SND_ERR_UNSUPPORTED;
 
-    /* предварительная валидация по hw_info, если драйвер её отдаёт */
+    //Предварительная валидация по hw_info, если драйвер её отдаёт
     if (snd_active->pcm->get_hw_info)
     {
         const snd_pcm_hw_info_t *hi =
@@ -221,7 +240,7 @@ int snd_pcm_set_params(uint32_t stream, const snd_pcm_params_t *params)
         {
             if (!(hi->formats & params->format)) return SND_ERR_BADFORMAT;
             if (params->channels < hi->channels_min ||
-                params->channels > hi->channels_max) return SND_ERR_BADARG;
+                    params->channels > hi->channels_max) return SND_ERR_BADARG;
             if (hi->rates_mask & SND_RATE_CONT)
             {
                 if (params->rate < hi->rate_min || params->rate > hi->rate_max)
@@ -232,13 +251,13 @@ int snd_pcm_set_params(uint32_t stream, const snd_pcm_params_t *params)
                 return SND_ERR_BADFORMAT;
             }
             if (hi->period_min && params->period_size &&
-                params->period_size < hi->period_min) return SND_ERR_BADARG;
+                    params->period_size < hi->period_min) return SND_ERR_BADARG;
             if (hi->period_max && params->period_size &&
-                params->period_size > hi->period_max) return SND_ERR_BADARG;
+                    params->period_size > hi->period_max) return SND_ERR_BADARG;
             if (hi->buffer_min && params->buffer_size &&
-                params->buffer_size < hi->buffer_min) return SND_ERR_BADARG;
+                    params->buffer_size < hi->buffer_min) return SND_ERR_BADARG;
             if (hi->buffer_max && params->buffer_size &&
-                params->buffer_size > hi->buffer_max) return SND_ERR_BADARG;
+                    params->buffer_size > hi->buffer_max) return SND_ERR_BADARG;
         }
     }
 
@@ -324,11 +343,11 @@ int snd_pcm_read(uint32_t stream, void *buf, uint32_t bytes)
         return SND_ERR_UNSUPPORTED;
     if (!snd_stream_open[stream]) return SND_ERR_NOTOPEN;
     if (!buf || bytes == 0) return SND_ERR_BADARG;
-    /* capture через тот же transfer: направление знает драйвер */
+    //capture через тот же transfer: направление знает драйвер
     return snd_active->pcm->transfer(snd_active->priv, stream, buf, bytes);
 }
 
-/* ---------------- микшер ---------------- */
+//Микшер
 
 uint32_t snd_mixer_get_channels(void)
 {

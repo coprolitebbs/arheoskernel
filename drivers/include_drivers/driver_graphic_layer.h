@@ -45,7 +45,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-//#include "../../include-kernel/vbe_rm.h"
+
 
 //---------------- ABI ----------------
 #define GR_LAYER_ABI_VERSION 1
@@ -86,21 +86,19 @@
 #define GR_ACCEL_HLINE     0x0008
 #define GR_ACCEL_VLINE     0x0010
 
-//Область тримплина в младшей памяти. Адреса обязаны совпадать с
+//Область трамплина в младшей памяти. Адреса обязаны совпадать с
 //vbe_rm_blob.asm и gdt.c (дескрипторы с базой 0x4000 на индексах 128/129)
 //Зона 0x4000..0x4BFF не занята никем: BDA заканчивается на 0x4FF,
 //bootinfo с 0x5000, stage2 с 0x7E00, pmm никогда не раздаёт память ниже 1 МБ
-//Карта: код блоба 0x4000..0x4335 (он вырос: COM-маяки + quiet-ветка),
+//Карта: код блоба 0x4000.., вход-параметры 0x4300, результаты 0x4320,
 //служебные ячейки 0x4340..0x434f, метка целостности 0x4350, ячейки
-//IDTR/GDTR 0x4360..0x4377, quiet-флаг 0x4378, вход-параметры 0x4380,
-//результаты 0x43A0, буфер VBE 4F01 (1 КБ) 0x4400..0x47FF.
-//req/res вынесены за хвост блоба: RM-часть с маяками доросла до 0x4335,
-//и старые 0x4300/0x4320 лежали бы ВНУТРИ кода возврата pm32_ret —
-//запись параметров/результатов затирала бы команды перед retf
+//on-screen маяков 0x4370..0x4375, буфер VBE 4F01 (1 КБ) 0x4400..0x47FF.
+//Служебная зона вынесена за код блоба, чтобы runtime-записи блоба
+//физически не могли затереть код возврата
 #define VBE_RM_BLOB_ADDR 0x4000
 #define VBE_RM_BLOB_MAX  0x400
-#define VBE_RM_REQ_ADDR  0x4380
-#define VBE_RM_RES_ADDR  0x43A0
+#define VBE_RM_REQ_ADDR  0x4300
+#define VBE_RM_RES_ADDR  0x4320
 #define VBE_RM_INFO_ADDR 0x4400
 #define VBE_RM_INFO_SIZE 0x400
 
@@ -130,10 +128,10 @@ typedef struct gr_mode_info
     uint32_t flags;                       //GR_MODE_*
 } gr_mode_info_t;
 
-//---------------- неизменяемая часть (аналог fb_fix_screeninfo) ------
+//---------------- неизменяемая часть ------
 typedef struct gr_fix_info
 {
-    char     id[16];          // имя драйвера/карты: "geode_lx", "vesa"
+    char     id[16];          // имя драйвера/карты
     uint32_t smem_start;      // начало видеопамяти
     uint32_t smem_len;        // размер видеопамяти
     uint32_t type;            // GR_TYPE_*
@@ -146,8 +144,8 @@ typedef struct gr_fix_info
     uint32_t ywrapstep;
 } gr_fix_info_t;
 
-//Набор регистров для вызова BIOS int 10h через тримплин.
-//es на входе - СЕГМЕНТНЫЙ адрес буфера структуры (phys >> 4), 0 если не нужен
+//Набор регистров для вызова BIOS int 10h через трамплин.
+//es на входе - сегментный адрес буфера структуры (phys >> 4), 0 если не нужен
 //на выходе - фактический ES после BIOS-вызова
 typedef struct vbe_rm_regs
 {

@@ -19,7 +19,7 @@
 #define DEBUG_H
 
 #include <stdint.h>
-#include <stddef.h>   // для size_t
+#include <stddef.h>   //для size_t
 
 extern unsigned int dbgp;
 

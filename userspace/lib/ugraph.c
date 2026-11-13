@@ -63,27 +63,22 @@ int u_gr_set_mode(uint32_t index)
     return ret;
 }
 
-//Примитивы графического слоя: заливка/линия/копирование/блит через
-//активный видеодрайвер (на Geode — аппаратные GP fill/copy/вектор).
-//params — int32[6] в памяти задачи, ядро читает их напрямую из CR3 задачи
-int u_gr_prim(uint32_t op, const int32_t *params)
-{
-    int ret;
-    __asm__ __volatile__("int $0x80" : "=a"(ret)
-                         : "a"(SYS_GR_PRIM), "b"(op), "c"(params) : "memory");
-    return ret;
-}
-
 const char *u_gr_visual_name(uint32_t visual)
 {
     switch (visual)
     {
-    case U_GR_VISUAL_MONO01:      return "mono01";
-    case U_GR_VISUAL_MONO10:      return "mono10";
-    case U_GR_VISUAL_PSEUDOCOLOR: return "pseudocolor";
-    case U_GR_VISUAL_TRUECOLOR:   return "truecolor";
-    case U_GR_VISUAL_DIRECTCOLOR: return "directcolor";
-    default:                      return "unknown";
+    case U_GR_VISUAL_MONO01:
+        return "mono01";
+    case U_GR_VISUAL_MONO10:
+        return "mono10";
+    case U_GR_VISUAL_PSEUDOCOLOR:
+        return "pseudocolor";
+    case U_GR_VISUAL_TRUECOLOR:
+        return "truecolor";
+    case U_GR_VISUAL_DIRECTCOLOR:
+        return "directcolor";
+    default:
+        return "unknown";
     }
 }
 
@@ -91,9 +86,24 @@ const char *u_gr_type_name(uint32_t type)
 {
     switch (type)
     {
-    case U_GR_TYPE_PACKED_PIXELS: return "packed_pixels";
-    case U_GR_TYPE_PLANES:        return "planes";
-    case U_GR_TYPE_VGA_PLANES:    return "vga_planes";
-    default:                      return "unknown";
+    case U_GR_TYPE_PACKED_PIXELS:
+        return "packed_pixels";
+    case U_GR_TYPE_PLANES:
+        return "planes";
+    case U_GR_TYPE_VGA_PLANES:
+        return "vga_planes";
+    default:
+        return "unknown";
     }
+}
+
+
+//Примитивы графического слоя: заливка/линия/копирование/блит через активный видеодрайвер
+//(на Geode — аппаратные GP fill/copy/вектор)
+//params — int32[6] в памяти задачи, ядро читает их напрямую из CR3 задачи
+int u_gr_prim(uint32_t op, const int32_t *params)
+{
+    int ret;
+    __asm__ __volatile__("int $0x80" : "=a"(ret) : "a"(SYS_GR_PRIM), "b"(op), "c"(params) : "memory");
+    return ret;
 }

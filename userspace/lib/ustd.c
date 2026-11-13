@@ -693,7 +693,7 @@ int scanf(const char *format, ...)
                     //%Ns пишем не больше N символов (+ '\0') — как требует
                     //стандарт; без ширины поведение прежнее (без ограничений)
                     while (*str_ptr != '\0' && *str_ptr != ' ' && *str_ptr != '\t' && *str_ptr != '\n' && *str_ptr != '\r' &&
-                           (field_width <= 0 || s_idx < field_width))
+                            (field_width <= 0 || s_idx < field_width))
                     {
                         str_dst[s_idx++] = *str_ptr++;
                     }

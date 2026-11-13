@@ -17,7 +17,7 @@
 
 //vesa_fb.c — универсальный драйвер VESA VBE по модели simplefb.
 //
-//Драйвер не программирует железо и не умеет рисовать: он умеет
+//Драйвер умеет
 //  1) прочитать таблицу режимов, собранную stage2 (vbe.inc -> bootinfo);
 //  2) отдать её графическому слою через gr_ops_t (get_mode_count/get_mode);
 //  3) переключать режимы на ходу через сервис vbe_rm_exec (int 10h 4F02
@@ -134,24 +134,33 @@ static void vesa_fill_mode(uint32_t index, gr_mode_info_t *m)
     //8 — палитра (слой сам знает)
     if (m->bpp == 16)
     {
-        m->red.offset = 11; m->red.length = 5;
-        m->green.offset = 5; m->green.length = 6;
-        m->blue.offset = 0; m->blue.length = 5;
+        m->red.offset = 11;
+        m->red.length = 5;
+        m->green.offset = 5;
+        m->green.length = 6;
+        m->blue.offset = 0;
+        m->blue.length = 5;
     }
     else if (m->bpp >= 24)
     {
-        m->red.offset = 16; m->red.length = 8;
-        m->green.offset = 8; m->green.length = 8;
-        m->blue.offset = 0; m->blue.length = 8;
+        m->red.offset = 16;
+        m->red.length = 8;
+        m->green.offset = 8;
+        m->green.length = 8;
+        m->blue.offset = 0;
+        m->blue.length = 8;
     }
 
     //прочитанные из 4F01 раскладки точнее дефолта — перекрываем, если есть
     const struct vbe_bitfields *bf = &vbe_bits[index];
     if (bf->bf_r_len && bf->bf_g_len && bf->bf_b_len)
     {
-        m->red.offset = bf->bf_r_off;     m->red.length = bf->bf_r_len;
-        m->green.offset = bf->bf_g_off;   m->green.length = bf->bf_g_len;
-        m->blue.offset = bf->bf_b_off;    m->blue.length = bf->bf_b_len;
+        m->red.offset = bf->bf_r_off;
+        m->red.length = bf->bf_r_len;
+        m->green.offset = bf->bf_g_off;
+        m->green.length = bf->bf_g_len;
+        m->blue.offset = bf->bf_b_off;
+        m->blue.length = bf->bf_b_len;
     }
 
     m->lfb = r->phys_base;
@@ -196,8 +205,7 @@ static int vs_get_fix(void *priv, gr_fix_info_t *out)
 
 //ключевой принцип: после успешного 4F02 железо уже в новом режиме, и
 //возвращать ошибку нельзя — слой остался бы на старой геометрии и рисовал
-//бы мусор в чужой LFB (ровно те артефакты и расчетверивание, что наблюдали
-//на S3 Trio). поэтому после 4F02 любой сбор геометрии завершается либо
+//бы мусор в чужой LFB, поэтому после 4F02 любой сбор геометрии завершается либо
 //фактическими данными железа, либо записью stage2-таблицы, которую тот же
 //биос проверил при перечислении на буте
 static int vs_set_mode(void *priv, uint32_t index)
@@ -361,10 +369,13 @@ static int vs_set_mode(void *priv, uint32_t index)
         yres     = (uint32_t)mi[0x14] | ((uint32_t)mi[0x15] << 8);
         bpp      = mi[0x19];
         phys     = (uint32_t)mi[0x28] | ((uint32_t)mi[0x29] << 8)
-                 | ((uint32_t)mi[0x2A] << 16) | ((uint32_t)mi[0x2B] << 24);
-        bf_r_len = mi[0x1F]; bf_r_off = mi[0x20];
-        bf_g_len = mi[0x21]; bf_g_off = mi[0x22];
-        bf_b_len = mi[0x23]; bf_b_off = mi[0x24];
+                   | ((uint32_t)mi[0x2A] << 16) | ((uint32_t)mi[0x2B] << 24);
+        bf_r_len = mi[0x1F];
+        bf_r_off = mi[0x20];
+        bf_g_len = mi[0x21];
+        bf_g_off = mi[0x22];
+        bf_b_len = mi[0x23];
+        bf_b_off = mi[0x24];
 
         vcom_puts("[VESA] 4F01 try");
         vcom_putc((char)('0' + attempt));
@@ -395,8 +406,8 @@ static int vs_set_mode(void *priv, uint32_t index)
         if (bf_r_len && bf_g_len && bf_b_len)
         {
             if (bf_r_off + bf_r_len > bpp ||
-                bf_g_off + bf_g_len > bpp ||
-                bf_b_off + bf_b_len > bpp)
+                    bf_g_off + bf_g_len > bpp ||
+                    bf_b_off + bf_b_len > bpp)
             {
                 vcom_puts("[VESA] bitfields insane, drop\n");
                 bf_r_len = bf_g_len = bf_b_len = 0;
@@ -452,10 +463,10 @@ static int vs_set_mode(void *priv, uint32_t index)
             vcom_puthex(pitch);
             vcom_puts("\n");
         }
-        //ответ 4F01 принимается только при ТОЧНОМ совпадении xres/yres/bpp
+        //ответ 4F01 принимается только при точном совпадении xres/yres/bpp
         //с опорной записью — той геометрией, что этот же BIOS отдал при
         //перечислении на буте для этого же номера режима. проверка
-        //"известный среди всех записей" пропускала ответ геометрией ЧУЖОГО,
+        //"известный среди всех записей" пропускала ответ геометрией чужого,
         //но известного режима (S3 Trio64 после смены отчитывался то
         //вдвое-вчетверо меньшей геометрией, то геометрией соседнего режима
         //из списка): запись портилась, слой рисовал по уехавшей геометрии —
@@ -478,7 +489,7 @@ static int vs_set_mode(void *priv, uint32_t index)
         uint32_t bytes = xres * ((bpp + 7) / 8);
         uint32_t pitch_ref = (ref->pitch >= bytes) ? ref->pitch : bytes;
         if (pitch < bytes || pitch > bytes * 2 ||
-            pitch == pitch_ref * 2 || pitch_ref == pitch * 2)
+                pitch == pitch_ref * 2 || pitch_ref == pitch * 2)
         {
             if (pitch != pitch_ref)
             {
@@ -554,7 +565,7 @@ static int vs_set_mode(void *priv, uint32_t index)
     vesa_fix.smem_len = (uint32_t)vesa_cur_mode.pitch * vesa_cur_mode.yres;
     vesa_fix.type = GR_TYPE_PACKED_PIXELS;
     vesa_fix.visual = (vesa_cur_mode.bpp == 8) ? GR_VISUAL_PSEUDOCOLOR
-                                               : GR_VISUAL_TRUECOLOR;
+                      : GR_VISUAL_TRUECOLOR;
     vesa_fix.line_length = vesa_cur_mode.pitch;
 
     //дескриптор маяков под новую геометрию: следующий вызов блоба рисует
@@ -606,9 +617,9 @@ void driver_main(struct boot_info *boot)
     {
         if (vbe_recs[i].bpp == 8) continue;
         if (vbe_recs[i].bpp != 16 && vbe_recs[i].bpp != 24 &&
-            vbe_recs[i].bpp != 32) continue;
+                vbe_recs[i].bpp != 32) continue;
         if (vbe_recs[i].xres == 0 || vbe_recs[i].yres == 0 ||
-            vbe_recs[i].phys_base == 0) continue;
+                vbe_recs[i].phys_base == 0) continue;
         if (vbe_recs[i].yres < 400)
         {
             vcom_puts("[VESA] skip doublescan-suspect mode ");
@@ -667,9 +678,12 @@ void driver_main(struct boot_info *boot)
     //значения от прошлого режима недействительны
     for (uint32_t i = 0; i < vbe_drawable; i++)
     {
-        vbe_bits[i].bf_r_len = 0; vbe_bits[i].bf_r_off = 0;
-        vbe_bits[i].bf_g_len = 0; vbe_bits[i].bf_g_off = 0;
-        vbe_bits[i].bf_b_len = 0; vbe_bits[i].bf_b_off = 0;
+        vbe_bits[i].bf_r_len = 0;
+        vbe_bits[i].bf_r_off = 0;
+        vbe_bits[i].bf_g_len = 0;
+        vbe_bits[i].bf_g_off = 0;
+        vbe_bits[i].bf_b_len = 0;
+        vbe_bits[i].bf_b_off = 0;
     }
 
     //текущий режим: сначала индекс из bootinfo (он в индексах сырой таблицы,
@@ -694,8 +708,8 @@ void driver_main(struct boot_info *boot)
             uint32_t b = boot->bpp;
             if (b == 15) b = 16;            //так же, как в fb_driver.c
             if (rec->xres == boot->width &&
-                rec->yres == boot->height &&
-                rec->bpp == b)
+                    rec->yres == boot->height &&
+                    rec->bpp == b)
             {
                 cur = i;
                 break;
@@ -715,7 +729,7 @@ void driver_main(struct boot_info *boot)
     vesa_fix.smem_len = vesa_cur_mode.pitch * vesa_cur_mode.yres;
     vesa_fix.type = GR_TYPE_PACKED_PIXELS;
     vesa_fix.visual = (vesa_cur_mode.bpp == 8) ? GR_VISUAL_PSEUDOCOLOR
-                                               : GR_VISUAL_TRUECOLOR;
+                      : GR_VISUAL_TRUECOLOR;
     vesa_fix.line_length = vesa_cur_mode.pitch;
 
     memset(&vesa_ops, 0, sizeof(vesa_ops));

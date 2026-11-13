@@ -25,8 +25,10 @@ uint32_t msc_tag = 0x12345678;
 //Подчистка Feature ENDPOINT_HALT на указанном endpoint
 //После STALL на bulk endpoint, device остаётся залипшим до этого вызова
 static int usb_msc_clear_halt(usb_hc_t *hc, uint8_t dev_addr,
-                              uint8_t ep_addr, uint16_t ep0_max){
-    uint8_t setup[8] = {
+                              uint8_t ep_addr, uint16_t ep0_max)
+{
+    uint8_t setup[8] =
+    {
         0x02,                    //host-to-device, standard, endpoint
         0x01,                    //CLEAR_FEATURE
         0x00, 0x00,              //wValue = ENDPOINT_HALT (0)
@@ -40,11 +42,13 @@ static int usb_msc_clear_halt(usb_hc_t *hc, uint8_t dev_addr,
 //Устройство после этого должно сбросить внутреннее состояние
 //и очистить halt-состояние на обоих bulk endpoint
 static int usb_msc_bot_reset(usb_hc_t *hc, uint8_t dev_addr,
-                             usb_msc_iface_t *iface){
+                             usb_msc_iface_t *iface)
+{
     uint16_t ep0_max = iface->ep0_max_pkt ? iface->ep0_max_pkt : 8;
 
     //BOT Reset (class-specific)
-    uint8_t setup[8] = {
+    uint8_t setup[8] =
+    {
         0x21,                    //host-to-device, class, interface
         0xFF,                    //BOT_RESET
         0x00, 0x00,              //wValue = 0
@@ -75,10 +79,11 @@ static int usb_msc_bot_reset(usb_hc_t *hc, uint8_t dev_addr,
 //Возвращает длину данных, реально переданных в data phase (0 если нет data),
 //или отрицательный код при ошибке
 int usb_msc_bot_transfer(usb_hc_t *hc, uint8_t dev_addr,
-                                usb_msc_iface_t *iface,
-                                const uint8_t *cb, uint8_t cb_len,
-                                uint8_t *data, uint32_t data_len,
-                                int data_in){
+                         usb_msc_iface_t *iface,
+                         const uint8_t *cb, uint8_t cb_len,
+                         uint8_t *data, uint32_t data_len,
+                         int data_in)
+{
 
     usb_msc_cbw_t cbw;
     memset(&cbw, 0, sizeof(cbw));
@@ -93,12 +98,14 @@ int usb_msc_bot_transfer(usb_hc_t *hc, uint8_t dev_addr,
     //CBW на Bulk OUT. Текущий OUT-toggle — продолжаем per-endpoint,
     //но перед первым CBW после SET_CONFIGURATION он должен быть 0
     int r = usb_hc_bulk_transfer(hc, dev_addr, iface->bulk_out_addr,
-                               iface->bulk_out_max_pkt, &iface->bulk_out_toggle,
-                               &cbw, sizeof(cbw), 0);
-    if (r != (int)sizeof(cbw)){
+                                 iface->bulk_out_max_pkt, &iface->bulk_out_toggle,
+                                 &cbw, sizeof(cbw), 0);
+    if (r != (int)sizeof(cbw))
+    {
         //STALL или другая hard-ошибка на CBW — пробуем recovery
         //Если recovery тоже провалится, устройство безнадёжно на этой итерации
-        if (usb_msc_bot_reset(hc, dev_addr, iface) == 0){
+        if (usb_msc_bot_reset(hc, dev_addr, iface) == 0)
+        {
             return -10;   //recovery прошёл, но текущий CBW всё равно надо повторить сверху
         }
         return -10;
@@ -106,15 +113,18 @@ int usb_msc_bot_transfer(usb_hc_t *hc, uint8_t dev_addr,
 
     //Data phase — продолжает per-endpoint toggle
     int data_result = 0;
-    if (data_len > 0 && data){
+    if (data_len > 0 && data)
+    {
         uint8_t *dp = data;
         uint16_t mp = data_in ? iface->bulk_in_max_pkt : iface->bulk_out_max_pkt;
         uint8_t *tg = data_in ? &iface->bulk_in_toggle  : &iface->bulk_out_toggle;
         r = usb_hc_bulk_transfer(hc, dev_addr,
-                               data_in ? iface->bulk_in_addr : iface->bulk_out_addr,
-                               mp, tg, dp, data_len, data_in);
-        if (r < 0){
-            if (usb_msc_bot_reset(hc, dev_addr, iface) == 0){
+                                 data_in ? iface->bulk_in_addr : iface->bulk_out_addr,
+                                 mp, tg, dp, data_len, data_in);
+        if (r < 0)
+        {
+            if (usb_msc_bot_reset(hc, dev_addr, iface) == 0)
+            {
                 return -11;
             }
             return -11;
@@ -126,9 +136,10 @@ int usb_msc_bot_transfer(usb_hc_t *hc, uint8_t dev_addr,
     usb_msc_csw_t csw;
     memset(&csw, 0, sizeof(csw));
     r = usb_hc_bulk_transfer(hc, dev_addr, iface->bulk_in_addr,
-                           iface->bulk_in_max_pkt, &iface->bulk_in_toggle,
-                           &csw, sizeof(csw), 1);
-    if (r != (int)sizeof(csw)){
+                             iface->bulk_in_max_pkt, &iface->bulk_in_toggle,
+                             &csw, sizeof(csw), 1);
+    if (r != (int)sizeof(csw))
+    {
         usb_msc_bot_reset(hc, dev_addr, iface);
         return -12;
     }
@@ -142,8 +153,10 @@ int usb_msc_bot_transfer(usb_hc_t *hc, uint8_t dev_addr,
 
 
 int usb_msc_inquiry(usb_hc_t *hc, uint8_t dev_addr,
-                           usb_msc_iface_t *iface){
-    uint8_t cb[6] = {
+                    usb_msc_iface_t *iface)
+{
+    uint8_t cb[6] =
+    {
         0x12,        //INQUIRY
         0x00,        //EVPD=0, CmdDt=0
         0x00,        //PageCode=0
@@ -158,9 +171,11 @@ int usb_msc_inquiry(usb_hc_t *hc, uint8_t dev_addr,
 }
 
 int usb_msc_read_capacity(usb_hc_t *hc, uint8_t dev_addr,
-                                 usb_msc_iface_t *iface,
-                                 uint32_t *out_sectors, uint32_t *out_size){
-    uint8_t cb[10] = {
+                          usb_msc_iface_t *iface,
+                          uint32_t *out_sectors, uint32_t *out_size)
+{
+    uint8_t cb[10] =
+    {
         0x25,        //READ CAPACITY(10)
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  //LBA=0, PMI=0
         0x00, 0x00                                  //reserved
@@ -174,11 +189,11 @@ int usb_msc_read_capacity(usb_hc_t *hc, uint8_t dev_addr,
     uint32_t last_lba = ((uint32_t)buf[0] << 24) |
                         ((uint32_t)buf[1] << 16) |
                         ((uint32_t)buf[2] <<  8) |
-                         (uint32_t)buf[3];
+                        (uint32_t)buf[3];
     uint32_t blk_size = ((uint32_t)buf[4] << 24) |
                         ((uint32_t)buf[5] << 16) |
                         ((uint32_t)buf[6] <<  8) |
-                         (uint32_t)buf[7];
+                        (uint32_t)buf[7];
 
     *out_sectors = last_lba + 1;
     *out_size    = blk_size;
@@ -186,12 +201,14 @@ int usb_msc_read_capacity(usb_hc_t *hc, uint8_t dev_addr,
 }
 
 //REQUEST SENSE(18): снять CHECK CONDITION (unit attention) и забрать sense-данные.
-//По SPC unit attention НЕ репортится на INQUIRY и НЕ снимается им — поэтому
+//По SPC unit attention не репортится на INQUIRY и не снимается им — поэтому
 //первая после подключения реальная команда (READ CAPACITY) ловит CSW status=1.
 //На hotplug-вставке это штатный путь, без request_sense MSC не инициализируется
 static int usb_msc_request_sense(usb_hc_t *hc, uint8_t dev_addr,
-                                 usb_msc_iface_t *iface){
-    uint8_t cb[6] = {
+                                 usb_msc_iface_t *iface)
+{
+    uint8_t cb[6] =
+    {
         0x03,        //REQUEST SENSE
         0x00, 0x00, 0x00,
         18,          //allocation length
@@ -205,7 +222,8 @@ static int usb_msc_request_sense(usb_hc_t *hc, uint8_t dev_addr,
 
 int usb_msc_init(usb_hc_t *hc, uint8_t dev_addr,
                  usb_msc_iface_t *iface,
-                 uint32_t *out_sector_count, uint32_t *out_sector_size){
+                 uint32_t *out_sector_count, uint32_t *out_sector_size)
+{
 
     if (!hc || !iface || !out_sector_count || !out_sector_size) return -1;
 
@@ -237,7 +255,8 @@ int usb_msc_init(usb_hc_t *hc, uint8_t dev_addr,
 //Внутри режет на CBW-батчи, которые влезают в MAX_BULK_TDS*max_pkt
 int usb_msc_read10(usb_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
                    uint32_t lba, uint32_t sectors, uint32_t sector_size,
-                   void *buf){
+                   void *buf)
+{
     if (!hc || !iface || !buf || sectors == 0 || sector_size == 0) return -1;
 
     uint32_t max_batch = (MAX_BULK_TDS * iface->bulk_in_max_pkt) / sector_size;
@@ -246,7 +265,8 @@ int usb_msc_read10(usb_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
     uint8_t *ptr = (uint8_t *)buf;
     uint32_t done = 0;
 
-    while (done < sectors){
+    while (done < sectors)
+    {
         uint32_t batch = sectors - done;
         if (batch > max_batch) batch = max_batch;
         if (batch > 65535)     batch = 65535;   //предел SCSI READ(10)
@@ -254,7 +274,8 @@ int usb_msc_read10(usb_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
         uint32_t cur_lba = lba + done;
         uint32_t data_len = batch * sector_size;
 
-        uint8_t cb[10] = {
+        uint8_t cb[10] =
+        {
             0x28,                                     //READ(10)
             0x00,
             (uint8_t)((cur_lba >> 24) & 0xFF),
@@ -278,7 +299,8 @@ int usb_msc_read10(usb_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
 
 int usb_msc_write10(usb_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
                     uint32_t lba, uint32_t sectors, uint32_t sector_size,
-                    const void *buf){
+                    const void *buf)
+{
     if (!hc || !iface || !buf || sectors == 0 || sector_size == 0) return -1;
 
     uint32_t max_batch = (MAX_BULK_TDS * iface->bulk_out_max_pkt) / sector_size;
@@ -287,7 +309,8 @@ int usb_msc_write10(usb_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
     const uint8_t *ptr = (const uint8_t *)buf;
     uint32_t done = 0;
 
-    while (done < sectors){
+    while (done < sectors)
+    {
         uint32_t batch = sectors - done;
         if (batch > max_batch) batch = max_batch;
         if (batch > 65535)     batch = 65535;
@@ -295,7 +318,8 @@ int usb_msc_write10(usb_hc_t *hc, uint8_t dev_addr, usb_msc_iface_t *iface,
         uint32_t cur_lba = lba + done;
         uint32_t data_len = batch * sector_size;
 
-        uint8_t cb[10] = {
+        uint8_t cb[10] =
+        {
             0x2A,                                     //WRITE(10)
             0x00,
             (uint8_t)((cur_lba >> 24) & 0xFF),

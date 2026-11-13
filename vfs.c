@@ -91,7 +91,7 @@ static int vfs_find_mount_slot(const char *path, uint32_t *out_match_len)
             //Для вложенных папок (например, "/floppy") делаем строгую проверку префикса
             if (strncmp(path, vfs_mount_table[i].mount_point, mnt_len) == 0)
             {
-                // Защита границ токена: после префикса должен быть конец строки либо слэш
+                //Защита границ токена: после префикса должен быть конец строки либо слэш
                 if (path[mnt_len] == '\0' || path[mnt_len] == '/')
                 {
                     if (mnt_len > max_match_len)
@@ -160,7 +160,7 @@ int vfs_mount(const char *mount_point, fs_driver_api_t *driver, uint32_t drive_i
         {
             if (strcmp(vfs_mount_table[i].mount_point, mount_point) == 0)
             {
-                return VFS_STATUS_ALREADY_EXISTS; // Точка монтирования уже занята
+                return VFS_STATUS_ALREADY_EXISTS; //Точка монтирования уже занята
             }
         }
     }

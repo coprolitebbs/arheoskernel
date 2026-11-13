@@ -14,6 +14,7 @@
 				<Option compiler="null" />
 			</Target>
 		</Build>
+		<Unit filename="Makefile" />
 		<Unit filename="bochsrc.txt" />
 		<Unit filename="boot_1440.asm" />
 		<Unit filename="boot_720.asm" />
@@ -79,6 +80,12 @@
 		</Unit>
 		<Unit filename="drivers/fb_driver/fb_start.asm" />
 		<Unit filename="drivers/fb_driver/include/fb_driver.h" />
+		<Unit filename="drivers/geode_gx1_graphic_driver/geode_start.asm" />
+		<Unit filename="drivers/geode_gx1_graphic_driver/geodegx.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/include_drivers/driver_graphic_layer.h" />
+		<Unit filename="drivers/include_drivers/driver_sound_layer.h" />
 		<Unit filename="drivers/include_drivers/drv_format.h" />
 		<Unit filename="drivers/kbd_driver/include/kbd_driver.h" />
 		<Unit filename="drivers/kbd_driver/include/kbd_internal.h" />
@@ -108,6 +115,10 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="drivers/userspace_driver.ld" />
+		<Unit filename="drivers/vesa_fb/vesa_fb.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/vesa_fb/vesa_start.asm" />
 		<Unit filename="f12ld.asm" />
 		<Unit filename="font.c">
 			<Option compilerVar="CC" />
@@ -119,6 +130,9 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="gdt.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="graphic_layer.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="hardware.c">
@@ -137,6 +151,7 @@
 		<Unit filename="include-kernel/font_data.h" />
 		<Unit filename="include-kernel/font_vga.h" />
 		<Unit filename="include-kernel/gdt.h" />
+		<Unit filename="include-kernel/graphic_layer.h" />
 		<Unit filename="include-kernel/hardware.h" />
 		<Unit filename="include-kernel/isr.h" />
 		<Unit filename="include-kernel/kbd_translate.h" />
@@ -150,11 +165,13 @@
 		<Unit filename="include-kernel/locale_types.h" />
 		<Unit filename="include-kernel/pmm.h" />
 		<Unit filename="include-kernel/ports_io.h" />
+		<Unit filename="include-kernel/sound_layer.h" />
 		<Unit filename="include-kernel/spinlock.h" />
 		<Unit filename="include-kernel/syscalls.h" />
 		<Unit filename="include-kernel/task.h" />
 		<Unit filename="include-kernel/usb_registry.h" />
 		<Unit filename="include-kernel/use_drivers.h" />
+		<Unit filename="include-kernel/vbe_rm.h" />
 		<Unit filename="include-kernel/vfs.h" />
 		<Unit filename="include-kernel/vmm.h" />
 		<Unit filename="include/a20.inc" />
@@ -173,6 +190,7 @@
 		<Unit filename="include/ext2disk.inc" />
 		<Unit filename="include/fat12_bootinfo.inc" />
 		<Unit filename="include/fat12_stage2.inc" />
+		<Unit filename="include/fdc_pio.inc" />
 		<Unit filename="include/font.inc" />
 		<Unit filename="include/gdt.inc" />
 		<Unit filename="include/graphics.inc" />
@@ -213,6 +231,9 @@
 		<Unit filename="ports_io.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="sound_layer.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="syscalls.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -232,6 +253,9 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/examples/cat/ucat.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/examples/gputest/gputest.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/examples/hello/hello.c">
@@ -256,6 +280,7 @@
 		<Unit filename="userspace/include/uconfig.h" />
 		<Unit filename="userspace/include/udevices.h" />
 		<Unit filename="userspace/include/udevices_struct.h" />
+		<Unit filename="userspace/include/ugraph.h" />
 		<Unit filename="userspace/include/uimage.h" />
 		<Unit filename="userspace/include/umemory.h" />
 		<Unit filename="userspace/include/ustd.h" />
@@ -263,6 +288,9 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/lib/udevices.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/lib/ugraph.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/lib/uimage.c">
@@ -312,10 +340,16 @@
 		<Unit filename="userspace/system procs/free/free.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="userspace/system procs/graphinfo/graphinfo.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="userspace/system procs/halt/halt.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/ls/ls.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="userspace/system procs/lspci/lspci.c">
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="userspace/system procs/lsusb/lsusb.c">
@@ -352,6 +386,10 @@
 		<Unit filename="userspace/system procs/touch/touch.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="vbe_rm.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="vbe_rm_blob.asm" />
 		<Unit filename="vfs.c">
 			<Option compilerVar="CC" />
 		</Unit>
