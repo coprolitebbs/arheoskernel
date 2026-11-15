@@ -40,7 +40,6 @@
 #include "include-kernel/graphic_layer.h"
 #include "userspace/include/ugraph.h"
 #include "include-kernel/hardware.h"
-#include "include-kernel/mouse_core.h"
 
 // Состояние модификаторов клавиатуры в ядре
 bool shift_pressed = false;

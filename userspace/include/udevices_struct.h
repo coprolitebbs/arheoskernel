@@ -71,14 +71,9 @@ typedef usb_dev_record_t u_usb_dev_t;
 //Пользовательское зеркало — тот же layout, другое имя типа, чтобы userspace-код не тянул ядерные заголовки
 typedef pci_dev_record_t u_pci_dev_t;
 
-
-//Структура для SYS_MOUSE_POLL (ebx = указатель на неё, user memory)
-typedef struct {
-    int32_t x, y;          //абсолютная позиция курсора, пиксели
-    int32_t dx, dy;        //дельта с прошлого SYS_MOUSE_POLL
-    int32_t wheel;         //накопленное колесо (положительное = вверх)
-    uint32_t buttons;      //bit0=L, bit1=R, bit2=M
-} u_mouse_state_t;
+//Структура для SYS_MOUSE_POLL живет в mouse.h (u_mouse_state_t, зеркалит
+//mouse_state_t из drv_format.h: int16-поля, 10 байт). Ранняя int32-версия
+//отсюда удалена — она не совпадала с тем, что ядро пишет в user memory
 
 #endif
 

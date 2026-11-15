@@ -18,9 +18,7 @@
 //mouse.c — пользовательские обертки над системными вызовами мыши
 //(по стилю аналогично ugraph.c). Линкуется в приложение как u_mouse.o.
 
-#include "../include/mouse.h"
-#include "../include/syscall.h"   //SYS_YIELD; если в syscall.h уже есть
-                                  //SYS_MOUSE_* — константы возьмутся оттуда
+#include "../include/mouse.h"      //SYS_MOUSE_* тянутся из syscall.h через mouse.h
 
 //SYS_MOUSE_GET: eax=номер, -> eax=x (или -1), ebx=y, ecx=buttons
 int u_mouse_get(int16_t *x, int16_t *y, uint8_t *buttons)

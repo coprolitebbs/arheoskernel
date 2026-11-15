@@ -38,7 +38,6 @@
 #include "include-kernel/kload_screen.h"
 #include "include-kernel/graphic_layer.h"
 #include "include-kernel/sound_layer.h"
-#include "include-kernel/mouse_core.h"
 
 static spinlock_t sched_spinlock = {0};
 
@@ -161,9 +160,13 @@ void schedule(struct regs *r)
     //Вызываем сборщик мусора ядра
     cleanup_tasks();
 
-    //Опрос мыши: агрегация дельт всех провайдеров в единый курсор
-    //Неблокирующий (только вычитка AUX-буфера 8042), вызывается под cli
-    mouse_core_tick();
+    //Опрос мыши: единый курсор живет внутри mouse.drv (модель Windows), ядро
+    //просто дергает poll(), чтобы AUX-буфер 8042 вычитывался даже тогда, когда
+    //приложения не звали SYS_MOUSE_*. Неблокирующе, вызывается под cli
+    if (mouse_driver_api && mouse_driver_api->enabled && mouse_driver_api->poll){
+        mouse_state_t ms;
+        mouse_driver_api->poll(&ms);
+    }
 
     //Ищем следующую готовую задачу Ring 3 в кольце очереди
     task_t *next_task = NULL;
@@ -1399,7 +1402,9 @@ void kernel_init_thread(void)
     }
 
     load_screen_add_string("Spawning Chorus & Sekhmet");
-for(;;);
+    //for(;;);  //отладочная остановка удалена: она замораживала init-поток после
+                //этой строки, и Chorus/Sekhmet не запускались никогда
+
     //draw_hex_dword(console_bgcolor, 20, 50);
     //task_spawn_from_file("/usbin/hello.bin", 0x40000000,"-v --test-mode");
     task_spawn_from_file("/bin/chorus.bin", 0x40000000, NULL);

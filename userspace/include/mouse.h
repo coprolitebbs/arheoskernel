@@ -23,18 +23,7 @@
 #define U_MOUSE_H
 
 #include <stdint.h>
-
-//Номера системных вызовов (syscalls.h ядра). Если в вашей версии ядра
-//номера другие — поправьте здесь три константы.
-#ifndef SYS_MOUSE_GET
-#define SYS_MOUSE_GET     67
-#endif
-#ifndef SYS_MOUSE_POLL
-#define SYS_MOUSE_POLL    68
-#endif
-#ifndef SYS_MOUSE_SET_POS
-#define SYS_MOUSE_SET_POS 69
-#endif
+#include "syscall.h"               //SYS_MOUSE_* — единый источник номеров
 
 //Кнопки (биты в buttons): bit0=L, bit1=R, bit2=M
 #define U_MOUSE_BTN_LEFT    0x01
@@ -62,7 +51,7 @@ typedef struct{
 int u_mouse_get(int16_t *x, int16_t *y, uint8_t *buttons);
 
 //Дельта с прошлого вызова + текущее состояние. Возвращает 0/-1.
-//ВНИМАНИЕ: u_mouse_get и u_mouse_poll читают один и тот же аккумулятор
+//Замечание: u_mouse_get и u_mouse_poll читают один и тот же аккумулятор
 //драйвера — используйте в приложении что-то одно.
 int u_mouse_poll(u_mouse_state_t *out);
 

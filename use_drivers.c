@@ -39,7 +39,6 @@
 #include "include-kernel/font.h"
 #include "include-kernel/kload_screen.h"
 #include "include-kernel/usb_registry.h"
-#include "include-kernel/mouse_core.h"
 
 //указатель на api драйвера framebuffer
 fb_driver_api_t *fb = 0;
