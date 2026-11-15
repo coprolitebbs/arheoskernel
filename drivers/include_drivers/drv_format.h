@@ -45,11 +45,24 @@
 //Высокоуровневые слои графики/звука (kernel_graphic_layer.h / kernel_sound_layer.h)
 #define DESCR_GRAPHICS_DRIVER      6
 #define DESCR_SOUND_DRIVER         7
+#define DESCR_MOUSE_DRIVER         8
 
 
 #define BLK_REMOVABLE   0x0001
 #define BLK_READONLY    0x0002
 #define BLK_PARTITION   0x0004
+
+//Типы подключенных мышей
+#define MOUSE_PTYPE_PS2       1   //PS/2 AUX (i8042, IRQ12)
+#define MOUSE_PTYPE_USB_HID   2   //USB HID boot-protocol мышь (регистрируется usb-драйвером)
+
+//Битовая маска кнопок в mouse_delta_t.buttons
+#define MOUSE_BTN_LEFT     0x01
+#define MOUSE_BTN_RIGHT    0x02
+#define MOUSE_BTN_MIDDLE   0x04
+
+//Íàколько MAX устройств-указателей может быть зарегистрировано
+#define MAX_POINT_DEVICES  4
 
 typedef struct
 {
@@ -322,6 +335,86 @@ typedef struct
     uint8_t scancode; //Физический скан-код клавиши (1..127)
     uint8_t type;     //1 - Нажата (Press), 0 - Отпущена (Release)
 } kbd_event_t;
+
+
+
+
+// ======================= Mouse driver ABI =======================
+
+//Дельта одного устройства с момента прошлого опроса
+//Все дельты уже в экранных координатах: движение мыши вниз = dy > 0
+typedef struct
+{
+    int16_t dx;
+    int16_t dy;
+    int16_t wheel;
+    uint8_t buttons;   //MOUSE_BTN_*
+} mouse_delta_t;
+
+//Возможности устройства
+typedef struct
+{
+    uint8_t buttons;    //число кнопок
+    uint8_t has_wheel;  //поддерживается ли колесо (4-байтовый пакет)
+} mouse_caps_t;
+
+//Информация об устройстве из реестра mouse-драйвера
+typedef struct
+{
+    char    name[16];
+    uint8_t type;       //MOUSE_PTYPE_*
+    uint8_t used;
+    uint8_t has_wheel;
+} mouse_info_t;
+
+//Слот реестра устройств мыши (аналог block_dev_entry_t)
+typedef struct
+{
+    char    name[16];
+    uint8_t type;       //MOUSE_PTYPE_*
+    uint8_t used;
+    int   (*poll_fn)(void *priv, mouse_delta_t *out);       //неблокирующий опрос
+    int   (*get_caps_fn)(void *priv, mouse_caps_t *out);
+    void  *priv;
+} mouse_dev_entry_t;
+
+//Все зарегистрированные устройства двигают единый курсор, как в Windows
+//Ядро вызывает poll() (см. mouse_core.c) и само аккумулирует абсолютные
+//координаты^ драйвер отдаёт только дельты и состояние кнопок.
+typedef struct
+{
+    uint32_t version;
+    uint8_t  enabled;
+
+    //---- Высокоуровневый интерфейс ----
+    //Агрегированная дельта всех зарегистрированных устройств за период
+    int (*poll)(mouse_delta_t *out);
+    //Число активных (used) устройств
+    int (*get_device_count)(void);
+    //Информация об устройстве по индексу (0..MAX_POINT_DEVICES-1)
+    int (*get_device_info)(int idx, mouse_info_t *out);
+    //Внешняя регистрация указателя (USB HID вызывает после enumeration)
+    //Возвращает индекс слота или отрицательный код ошибки
+    int (*register_device)(const char *name, uint8_t type,
+                           int (*poll_fn)(void*, mouse_delta_t*),
+                           int (*get_caps_fn)(void*, mouse_caps_t*),
+                           void *priv);
+    //Снятие с регистрации (отключение USB-мыши) — после этого активным
+    //снова становится PS/2-провайдер, если он есть
+    int (*unregister_device)(int idx);
+    //Вызывается ядром из обработчика IRQ12
+    // Драйвер сам вычитывает байты из 0x60/0x64 — в прерывании только порты, без DMA
+    void (*irq_callback)(void);
+
+    //---- Экспортные указатели ядра для внутренних нужд драйвера ----
+    void *(*malloc_ptr)(uint32_t size);
+    void  (*free_ptr)(void *ptr);
+    void  (*yield_ptr)(void);           //yield() ядра
+    volatile uint8_t *irq_fired_ptr;    //флаг IRQ12 (так же как и для floppy_irq_fired в драйвере FAT12)
+
+    uint32_t debug1;
+    uint32_t debug2;
+} mouse_driver_api_t;
 
 
 

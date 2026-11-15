@@ -39,6 +39,7 @@
 #include "include-kernel/font.h"
 #include "include-kernel/kload_screen.h"
 #include "include-kernel/usb_registry.h"
+#include "include-kernel/mouse_core.h"
 
 //указатель на api драйвера framebuffer
 fb_driver_api_t *fb = 0;
@@ -439,6 +440,26 @@ int load_additional_drivers(cfg_file_t *cfg)
                 }
                 break;
             }
+            case DESCR_MOUSE_DRIVER:{ //Драйвер указательных устройств (mouse.drv)
+                    mouse_driver_api = (mouse_driver_api_t *)fb_descr->struct_ptr;
+                    if (!mouse_driver_api){
+                        res = DRV_STATUS_LOAD_ERROR;
+                        load_screen_add_string("Mouse Driver load error");
+                    } else {
+                        //Пришиваем ядерный рантайм к интерфейсу подгруженного ELF-модуля
+                        mouse_driver_api->malloc_ptr = kmalloc;
+                        mouse_driver_api->free_ptr   = kfree;
+                        mouse_driver_api->yield_ptr  = sys_yield;
+                        //Флаг IRQ12 для isr.c (паттерн floppy_irq_fired)
+                        mouse_driver_api->irq_fired_ptr = &mouse_irq_fired;
+                        load_screen_add_string("Mouse drv %s: %s", drv_name,
+                            mouse_driver_api->enabled ? "mouse found" : "no mouse");
+                        kprintf("Mouse driver %s loaded (devs=%d, status=%x)\n",
+                            drv_name, mouse_driver_api->debug2, mouse_driver_api->debug1);
+                    }
+                    break;
+            }
+
 
             default:
                 kprintf("Driver %s skipped (type %d not supported yet)\n", drv_name, fb_descr->type);

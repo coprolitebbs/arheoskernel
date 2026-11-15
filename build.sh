@@ -90,6 +90,7 @@ $CC $KERNEL_CCFLAGS -Iinclude -c usb_registry.c -o bin/usb_registry.o
 $CC $KERNEL_CCFLAGS -Iinclude -c graphic_layer.c -o bin/graphic_layer.o
 $CC $KERNEL_CCFLAGS -Iinclude -c sound_layer.c -o bin/sound_layer.o
 $CC $KERNEL_CCFLAGS -Iinclude -c vbe_rm.c -o bin/vbe_rm.o
+$CC $KERNEL_CCFLAGS -Iinclude -c mouse_core.c -o bin/mouse_core.o
 
 nasm -f elf32 isr.asm -o bin/isr_asm.o
 nasm -f elf32 vbe_rm_blob.asm -o bin/vbe_rm_blob.o
@@ -124,6 +125,10 @@ nasm -f elf32 drivers/ext2_driver/ext2_start.asm -o bin/ext2_start.o
 # keyboard ps/2 driver
 $CC $DRVFLAGS -fno-pie -c drivers/kbd_driver/kbd_driver.c  -o bin/kbd_driver.o
 nasm -f elf32 drivers/kbd_driver/kbd_start.asm -o bin/kbd_start.o
+
+# mouse driver
+$CC $DRVFLAGS -fno-pie -c drivers/mouse/mouse.c  -o bin/mouse_d.o
+nasm -f elf32 drivers/mouse/mouse_start.asm -o bin/mouse_d_start.o
 
 # vesa framebuffer driver (simplefb-модель: LFB из bootinfo + смена режима через vbe_rm)
 $CC $DRVFLAGS -fno-pie -c drivers/vesa_fb/vesa_fb.c  -o bin/vesa_fb.o
@@ -168,6 +173,9 @@ bin/ext2_disk.o bin/drv_ports_io.o bin/dlib.o -o bin/ext2_driver.elf
 $LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld bin/kbd_start.o bin/kbd_driver.o \
 bin/drv_ports_io.o bin/dlib.o -o bin/kbd_driver.elf
 
+$LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld bin/mouse_d_start.o bin/mouse_d.o \
+bin/drv_ports_io.o bin/dlib.o -o bin/mouse_driver.elf
+
 $LD -m elf_i386 --no-warn-rwx-segments --emit-relocs -T drivers/userspace_driver.ld \
 bin/block_start.o bin/block_driver.o bin/drv_ports_io.o bin/dlib.o -o bin/block_driver.elf
 
@@ -186,7 +194,8 @@ bin/pmm.o bin/vmm.o bin/isr.o bin/syscall.o bin/isr_asm.o bin/font_data.o bin/gd
 bin/task.o bin/debug.o bin/bootinfo.o bin/driver_elf.o bin/use_drivers.o bin/kernel_heap.o \
 bin/comdebug.o bin/ports_io.o bin/hardware.o bin/vfs.o bin/kconsole.o bin/config.o \
 bin/kbd_translate.o bin/font.o bin/locale.o bin/font_vga.o bin/kpanic.o bin/kload_screen.o \
-bin/usb_registry.o bin/graphic_layer.o bin/sound_layer.o bin/vbe_rm.o bin/vbe_rm_blob.o
+bin/usb_registry.o bin/graphic_layer.o bin/sound_layer.o bin/vbe_rm.o bin/vbe_rm_blob.o \
+bin/mouse_core.o
 
 #Сборка отладочного ELF-файла ядра для lldb
 $LD -m elf_i386 -T kernel_elf.ld -o bin/kernel.elf bin/kernel.o bin/lib.o bin/draw.o \
@@ -194,7 +203,8 @@ bin/pmm.o bin/vmm.o bin/isr.o bin/syscall.o bin/isr_asm.o bin/font_data.o bin/gd
 bin/task.o bin/debug.o bin/bootinfo.o bin/driver_elf.o bin/use_drivers.o bin/kernel_heap.o \
 bin/comdebug.o bin/ports_io.o bin/hardware.o bin/vfs.o bin/kconsole.o bin/config.o \
 bin/kbd_translate.o bin/font.o bin/locale.o bin/font_vga.o bin/kpanic.o bin/kload_screen.o \
-bin/usb_registry.o bin/graphic_layer.o bin/sound_layer.o bin/vbe_rm.o bin/vbe_rm_blob.o
+bin/usb_registry.o bin/graphic_layer.o bin/sound_layer.o bin/vbe_rm.o bin/vbe_rm_blob.o \
+bin/mouse_core.o
 
 
 # Сборка USERSPACE
@@ -242,6 +252,8 @@ $CC $USER_CCFLAGS_ELF -c userspace/examples/arr_test/arr_test.c -o bin/u_arr_tes
 $CC $USER_CCFLAGS_ELF -c userspace/examples/scanf_check/scanf_check.c -o bin/u_scanf_check.o
 #gpu test
 $CC $USER_CCFLAGS_ELF -c userspace/examples/gputest/gputest.c -o bin/u_gputest.o
+#mouse test
+$CC $USER_CCFLAGS_ELF -c userspace/examples/mouse_test/mtest.c -o bin/u_mtest.o
 
 #Утилиты
 #Командный процессор sekhmet
@@ -300,6 +312,7 @@ $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x400
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_arr_test.o -o bin/arr_test.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_scanf_check.o -o bin/sc_test.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_gputest.o bin/u_ugraph_elf.o -o bin/gputest.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_mtest.o bin/u_ugraph_elf.o -o bin/mtest.elf
 
 #$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 \
 #-e _start bin/u_std.o bin/u_memory.o bin/u_lib.o bin/u_uconfig.o bin/u_sekhmet.o \
@@ -357,6 +370,7 @@ create_fat_image() {
     mcopy -i "$IMG" bin/kbd_driver.elf ::/ADRV/KBDPS2.DRV
     mcopy -i "$IMG" bin/vesa_fb.elf ::/ADRV/VESA.DRV
     mcopy -i "$IMG" bin/geodegx.elf ::/ADRV/GEODEGX.DRV
+    mcopy -i "$IMG" bin/mouse_driver.elf ::/ADRV/MOUSE.DRV
     #пользовательские программы
     mmd -i "$IMG" ::/USBIN
     #mcopy -i "$IMG" bin/hello.bin ::/USBIN/
@@ -464,6 +478,7 @@ e2cp bin/kbd_driver.elf tmp_ext2.img:/adrv/kbdps2.drv
 e2cp bin/usb_driver.elf tmp_ext2.img:/adrv/usb.drv
 e2cp bin/vesa_fb.elf tmp_ext2.img:/adrv/vesa.drv
 e2cp bin/geodegx.elf tmp_ext2.img:/adrv/geodegx.drv
+e2cp bin/mouse_driver.elf tmp_ext2.img:/adrv/mouse.drv
 
 e2mkdir tmp_ext2.img:/usbin
 e2mkdir tmp_ext2.img:/bin
@@ -476,6 +491,7 @@ e2cp bin/kb_check.bin tmp_ext2.img:/usbin/kb_check.bin
 e2cp bin/arr_test.elf tmp_ext2.img:/usbin/arr_test.elf
 e2cp bin/sc_test.elf tmp_ext2.img:/usbin/sc_test.elf
 e2cp bin/gputest.elf tmp_ext2.img:/usbin/gputest.elf
+e2cp bin/mtest.elf tmp_ext2.img:/usbin/mtest.elf
 
 e2cp bin/sekhmet.elf tmp_ext2.img:/bin/sekhmet.elf
 e2cp bin/halt.bin tmp_ext2.img:/bin/halt.bin

@@ -40,6 +40,7 @@
 #include "include-kernel/graphic_layer.h"
 #include "userspace/include/ugraph.h"
 #include "include-kernel/hardware.h"
+#include "include-kernel/mouse_core.h"
 
 // Состояние модификаторов клавиатуры в ядре
 bool shift_pressed = false;
@@ -2413,6 +2414,58 @@ void systemcall_gr_prim(struct regs *r)
 
 
 
+
+//SYS_MOUSE_GET
+//Возвращает состояние единого курсора (Windows-модель — все провайдеры суммируются в mouse_core)
+//Если mouse.drv не загружен или мыши нет,
+//eax = -1 (остальные регистры не трогаются).
+//eax = x (пиксели), ebx = y, ecx = buttons (MOUSE_BTN_*), edx = wheel
+void systemcall_mouse_get(struct regs *r){
+    if (!mouse_core_is_ready()){
+        r->eax = (uint32_t)-1;
+        return;
+    }
+    r->eax = (uint32_t)mouse_core_get_x();
+    r->ebx = (uint32_t)mouse_core_get_y();
+    r->ecx = mouse_core_get_buttons();
+    r->edx = (uint32_t)mouse_core_get_wheel();
+}
+
+
+//SYS_MOUSE_POLL (ebx = u_mouse_state_t *user_buf)
+//Вычитывает накопленную с прошлого вызова дельту и полный снапшот:
+//   struct u_mouse_state_t { int32 x, y, dx, dy, wheel; uint32 buttons; }
+//eax = 0 — ок; eax = 1 — данных ещё не было (нули); eax = -1 — мыши нет
+void systemcall_mouse_poll(struct regs *r){
+    u_mouse_state_t *u = (u_mouse_state_t *)r->ebx;
+    if (!u || (uint32_t)u < 0x40000000){ r->eax = (uint32_t)-1; return; }
+    if (!mouse_core_is_ready()){ r->eax = (uint32_t)-1; return; }
+
+    int32_t dx, dy, wheel;
+    uint32_t buttons;
+    int rr = mouse_core_take_delta(&dx, &dy, &wheel, &buttons);
+
+    u->x = mouse_core_get_x();
+    u->y = mouse_core_get_y();
+    u->dx = dx;
+    u->dy = dy;
+    u->wheel = wheel;
+    u->buttons = buttons;
+    r->eax = (uint32_t)rr;
+}
+
+
+//SYS_MOUSE_SET_POS (ebx = x, ecx = y)
+//Принудительно установить позицию курсора (с клампом в экран)
+void systemcall_mouse_set_pos(struct regs *r){
+    if (!mouse_core_is_ready()){ r->eax = (uint32_t)-1; return; }
+    mouse_core_set_pos((int32_t)r->ebx, (int32_t)r->ecx);
+    r->eax = 0;
+}
+
+
+
+
 void syscalls_table_init(void)
 {
     syscalls_table[SYS_FILL_SCREEN].func = &systemcall_fill_screen;
@@ -2471,4 +2524,7 @@ void syscalls_table_init(void)
     syscalls_table[SYS_PCI_GET_DEV].func = &systemcall_pci_get_dev;
     syscalls_table[SYS_PCI_READ_CFG].func = &systemcall_pci_read_cfg;
     syscalls_table[SYS_GR_PRIM].func = &systemcall_gr_prim;
+    syscalls_table[SYS_MOUSE_GET].func = &systemcall_mouse_get;
+    syscalls_table[SYS_MOUSE_POLL].func = &systemcall_mouse_poll;
+    syscalls_table[SYS_MOUSE_SET_POS].func = &systemcall_mouse_set_pos;
 }
