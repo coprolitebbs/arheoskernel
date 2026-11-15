@@ -2415,54 +2415,50 @@ void systemcall_gr_prim(struct regs *r)
 
 
 
-//SYS_MOUSE_GET
-//Возвращает состояние единого курсора (Windows-модель — все провайдеры суммируются в mouse_core)
-//Если mouse.drv не загружен или мыши нет,
-//eax = -1 (остальные регистры не трогаются).
-//eax = x (пиксели), ebx = y, ecx = buttons (MOUSE_BTN_*), edx = wheel
+//==================== МЫШЬ (mouse.drv) ====================
+//Единый курсор по модели Windows: все зарегистрированные провайдеры
+//(PS/2 сейчас, USB-HID в будущем) суммируются драйвером в один курсор
+
+//SYS_MOUSE_GET (67): eax=x (или -1 если мыши нет), ebx=y, ecx=buttons
 void systemcall_mouse_get(struct regs *r){
-    if (!mouse_core_is_ready()){
+    if (!mouse_driver_api || !mouse_driver_api->poll){
         r->eax = (uint32_t)-1;
         return;
     }
-    r->eax = (uint32_t)mouse_core_get_x();
-    r->ebx = (uint32_t)mouse_core_get_y();
-    r->ecx = mouse_core_get_buttons();
-    r->edx = (uint32_t)mouse_core_get_wheel();
+    mouse_state_t st;
+    mouse_driver_api->poll(&st);
+    r->eax = (uint32_t)(int32_t)st.x;
+    r->ebx = (uint32_t)(int32_t)st.y;
+    r->ecx = st.buttons;
 }
 
-
-//SYS_MOUSE_POLL (ebx = u_mouse_state_t *user_buf)
-//Вычитывает накопленную с прошлого вызова дельту и полный снапшот:
-//   struct u_mouse_state_t { int32 x, y, dx, dy, wheel; uint32 buttons; }
-//eax = 0 — ок; eax = 1 — данных ещё не было (нули); eax = -1 — мыши нет
+//SYS_MOUSE_POLL (68): ebx = указатель Ring-3 на mouse_state_t -> eax=0/-1
+//Отдает и позицию, и дельту, накопленную с предыдущего вызова.
 void systemcall_mouse_poll(struct regs *r){
-    u_mouse_state_t *u = (u_mouse_state_t *)r->ebx;
-    if (!u || (uint32_t)u < 0x40000000){ r->eax = (uint32_t)-1; return; }
-    if (!mouse_core_is_ready()){ r->eax = (uint32_t)-1; return; }
-
-    int32_t dx, dy, wheel;
-    uint32_t buttons;
-    int rr = mouse_core_take_delta(&dx, &dy, &wheel, &buttons);
-
-    u->x = mouse_core_get_x();
-    u->y = mouse_core_get_y();
-    u->dx = dx;
-    u->dy = dy;
-    u->wheel = wheel;
-    u->buttons = buttons;
-    r->eax = (uint32_t)rr;
-}
-
-
-//SYS_MOUSE_SET_POS (ebx = x, ecx = y)
-//Принудительно установить позицию курсора (с клампом в экран)
-void systemcall_mouse_set_pos(struct regs *r){
-    if (!mouse_core_is_ready()){ r->eax = (uint32_t)-1; return; }
-    mouse_core_set_pos((int32_t)r->ebx, (int32_t)r->ecx);
+    if (!mouse_driver_api || !mouse_driver_api->poll){
+        r->eax = (uint32_t)-1;
+        return;
+    }
+    mouse_state_t *dst = (mouse_state_t *)r->ebx;
+    //Та же защита от указателей в ядерное пространство, что в fb_blit
+    if (!dst || (uint32_t)dst < 0x40000000){
+        r->eax = (uint32_t)-1;
+        return;
+    }
+    mouse_state_t st;
+    mouse_driver_api->poll(&st);
+    *dst = st;
     r->eax = 0;
 }
 
+//SYS_MOUSE_SET_POS (69): ebx=x, ecx=y -> eax=0/-1 (телепорт курсора)
+void systemcall_mouse_set_pos(struct regs *r){
+    if (!mouse_driver_api || !mouse_driver_api->set_pos){
+        r->eax = (uint32_t)-1;
+        return;
+    }
+    r->eax = (uint32_t)mouse_driver_api->set_pos((int16_t)r->ebx, (int16_t)r->ecx);
+}
 
 
 

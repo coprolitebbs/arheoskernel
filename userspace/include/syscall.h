@@ -103,11 +103,10 @@
 //fill/copy/вектор GP, на остальных — программные реализации поверх LFB
 #define SYS_GR_PRIM               71
 
-
 //Мышь
-#define SYS_MOUSE_GET             50
-#define SYS_MOUSE_POLL            51
-#define SYS_MOUSE_SET_POS         52
+#define SYS_MOUSE_GET             72
+#define SYS_MOUSE_POLL            73
+#define SYS_MOUSE_SET_POS         74
 
 //op-коды SYS_GR_PRIM (ebx) и раскладка int32[6] (ecx -> params[]):
 #define GR_PRIM_FILL_RECT   1   //params: x, y, w, h, color(0x00RRGGBB)

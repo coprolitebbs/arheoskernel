@@ -47,6 +47,8 @@ extern fs_driver_t fs_apis[FILESYSTEMS_API_MAX];
 
 extern kbd_driver_api_t *kbd_driver_api;
 
+extern mouse_driver_api_t *mouse_driver_api;
+
 extern block_driver_api_t *blockdevice_driver;
 
 //API USB-стека (заполняется drivers_init из модуля DESCR_USB_DRIVER)

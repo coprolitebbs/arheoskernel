@@ -234,6 +234,9 @@ $CC $USER_CCFLAGS_ELF -c userspace/lib/udevices.c -o bin/u_udevices_elf.o
 #Библиотечка графической информации (SYS_GRAPH_INFO)
 $CC $USER_CCFLAGS -c userspace/lib/ugraph.c -o bin/u_ugraph.o
 $CC $USER_CCFLAGS_ELF -c userspace/lib/ugraph.c -o bin/u_ugraph_elf.o
+#Библиотечка мыши (SYS_MOUSE_* обертки)
+$CC $USER_CCFLAGS -c userspace/lib/mouse.c -o bin/u_mouse.o
+$CC $USER_CCFLAGS_ELF -c userspace/lib/mouse.c -o bin/u_mouse_elf.o
 
 # Тестовые программы
 # hello.c
@@ -253,7 +256,7 @@ $CC $USER_CCFLAGS_ELF -c userspace/examples/scanf_check/scanf_check.c -o bin/u_s
 #gpu test
 $CC $USER_CCFLAGS_ELF -c userspace/examples/gputest/gputest.c -o bin/u_gputest.o
 #mouse test
-$CC $USER_CCFLAGS_ELF -c userspace/examples/mouse_test/mtest.c -o bin/u_mtest.o
+$CC $USER_CCFLAGS_ELF -c userspace/examples/mouse_test/mtest.c bin/u_mouse_elf.o -o bin/u_mtest.o
 
 #Утилиты
 #Командный процессор sekhmet

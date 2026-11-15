@@ -23,6 +23,7 @@
 
 extern int xoffs;
 extern volatile uint32_t tick_count;
+extern volatile uint8_t mouse_irq_fired;   //IRQ12: PS/2 мышь (AUX), ставится в irq44_handler
 extern volatile uint8_t floppy_irq_fired;
 extern volatile uint8_t kernel_schedule_lock;
 extern volatile uint8_t init_kernel_schedule_lock;

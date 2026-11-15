@@ -54,6 +54,8 @@ block_driver_api_t *blockdevice_driver = 0;
 
 usb_stack_driver_api_t *usb_driver_api = 0;
 
+mouse_driver_api_t *mouse_driver_api = 0;
+
 //char* additional_drivers_list = "kbdps2.drv";
 //обертка для получения локали
 static const void *kernel_get_active_locale(void)
@@ -440,22 +442,23 @@ int load_additional_drivers(cfg_file_t *cfg)
                 }
                 break;
             }
-            case DESCR_MOUSE_DRIVER:{ //Драйвер указательных устройств (mouse.drv)
+            case DESCR_MOUSE_DRIVER:{  //Драйвер мыши (PS/2 AUX + реестр провайдеров)
                     mouse_driver_api = (mouse_driver_api_t *)fb_descr->struct_ptr;
-                    if (!mouse_driver_api){
+                    if (!mouse_driver_api || !mouse_driver_api->poll){
                         res = DRV_STATUS_LOAD_ERROR;
-                        load_screen_add_string("Mouse Driver load error");
+                        load_screen_add_string("Mouse drv %s: load error", drv_name);
                     } else {
                         //Пришиваем ядерный рантайм к интерфейсу подгруженного ELF-модуля
                         mouse_driver_api->malloc_ptr = kmalloc;
                         mouse_driver_api->free_ptr   = kfree;
                         mouse_driver_api->yield_ptr  = sys_yield;
-                        //Флаг IRQ12 для isr.c (паттерн floppy_irq_fired)
+                        //Флаг IRQ12 из isr.c (работает и без него: детект poll-овый)
                         mouse_driver_api->irq_fired_ptr = &mouse_irq_fired;
-                        load_screen_add_string("Mouse drv %s: %s", drv_name,
-                            mouse_driver_api->enabled ? "mouse found" : "no mouse");
-                        kprintf("Mouse driver %s loaded (devs=%d, status=%x)\n",
-                            drv_name, mouse_driver_api->debug2, mouse_driver_api->debug1);
+                        if (mouse_driver_api->enabled)
+                            load_screen_add_string("Mouse drv %s: %d dev(s), packets=%d",
+                                                   drv_name, mouse_driver_api->debug1, mouse_driver_api->debug2);
+                        else
+                            load_screen_add_string("Mouse drv %s: no mouse (ps2aux not found)", drv_name);
                     }
                     break;
             }

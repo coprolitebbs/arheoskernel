@@ -15,96 +15,73 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-/*
- * mtest.c — тест драйвера мыши.
- *
- * Опрашивает SYS_MOUSE_GET в цикле и рисует метку курсора в framebuffer
- * через SYS_FB_BLIT: белая метка на текущей позиции, серый след на прежней.
- * При зажатой левой кнопке метка становится красной.
- *
- * Если mouse.drv не загружен (SYS_MOUSE_GET возвращает -1), приложение
- * просто ждёт и продолжает опрос — можно запустить до загрузки драйвера
- * и перезапустить после.
- *
- * Сборка : ELF PIE, линкуется с u_std_elf.o.
- */
+//mouse_check.c — тест драйвера мыши ARHeOS.
+//Рисует курсор '+' по данным SYS_MOUSE_GET, показывает координаты и кнопки.
+//Выход — любая клавиша. Сборка: u_std.o + u_mouse.o + u_mouse_check.o.
 
-#include <stdint.h>
+#include "../../include/ustd.h"
+#include "../../include/mouse.h"
 #include "../../include/syscall.h"
+#include <stdint.h>
 
-//---- Прямые системные вызовы ----
+#define COL_TEXT   0x00FFFFFF
+#define COL_OK     0x0000FF00
+#define COL_LEFT   0x000000FF   //в формате ядра (см. bgcolor в boot.cfg)
+#define COL_RIGHT  0x00FF0000
+#define COL_MID    0x0000FFFF
+#define COL_BG     0x00000000
 
-static inline int mt_mouse_get(int32_t *x, int32_t *y, uint32_t *btn){
-    uint32_t a, b, c, d;
-    asm volatile("int $0x80"
-                 : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
-                 : "a"(SYS_MOUSE_GET)
-                 : "memory");
-    if ((int32_t)a == -1) return -1;
-    if (x)    *x = (int32_t)b;
-    if (y)    *y = (int32_t)c;
-    if (btn)  *btn = d;
-    return 0;
-}
+int main(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    uint32_t cols, rows, cw, ch;
+    int16_t x = 0, y = 0;
+    uint8_t b = 0;
+    int last_px = -1, last_py = -1;
 
-static inline int mt_blit(int32_t x, int32_t y, int32_t w, int32_t h, const void *src){
-    int ret;
-    asm volatile("int $0x80"
-                 : "=a"(ret)
-                 : "a"(SYS_FB_BLIT), "b"(x), "c"(y), "d"(w), "S"(h), "D"(src)
-                 : "memory");
-    return ret;
-}
+    u_get_console_geometry(&cols, &rows, &cw, &ch);
 
-static inline void mt_yield(void){
-    asm volatile("int $0x80" :: "a"(SYS_YIELD) : "memory");
-}
-
-//---- Отрисовка метки курсора ----
-
-#define CURSOR_BOX 4    //размер метки, пикселей
-
-static uint32_t box_colors[CURSOR_BOX * CURSOR_BOX];
-static uint32_t trail_colors[2 * 2];
-
-static void fill_colors(uint32_t color){
-    for (int i = 0; i < CURSOR_BOX * CURSOR_BOX; i++) box_colors[i] = color;
-}
-
-static void draw_box(int32_t x, int32_t y, uint32_t color){
-    fill_colors(color);
-    mt_blit(x, y, CURSOR_BOX, CURSOR_BOX, box_colors);
-}
-
-static void draw_trail(int32_t x, int32_t y, uint32_t color){
-    trail_colors[0] = color; trail_colors[1] = color;
-    trail_colors[2] = color; trail_colors[3] = color;
-    mt_blit(x, y, 2, 2, trail_colors);
-}
-
-#define COLOR_WHITE   0x00FFFFFF
-#define COLOR_GREY    0x00606060
-#define COLOR_RED     0x00FF4040
-
-int main(void){
-    int32_t px = -1, py = -1;      //прошлые координаты
-    uint32_t pbtn = 0xFFFFFFFF;    //прошлые кнопки
-
-    for (;;){
-        int32_t x, y;
-        uint32_t btn;
-        int r = mt_mouse_get(&x, &y, &btn);
-
-        if (r == 0 && (x != px || y != py || btn != pbtn)){
-            //На прежнем месте оставляем серый след (видна траектория)
-            if (px >= 0 && py >= 0) draw_trail(px, py, COLOR_GREY);
-            //Новая позиция: красная при зажатой левой кнопке, иначе белая
-            draw_box(x, y, (btn & 0x01) ? COLOR_RED : COLOR_WHITE);
-            px = x; py = y; pbtn = btn;
-        }
-
-        mt_yield();
+    if (u_mouse_get(&x, &y, &b) != 0){
+        u_printf(4, 4, COL_TEXT, "SYS_MOUSE_GET: -1 (mouse.drv not loaded or no device)");
+        return 1;
     }
 
+    u_printf(4, 4, COL_TEXT, "ARHeOS mouse check: move mouse, click buttons. Any key = exit");
+    u_printf(4, 4 + (int)ch, COL_OK, "cursor init: x=%d y=%d buttons=%02x", x, y, b);
+
+    for (;;){
+        int16_t nx, ny;
+        uint8_t nb;
+
+        u_mouse_get(&nx, &ny, &nb);
+
+        if (nx != x || ny != y || nb != b){
+            //перерисовать курсор
+            if (last_px >= 0) u_clear_tile((uint32_t)last_px, (uint32_t)last_py, COL_BG);
+            {
+                uint32_t col = COL_TEXT;
+                if (nb & U_MOUSE_BTN_LEFT)   col = COL_LEFT;
+                if (nb & U_MOUSE_BTN_RIGHT)  col = COL_RIGHT;
+                if (nb & U_MOUSE_BTN_MIDDLE) col = COL_MID;
+                u_draw_char((uint32_t)nx, (uint32_t)ny, '+', col);
+            }
+            last_px = nx;
+            last_py = ny;
+            x = nx; y = ny; b = nb;
+
+            u_printf(4, 4 + 2 * (int)ch, COL_TEXT,
+                     "x=%5d y=%5d buttons=%02x %s%s%s   ",
+                     x, y, b,
+                     (b & U_MOUSE_BTN_LEFT)  ? "L" : "-",
+                     (b & U_MOUSE_BTN_RIGHT) ? "R" : "-",
+                     (b & U_MOUSE_BTN_MIDDLE)? "M" : "-");
+        }
+
+        if (u_kbhit()) break;
+        u_mouse_yield();
+    }
+
+    if (last_px >= 0) u_clear_tile((uint32_t)last_px, (uint32_t)last_py, COL_BG);
+    u_printf(4, 4 + 3 * (int)ch, COL_TEXT, "mouse check: exit");
     return 0;
 }

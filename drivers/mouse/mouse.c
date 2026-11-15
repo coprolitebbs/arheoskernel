@@ -15,465 +15,439 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-//mouse_driver.c — системный драйвер указательных устройств (mouse.drv)
-//Архитектура (по образцу block_driver.c):
-//   - Реестр устройств mouse_devices[MAX_POINT_DEVICES] с poll_fn/priv
-//   - Дефолтный провайдер PS/2 AUX (i8042, канал 1) встроен в драйвер и регистрируется в
-//     driver_main() — это дефолтная функция получения координат
-//   - Внешние провайдеры (USB HID, когда появится в usb-драйвере) входят через
-//     mouse_register_device() — ровно так, как usb_msc входит в block_register_device()
-//     После unregister USB-мыши активным снова становится PS/2
-//   - Windows-модель: все устройства суммируются в дельты единого курсора, кнопки — OR по
-//     всем устройствам. Абсолютные координаты хранит ядро (mouse_core.c), драйвер
-//     отдаёт только дельты в экранных координатах
+// ============================================================================
+// mouse_driver.c — драйвер указательных устройств (мышь) ARHeOS.
 //
-//Для PS/2:
-//   - irq_callback() вызывается ядром из обработчика IRQ12 (если патч isr.c применён):
-//     драйвер сам вычитывает байты из 0x60/0x64. Только порты, без ожиданий и без yield
-//   - poll_fn() никогда не блокируется: перед выдачей дельт делает fallback-вычитку
-//     AUX-буфера 8042. Драйвер полностью работает сам по себе (поллинг из mouse_core_tick
-//     по тику таймера), но, можно попробовать перевести на получение статуса из прерывания в
-//     isr_handler в isr.c. Будет медленнее работать.
-//   - Взаимоблокировки с клавиатурой нет: клавиатурный байт (статус без бита AUX) мы не
-//     вычитываем — его забирает kbd-драйвер из ISR1
+// Архитектура (модель Windows):
+//   * Драйвер держит РЕЕСТР провайдеров (PS/2, в будущем USB-HID).
+//     Каждый провайдер регистрируется через register_device() и отдаёт дельты
+//     через свой poll_fn(). ВСЕ провайдеры двигают ОДИН курсор: их дельты
+//     суммируются, кнопки объединяются по OR.
+//   * Дефолтный провайдер — PS/2 AUX (i8042, IRQ12).
+//
+// ВАЖНО (это и была причина «Mouse drv mouse.drv: no mouse»):
+//   * Детект и опрос ПОЛНОСТЬЮ POLL-ОВЫЕ — читаем статус-регистр i8042 (0x64)
+//     и данные (0x60) напрямую. IRQ12 нужен только как «будильник» для
+//     будущей событийной модели; его отсутствие (замаскированный PIC,
+//     не пришитый isr.c) НЕ мешает детекту и работе.
+//   * Дисциплина чтения строгая:
+//       - байты мыши отличаем от клавиатурных по биту AUX (bit5 статуса);
+//       - чужие (клавиатурные) байты вычитываем и выбрасываем, ACK не теряется;
+//       - перед каждой записью в контроллер ждём IBF==0;
+//       - команды мыши идут только через префикс 0xD4;
+//       - таймауты большие (реальное железо отвечает десятки мс).
+//   * Конвенция дельт: провайдер отдаёт dy уже в ЭКРАННЫХ координатах
+//     (dy>0 — курсор идёт ВНИЗ). PS/2 возвращает dy в стиле «вверх — это плюс»,
+//     поэтому провайдер инвертирует знак. Аккумулятор знаки не трогает.
+// ============================================================================
 
 #include "../include_drivers/drv_format.h"
+#include "../../include-kernel/bootinfo.h"
 #include "../../include-kernel/ports_io.h"
+#include "../../include-kernel/lib.h"
 
-//===================== i8042 (PS/2 контроллер) =====================
+// ----------------------------------------------------------------------------
+// Внутреннее состояние PS/2-провайдера
+// ----------------------------------------------------------------------------
 
-#define PS2_DATA        0x60
-#define PS2_STATUS      0x64
-#define PS2_COMMAND     0x64
+#define I8042_STATUS   0x64
+#define I8042_DATA     0x60
 
-#define PS2_STS_OBF     0x01    //выходной буфер полон (можно читать 0x60)
-#define PS2_STS_AUX     0x20    //последний байт в OBF — от мыши (канал 1)
+#define ST_OBF         0x01   // в выходном буфере есть байт
+#define ST_IBF         0x02   // входной буфер занят — писать нельзя
+#define ST_AUX         0x20   // байт в выходном буфере — от AUX (мыши)
 
-#define PS2_CMD_ENABLE_AUX  0xA8
-#define PS2_CMD_TEST_AUX    0xA9
-#define PS2_CMD_READ_CCB    0x20
-#define PS2_CMD_WRITE_CCB   0x60
-#define PS2_CMD_WRITE_MOUSE 0xD4    //следующий байт в 0x60 уходит мыши
+// Таймауты в итерациях опроса. Одна итерация = inb + io_wait (единицы мкс
+// даже на Geode GX1). QEMU отвечает мгновенно, реальное железо — до сотен мс.
+#define TIMEOUT_FAST   200000    // ожидание ACK (~0.2-1 с на реальном железе)
+#define TIMEOUT_RESET  1000000   // ожидание 0xAA после Reset (~1-3 с)
+#define TIMEOUT_CCB    200000
 
-#define CCB_ENABLE_IRQ12    0x02    //разрешить прерывание канала 1
-#define CCB_ENABLE_AUX_CLK  0xDF    //бит 5 = запрет AUX clock, снимаем его
+static uint8_t  ps2_present   = 0;     // мышь найдена и инициализирована
+static uint8_t  ps2_last_btns = 0;     // последнее состояние кнопок PS/2-мыши
 
-//===================== Протокол мыши PS/2 =====================
+// Накопитель пакетов: байты приходят асинхронно (по IRQ или между опросами),
+// поэтому собираем 3-байтовый пакет постепенно
+static uint8_t  ps2_pkt[3];
+static uint8_t  ps2_pkt_idx   = 0;
 
-#define MOUSE_ACK           0xFA
-#define MOUSE_SELFTEST_OK   0xAA
-#define MOUSE_SELFTEST_ERR  0xFC
+// Накопленная дельта с последнего вызова poll_fn (пакетов между опросами
+// может прийти несколько — всё складываем)
+static int32_t  ps2_acc_dx    = 0;
+static int32_t  ps2_acc_dy    = 0;
 
-#define M_CMD_RESET         0xFF
-#define M_CMD_DEFAULTS      0xF6
-#define M_CMD_IDENTIFY      0xF2
-#define M_CMD_DISABLE       0xF5
-#define M_CMD_ENABLE        0xF4
-#define M_CMD_SAMPLE        0xF3
+// Счётчики для отладки (видны в api->debug*)
+static uint32_t dbg_packets   = 0;
+static uint32_t dbg_resync    = 0;
+static uint32_t dbg_overflow  = 0;
 
-//Биты байта 0 пакета
-#define PKT_YOVERF          0x80
-#define PKT_XOVERF          0x40
-#define PKT_ALWAYS1         0x08    //сегда 1 — используется для ресинхронизации
+// ----------------------------------------------------------------------------
+// Низкоуровневые примитивы i8042
+// ----------------------------------------------------------------------------
 
-#define PS2_PKT_SIZE_BASE   3       //базовый пакет без колеса
-#define PS2_PKT_SIZE_WHEEL  4       //пакет с колесом (после magic-последовательности)
+// Ждать возможности записи (IBF==0). 1 — ок, 0 — таймаут.
+static int i8042_wait_write(int loops)
+{
+    while (loops--){
+        if (!(inb(I8042_STATUS) & ST_IBF)) return 1;
+        io_wait();
+    }
+    return 0;
+}
 
-#define MOUSE_IO_TIMEOUT    200000u //итераций busy-wait на байт
-#define MOUSE_ACK_TRIES     6       //попыток вычитать ACK
+// Вычитать всё, что лежит в выходном буфере (без разбора). Нужно перед
+// инициализацией: BIOS мог оставить там байты BAT-теста клавиатуры, и без
+// flush первый «ACK» мыши оказался бы чужим байтом.
+static void i8042_flush(int loops)
+{
+    while (loops--){
+        if (!(inb(I8042_STATUS) & ST_OBF)) return;
+        (void)inb(I8042_DATA);
+        io_wait();
+    }
+}
 
-//===================== Реестр устройств =====================
+// Прочитать ОДИН байт мыши: ждём OBF, но забираем только байты с взведённым
+// битом AUX. Клавиатурные байты (AUX==0) вычитываем и выбрасываем — иначе
+// они навсегда «застревают» перед нашим ACK и всё ломают.
+// Возвращает 0..255 или -1 по таймауту.
+static int ps2_read_byte(int loops)
+{
+    while (loops--){
+        uint8_t st = inb(I8042_STATUS);
+        if (st & ST_OBF){
+            uint8_t b = inb(I8042_DATA);
+            if (st & ST_AUX) return b;
+            // чужой (клавиатурный) байт — проглотили, продолжаем ждать наш
+        }
+        io_wait();
+    }
+    return -1;
+}
+
+// Отправить команду мыши (через префикс 0xD4) и дождаться ACK 0xFA.
+// Возвращает 1 при успехе.
+static int ps2_command(uint8_t cmd)
+{
+    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    outb(I8042_STATUS, 0xD4);          // следующий байт в 0x60 — для AUX
+    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    outb(I8042_DATA, cmd);
+
+    int ack = ps2_read_byte(TIMEOUT_FAST);
+    return (ack == 0xFA) ? 1 : 0;
+}
+
+// ----------------------------------------------------------------------------
+// Инициализация PS/2 AUX. Полностью poll-овая: работает даже если IRQ12
+// замаскирован в PIC или обработчик в isr.c ещё не пришит.
+// Возвращает 1, если мышь найдена, 0 — если нет.
+// ----------------------------------------------------------------------------
+static int mouse_ps2_init(void)
+{
+    uint8_t ccb;
+    int ack, resp;
+
+    ps2_pkt_idx = 0;
+    ps2_acc_dx = 0;
+    ps2_acc_dy = 0;
+    ps2_last_btns = 0;
+
+    // 0. Очистить мусор в выходном буфере (байты от BIOS/клавиатуры)
+    i8042_flush(TIMEOUT_FAST);
+
+    // 1. Отключить и включить AUX-порт: приводит контроллер в заведомое
+    //    состояние (на 86box без этого AUX иногда «спит»)
+    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    outb(I8042_STATUS, 0xA7);          // disable AUX
+    i8042_flush(TIMEOUT_FAST);
+    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    outb(I8042_STATUS, 0xA8);          // enable AUX
+    i8042_flush(TIMEOUT_FAST);
+
+    // 2. Байт конфигурации контроллера (CCB):
+    //      bit1 = разрешить IRQ12 от AUX
+    //      bit5 = 0 (разрешить тактирование AUX-порта)
+    //    Ответ на 0x20 приходит как обычный байт контроллера (AUX==0),
+    //    читаем его именно «контроллерным» способом.
+    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    outb(I8042_STATUS, 0x20);          // Read Controller Configuration Byte
+    {
+        int t = TIMEOUT_CCB;
+        resp = -1;
+        while (t--){
+            uint8_t st = inb(I8042_STATUS);
+            if (st & ST_OBF){ resp = inb(I8042_DATA); break; }
+            io_wait();
+        }
+    }
+    if (resp < 0) return 0;            // контроллер не ответил — AUX нет
+    ccb = (uint8_t)resp;
+    ccb |=  (1 << 1);                  // enable AUX IRQ12
+    ccb &= ~(1 << 5);                  // enable AUX clock
+    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    outb(I8042_STATUS, 0x60);          // Write Controller Configuration Byte
+    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    outb(I8042_DATA, ccb);
+
+    // 3. Reset мыши: 0xFF -> ACK 0xFA, потом 0xAA (self-test ok) и 0x00 (id).
+    //    0xFC вместо 0xAA — ошибка самотеста; тишина — устройства нет.
+    if (!ps2_command(0xFF)) return 0;
+    ack = ps2_read_byte(TIMEOUT_RESET);            // 0xAA
+    if (ack != 0xAA) return 0;
+    (void)ps2_read_byte(TIMEOUT_RESET);            // device id (0x00), не проверяем жёстко
+
+    // 4. Заводские настройки по умолчанию
+    if (!ps2_command(0xF6)) return 0;
+
+    // 5. Частота опроса 40 отчётов/с (стабильность на реальном железе;
+    //    заодно задел под будущую магию включения колеса)
+    if (!ps2_command(0xF3)) return 0;
+    if (!ps2_command(0x28)) return 0;
+
+    // 6. Разрешить стриминг отчётов
+    if (!ps2_command(0xF4)) return 0;
+
+    // 7. Слить всё, что успело прийти между шагами
+    i8042_flush(TIMEOUT_FAST);
+
+    ps2_present = 1;
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
+// poll_fn провайдера PS/2: вычитывает всё, что лежит в буфере, собирает
+// 3-байтовые пакеты, накапливает дельту. Возвращает 1, если была активность.
+// ----------------------------------------------------------------------------
+static int mouse_ps2_poll(void *priv, mouse_delta_t *out)
+{
+    (void)priv;
+
+    // Вычитываем всё, что есть СЕЙЧАС (не ждём: poll — неблокирующий)
+    for (;;){
+        uint8_t st = inb(I8042_STATUS);
+        if (!(st & ST_OBF)) break;
+
+        uint8_t b = inb(I8042_DATA);
+        if (!(st & ST_AUX)) continue;           // клавиатурный байт — мимо
+
+        if (ps2_pkt_idx == 0 && !(b & 0x08)){
+            // байт синхронизации: bit3 первого байта пакета всегда 1.
+            // Если нет — мы потеряли границу пакета: выбрасываем байт.
+            dbg_resync++;
+            continue;
+        }
+
+        ps2_pkt[ps2_pkt_idx++] = b;
+        if (ps2_pkt_idx < 3) continue;
+        ps2_pkt_idx = 0;
+
+        if (ps2_pkt[0] & 0xC0){                 // overflow x/y — пакет битый
+            dbg_overflow++;
+            continue;
+        }
+
+        int dx = ps2_pkt[1];
+        int dy = ps2_pkt[2];
+        if (ps2_pkt[0] & 0x10) dx -= 256;       // знак X (9-битное дополнение)
+        if (ps2_pkt[0] & 0x20) dy -= 256;       // знак Y
+        dy = -dy;                               // PS/2: «плюс» = вверх -> на экране вниз
+
+        ps2_acc_dx += dx;
+        ps2_acc_dy += dy;
+        ps2_last_btns = ps2_pkt[0] & 0x07;      // bit0=L bit1=R bit2=M
+        dbg_packets++;
+    }
+
+    if (ps2_acc_dx == 0 && ps2_acc_dy == 0 && out){
+        out->dx = 0; out->dy = 0; out->wheel = 0;
+        out->buttons = ps2_last_btns;           // состояние кнопок отдаём всегда
+        return 0;
+    }
+
+    if (out){
+        out->dx = (int16_t)ps2_acc_dx;
+        out->dy = (int16_t)ps2_acc_dy;
+        out->wheel = 0;
+        out->buttons = ps2_last_btns;
+    }
+    ps2_acc_dx = 0;
+    ps2_acc_dy = 0;
+    return 1;
+}
+
+// ----------------------------------------------------------------------------
+// Реестр провайдеров (сейчас: ps2aux0; в будущем usbhid0 и т.п.)
+// ----------------------------------------------------------------------------
 
 static mouse_dev_entry_t mouse_devices[MAX_POINT_DEVICES];
-static int mouse_dev_count = 0;         //занятых слотов (включая снятые)
-static int mouse_dev_live  = 0;         //активных (used) устройств
+static uint8_t mouse_dev_count = 0;
 
-//===================== Состояние PS/2-провайдера =====================
+// ----------------------------------------------------------------------------
+// Аккумулятор единого курсора (модель Windows)
+// ----------------------------------------------------------------------------
 
-typedef struct {
-    uint8_t  present;       //мышь обнаружена при инициализации
-    uint8_t  has_wheel;     //пакет 4 байта
-    uint8_t  pkt[4];        //собираемый пакет
-    uint8_t  pkt_idx;       //сколько байт уже собрано
-    uint8_t  pkt_len;       //ожидаемая длина пакета (3 или 4)
-    //Накопитель дельт с момента прошлого poll (в экранных координатах)
-    volatile int16_t pend_dx;
-    volatile int16_t pend_dy;
-    volatile int16_t pend_wheel;
-    volatile uint8_t pend_buttons;
-    volatile uint8_t irq_mode;  //1 — как только ядро впервые позвало irq_callback
-} ps2_mouse_state_t;
+static int32_t cur_x = 0, cur_y = 0;
+static uint8_t cur_buttons = 0;
+static int32_t acc_dx = 0, acc_dy = 0;    // дельта с предыдущего api->poll()
+static uint32_t scr_w = 640, scr_h = 480;
 
-static ps2_mouse_state_t ps2;
-static mouse_driver_api_t api;
-static description_driver_api_t descr_api;
-
-//===================== Служебные =====================
-
-static void md_memset(void *dst, uint8_t val, uint32_t n){
-    uint8_t *d = (uint8_t *)dst;
-    while (n--) *d++ = val;
+static int32_t clampi(int32_t v, int32_t lo, int32_t hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 
-static int md_strcpy(char *dst, const char *src, int cap){
-    int i = 0;
-    while (src[i] && i < cap - 1){ dst[i] = src[i]; i++; }
-    dst[i] = '\0';
-    return i;
-}
+// ----------------------------------------------------------------------------
+// Публичный API ((mouse_driver_api_t))
+// ----------------------------------------------------------------------------
 
-static void md_maybe_yield(uint32_t counter){
-    //Раз в ~50k итераций отдаём квант, если драйвер работает в контексте
-    //задачи (driver_main), а не в прерывании.
-    //В ISR yield не зовётся:
-    //irq_callback/poll_fn не используют wait-функции с yield
-    if (api.yield_ptr && (counter & 0x7FFF) == 0) api.yield_ptr();
-}
+//Единый опрос: суммирует дельты ВСЕХ провайдеров, двигает курсор,
+//возвращает итоговое состояние. Вызывать из SYS_MOUSE_*.
+static int mouse_api_poll(mouse_state_t *out)
+{
+    mouse_delta_t d;
+    int i, active = 0;
 
-//Ждать возможности записи в контроллер. 0 — ок, -1 — таймаут
-static int ps2_wait_write(void){
-    uint32_t t = MOUSE_IO_TIMEOUT;
-    while (t--){
-        if (!(inb(PS2_STATUS) & 0x02)) return 0;
-        md_maybe_yield(t);
+    acc_dx = 0;
+    acc_dy = 0;
+
+    for (i = 0; i < MAX_POINT_DEVICES; i++){
+        if (!mouse_devices[i].used) continue;
+        if (!mouse_devices[i].poll_fn) continue;
+        if (mouse_devices[i].poll_fn(mouse_devices[i].priv, &d) != 0) active = 1;
+        acc_dx += d.dx;
+        acc_dy += d.dy;
+        cur_buttons |= d.buttons;      // Windows-модель: кнопка нажата, если её
+                                       // держит ЛЮБОЕ из устройств
     }
-    return -1;
-}
 
-//Ждать появления байта в выходном буфере. 0 — ок, -1 — таймаут
-static int ps2_wait_read(void){
-    uint32_t t = MOUSE_IO_TIMEOUT;
-    while (t--){
-        if (inb(PS2_STATUS) & PS2_STS_OBF) return 0;
-        md_maybe_yield(t);
+    // Кнопки, которые больше никто не держит, отпускаем лениво: если ни один
+    // провайдер не вернул активность и кнопки в этом опросе не названы —
+    // это состояние последних пакетов, OR выше уже учёл released-байты
+    // (в PS/2 кнопки идут в каждом пакете, поэтому stale-состояний нет).
+
+    cur_x = clampi(cur_x + acc_dx, 0, (int32_t)scr_w - 1);
+    cur_y = clampi(cur_y + acc_dy, 0, (int32_t)scr_h - 1);
+
+    if (out){
+        out->x = (int16_t)cur_x;
+        out->y = (int16_t)cur_y;
+        out->dx = (int16_t)acc_dx;
+        out->dy = (int16_t)acc_dy;
+        out->buttons = cur_buttons;
+        out->device_count = mouse_dev_count;
     }
-    return -1;
+    return active ? 0 : 0;             // 0 = ок (курсор всегда валиден)
 }
 
-//Отправить байт мыши (через 0xD4) и дождаться ACK
-//Не годится для ISR — используется только при инициализации
-static int mouse_send_byte(uint8_t b){
-    if (ps2_wait_write()) return -1;
-    outb(PS2_COMMAND, PS2_CMD_WRITE_MOUSE);
-    if (ps2_wait_write()) return -1;
-    outb(PS2_DATA, b);
-
-    int tries = MOUSE_ACK_TRIES;
-    while (tries--){
-        if (ps2_wait_read()) return -2;
-        uint8_t r = inb(PS2_DATA);
-        if (r == MOUSE_ACK) return 0;
-        //не ACK (поздний пакет/мусор) — выкинули, ждём дальше
-    }
-    return -3;
-}
-
-//Прочитать один байт от мыши с коротким таймаутом (после ACK)
-//Возвращает байт через *out, 0 — ок, -1 — таймаут
-static int mouse_read_byte(uint8_t *out){
-    if (ps2_wait_read()) return -1;
-    uint8_t b = inb(PS2_DATA);
-    if (out) *out = b;
+static int mouse_api_set_pos(int16_t x, int16_t y)
+{
+    cur_x = clampi(x, 0, (int32_t)scr_w - 1);
+    cur_y = clampi(y, 0, (int32_t)scr_h - 1);
     return 0;
 }
 
-//===================== Поток данных PS/2 =====================
-
-//Фид одного байта в декодер пакета. Вызывается из irq_callback и из fallback-поллинга
-//Ресинхронизация: бит 3 байта 0 всегда 1
-static void ps2_feed_byte(uint8_t b){
-    if (ps2.pkt_idx == 0 && !(b & PKT_ALWAYS1)){
-        //потеря синхронизации — выкидываем байт, счётчик и так 0
-        return;
-    }
-    ps2.pkt[ps2.pkt_idx++] = b;
-    if (ps2.pkt_idx < ps2.pkt_len) return;
-
-    //Пакет собран
-    ps2.pkt_idx = 0;
-    uint8_t b0 = ps2.pkt[0];
-
-    if (b0 & (PKT_XOVERF | PKT_YOVERF)){
-        //переполнение счётчиков мыши — дельты ненадёжны, кнопки валидны
-        ps2.pend_buttons = (uint8_t)(b0 & 0x07);
-        return;
-    }
-
-    int8_t dx = (int8_t)ps2.pkt[1];
-    int8_t dy = (int8_t)ps2.pkt[2];
-
-    //PS/2: движение вниз = dy < 0. Экранные координаты: вниз = +
-    int16_t sdx = (int16_t)dx;
-    int16_t sdy = (int16_t)(-dy);
-
-    ps2.pend_dx = (int16_t)(ps2.pend_dx + sdx);
-    ps2.pend_dy = (int16_t)(ps2.pend_dy + sdy);
-    ps2.pend_buttons = (uint8_t)(b0 & 0x07);
-
-    if (ps2.has_wheel){
-        int8_t wz = (int8_t)ps2.pkt[3];
-        if (wz != 0) ps2.pend_wheel = (int16_t)(ps2.pend_wheel + (wz > 0 ? -1 : 1));
-        //колесо вверх (wz > 0) уменьшает счётчик — как dy
-    }
-}
-
-//Вычитать все доступные AUX-байты из буфера 8042
-//Функция неблокирующая, безопасна из тика таймера и из ISR12
-//Клавиатурные байты (статус без AUX-бита) не трогаем
-static void ps2_drain(void){
-    uint32_t guard = 64;    //не больше 64 байт за раз
-    while (guard--){
-        uint8_t st = inb(PS2_STATUS);
-        if (!(st & PS2_STS_OBF)) return;    //буфер пуст
-        if (!(st & PS2_STS_AUX)){
-            //Это байт клавиатуры — его вычитает kbd-драйвер из ISR1
-            //Выходим: наш байт придёт следующим, заберём потом
-            return;
-        }
-        ps2_feed_byte(inb(PS2_DATA));
-    }
-}
-
-//===================== PS/2-провайдер: API реестра =====================
-
-static int ps2_mouse_poll(void *priv, mouse_delta_t *out){
-    (void)priv;
-    if (!out) return -1;
-    ps2_drain();    //fallback-вычитка: работает и без IRQ12
-    out->dx      = ps2.pend_dx;
-    out->dy      = ps2.pend_dy;
-    out->wheel   = ps2.pend_wheel;
-    out->buttons = ps2.pend_buttons;
-    ps2.pend_dx = 0; ps2.pend_dy = 0; ps2.pend_wheel = 0;
-    return ps2.present ? 0 : -2;
-}
-
-static int ps2_mouse_caps(void *priv, mouse_caps_t *out){
-    (void)priv;
-    if (!out) return -1;
-    out->buttons   = 3;
-    out->has_wheel = ps2.has_wheel;
-    return 0;
-}
-
-//===================== Реестр устройств =====================
-
-static int mouse_register_device_impl(const char *name, uint8_t type,
-                                      int (*poll_fn)(void*, mouse_delta_t*),
-                                      int (*get_caps_fn)(void*, mouse_caps_t*),
-                                      void *priv){
-    if (!name || !poll_fn) return FS_IO_ERROR;
-    if (mouse_dev_count >= MAX_POINT_DEVICES) return FS_TOO_MANY;
-
-    int idx = -1;
-    for (int i = 0; i < MAX_POINT_DEVICES; i++){
-        if (!mouse_devices[i].used){ idx = i; break; }
-    }
-    if (idx < 0) return FS_TOO_MANY;
-
-    mouse_dev_entry_t *e = &mouse_devices[idx];
-    md_memset(e, 0, sizeof(*e));
-    md_strcpy(e->name, name, (int)sizeof(e->name));
-    e->type        = type;
-    e->used        = 1;
-    e->poll_fn     = poll_fn;
-    e->get_caps_fn = get_caps_fn;
-    e->priv        = priv;
-
-    mouse_dev_count++;
-    mouse_dev_live++;
-    api.enabled = (mouse_dev_live > 0);
-    return idx;
-}
-
-static int mouse_unregister_device_impl(int idx){
-    if (idx < 0 || idx >= MAX_POINT_DEVICES) return FS_IO_ERROR;
-    if (!mouse_devices[idx].used) return FS_NOT_FOUND;
-    mouse_devices[idx].used = 0;
-    mouse_dev_live--;
-    api.enabled = (mouse_dev_live > 0);
-    return FS_OK;
-}
-
-static int mouse_get_device_count_impl(void){
-    return mouse_dev_live;
-}
-
-static int mouse_get_device_info_impl(int idx, mouse_info_t *out){
-    if (!out) return FS_IO_ERROR;
-    if (idx < 0 || idx >= MAX_POINT_DEVICES) return FS_NOT_FOUND;
-    if (!mouse_devices[idx].used) return FS_NOT_FOUND;
-
-    md_memset(out, 0, sizeof(*out));
-    md_strcpy(out->name, mouse_devices[idx].name, (int)sizeof(out->name));
+static int mouse_api_get_device_info(int idx, mouse_info_t *out)
+{
+    if (idx < 0 || idx >= MAX_POINT_DEVICES || !out) return -1;
+    if (!mouse_devices[idx].used) return -1;
+    memset(out->name, 0, sizeof(out->name));
+    strncpy(out->name, mouse_devices[idx].name, sizeof(out->name) - 1);
     out->type = mouse_devices[idx].type;
     out->used = 1;
-    out->has_wheel = 0;
-    if (mouse_devices[idx].get_caps_fn){
-        mouse_caps_t caps;
-        if (mouse_devices[idx].get_caps_fn(mouse_devices[idx].priv, &caps) == 0)
-            out->has_wheel = caps.has_wheel;
+    out->buttons = 3;                  // пока все провайдеры — 3-кнопочные
+    return 0;
+}
+
+static int mouse_api_register_device(const char *name, uint8_t type, uint8_t priority,
+                                     int (*poll_fn)(void *priv, mouse_delta_t *out),
+                                     void *priv)
+{
+    int i;
+    if (!name || !poll_fn) return -1;
+
+    for (i = 0; i < MAX_POINT_DEVICES; i++){
+        if (!mouse_devices[i].used){
+            memset(mouse_devices[i].name, 0, sizeof(mouse_devices[i].name));
+            strncpy(mouse_devices[i].name, name, sizeof(mouse_devices[i].name) - 1);
+            mouse_devices[i].type = type;
+            mouse_devices[i].priority = priority;
+            mouse_devices[i].poll_fn = poll_fn;
+            mouse_devices[i].priv = priv;
+            mouse_devices[i].used = 1;
+            mouse_dev_count++;
+            return i;                  // индекс в реестре
+        }
     }
-    return FS_OK;
+    return -1;                         // реестр полон
 }
 
-//===================== Высокоуровневый poll (Windows-модель) =====================
+static int mouse_api_unregister_device(int idx)
+{
+    if (idx < 0 || idx >= MAX_POINT_DEVICES) return -1;
+    if (!mouse_devices[idx].used) return -1;
+    memset(&mouse_devices[idx], 0, sizeof(mouse_dev_entry_t));
+    if (mouse_dev_count) mouse_dev_count--;
+    return 0;
+}
 
-//Сумма дельт всех активных устройств; кнопки — OR по всем
-//int32-аккумулятор на случай, если провайдеров несколько и каждый накопил по int16 за период опроса
-static int mouse_poll_impl(mouse_delta_t *out){
-    if (!out) return FS_IO_ERROR;
+// ----------------------------------------------------------------------------
+// Дескриптор драйвера (паттерн kbd_driver.c)
+// ----------------------------------------------------------------------------
 
-    int32_t adx = 0, ady = 0, awheel = 0;
-    uint8_t abtn = 0;
-    int got = 0;
+mouse_driver_api_t api;
+mouse_driver_api_t *api_ptr;
 
-    for (int i = 0; i < MAX_POINT_DEVICES; i++){
-        mouse_dev_entry_t *e = &mouse_devices[i];
-        if (!e->used || !e->poll_fn) continue;
-        mouse_delta_t d;
-        if (e->poll_fn(e->priv, &d) != 0) continue;
-        got = 1;
-        adx += d.dx; ady += d.dy; awheel += d.wheel;
-        abtn |= d.buttons;
+description_driver_api_t descr_api;
+
+void driver_main(struct boot_info *boot)
+{
+    int idx;
+
+    // Границы экрана для клампа курсора
+    if (boot){
+        scr_w = boot->width ? boot->width : 640;
+        scr_h = boot->height ? boot->height : 480;
+    } else {
+        scr_w = 640;
+        scr_h = 480;
     }
 
-    if (adx >  32767) adx =  32767;
-    else if (adx < -32768) adx = -32768;
-    if (ady >  32767) ady =  32767;
-    else if (ady < -32768) ady = -32768;
-    if (awheel > 32767) awheel =  32767;
-    else if (awheel < -32768) awheel = -32768;
-
-    out->dx      = (int16_t)adx;
-    out->dy      = (int16_t)ady;
-    out->wheel   = (int16_t)awheel;
-    out->buttons = abtn;
-    return got ? FS_OK : FS_NOT_FOUND;
-}
-
-//===================== IRQ12 (подключается при использовании прерывания из isr.c) =====================
-
-static void mouse_irq_callback_impl(void){
-    ps2.irq_mode = 1;
-    if (api.irq_fired_ptr) *api.irq_fired_ptr = 1;
-    ps2_drain();
-}
-
-//===================== Инициализация PS/2 AUX =====================
-
-//Разрешить канал 1 в контроллере и CCB (IRQ12, AUX clock)
-static int ps2_enable_aux_port(void){
-    if (ps2_wait_write()) return -1;
-    outb(PS2_COMMAND, PS2_CMD_ENABLE_AUX);
-
-    if (ps2_wait_write()) return -1;
-    outb(PS2_COMMAND, PS2_CMD_READ_CCB);
-    if (ps2_wait_read()) return -1;
-    uint8_t ccb = inb(PS2_DATA);
-
-    ccb |= CCB_ENABLE_IRQ12;      //разрешить IRQ12
-    ccb &= CCB_ENABLE_AUX_CLK;    //разрешить clock канала 1
-
-    if (ps2_wait_write()) return -1;
-    outb(PS2_COMMAND, PS2_CMD_WRITE_CCB);
-    if (ps2_wait_write()) return -1;
-    outb(PS2_DATA, ccb);
-    return 0;
-}
-
-//Сброс мыши: 0xFF -> ACK, 0xAA, идентификатор
-//0 — мышь есть, -1 — мыши нет / не отвечает
-static int ps2_mouse_reset(uint8_t *out_id){
-    if (mouse_send_byte(M_CMD_RESET)) return -1;
-
-    uint8_t b = 0;
-    if (mouse_read_byte(&b)) return -1;         //self-test результат
-    if (b != MOUSE_SELFTEST_OK) return -1;      //0xFC/мусор — мышь битая
-
-    //device ID (0x00 стандартная, 0x03 wheel-режим).
-    //У некоторых мышей ID приходит с задержкой — отсутствие байта не признак отсутствия мыши,
-    //поэтому таймаут не фейлит инициализацию
-    if (mouse_read_byte(&b) == 0 && out_id) *out_id = b;
-    return 0;
-}
-
-//Magic-последовательность включения колеса: sample 200,100,80 -> identify
-//1 — мышь с колесом (ID 0x03)
-static int ps2_detect_wheel(void){
-    //Параметр команды 0xF3 уходит так же через 0xD4 и получает ACK,
-    //поэтому каждый элемент — mouse_send_byte
-    if (mouse_send_byte(M_CMD_SAMPLE)) return 0;
-    if (mouse_send_byte(0xC8)) return 0;
-    if (mouse_send_byte(M_CMD_SAMPLE)) return 0;
-    if (mouse_send_byte(0x64)) return 0;
-    if (mouse_send_byte(M_CMD_SAMPLE)) return 0;
-    if (mouse_send_byte(0x50)) return 0;
-
-    if (mouse_send_byte(M_CMD_IDENTIFY)) return 0;
-    uint8_t id = 0;
-    if (mouse_read_byte(&id)) return 0;
-    return (id == 0x03) ? 1 : 0;
-}
-
-static int ps2_mouse_init(void){
-    md_memset(&ps2, 0, sizeof(ps2));
-    ps2.pkt_len = PS2_PKT_SIZE_BASE;
-
-    if (ps2_enable_aux_port()) return -1;
-
-    uint8_t id = 0;
-    if (ps2_mouse_reset(&id)) return -1;
-
-    //Конфигурация: defaults, детект колеса, включение reporting
-    if (mouse_send_byte(M_CMD_DISABLE))  return -1;
-    if (mouse_send_byte(M_CMD_DEFAULTS)) return -1;
-
-    ps2.has_wheel = (uint8_t)ps2_detect_wheel();
-    ps2.pkt_len = ps2.has_wheel ? PS2_PKT_SIZE_WHEEL : PS2_PKT_SIZE_BASE;
-
-    if (mouse_send_byte(M_CMD_ENABLE)) return -1;
-
-    ps2.present = 1;
-    return 0;
-}
-
-//===================== Входная точка драйвера =====================
-
-void driver_main(struct boot_info *boot){
-    (void)boot;
-
-    md_memset(&api, 0, sizeof(api));
-    md_memset(mouse_devices, 0, sizeof(mouse_devices));
+    memset(mouse_devices, 0, sizeof(mouse_devices));
     mouse_dev_count = 0;
-    mouse_dev_live  = 0;
+    cur_x = (int32_t)scr_w / 2;
+    cur_y = (int32_t)scr_h / 2;
+    cur_buttons = 0;
 
-    //PS/2 AUX — дефолтный провайдер
-    //Регистрируем всегда, даже если мышь не ответила:
-    //poll_fn вернёт -2, usb-провайдер сможет встать позже, ядро увидит честный enabled=0
-    int r = ps2_mouse_init();
-    int idx = mouse_register_device_impl("ps2", MOUSE_PTYPE_PS2,
-                                         ps2_mouse_poll, ps2_mouse_caps, &ps2);
-    if (idx < 0) r = -1;
+    memset(&api, 0, sizeof(api));
+    api.version = MOUSE_ABI_VERSION;
+    api.poll = mouse_api_poll;
+    api.set_pos = mouse_api_set_pos;
+    api.get_device_info = mouse_api_get_device_info;
+    api.register_device = mouse_api_register_device;
+    api.unregister_device = mouse_api_unregister_device;
 
-    api.version = 1;
-    api.enabled = (mouse_dev_live > 0) && (r == 0);
-    api.poll              = mouse_poll_impl;
-    api.get_device_count  = mouse_get_device_count_impl;
-    api.get_device_info   = mouse_get_device_info_impl;
-    api.register_device   = mouse_register_device_impl;
-    api.unregister_device = mouse_unregister_device_impl;
-    api.irq_callback      = mouse_irq_callback_impl;
-    //malloc_ptr/free_ptr/yield_ptr/irq_fired_ptr пришьет ядро в use_drivers.c
+    // Дефолтный провайдер PS/2. Детект poll-овый: не зависит ни от PIC,
+    // ни от isr.c, ни от irq_fired_ptr (его ядро пришивает ПОСЛЕ загрузки).
+    idx = -1;
+    if (mouse_ps2_init()){
+        idx = mouse_api_register_device("ps2aux0", PTYPE_PS2, 10, mouse_ps2_poll, 0);
+    }
 
-    api.debug1 = (uint32_t)r;             //0 — PS/2 мышь обнаружена
-    api.debug2 = (uint32_t)mouse_dev_live;
-    api.debug1 |= ((uint32_t)ps2.has_wheel << 8);
+    api.enabled = (idx >= 0) ? 1 : 0;
+    api.debug1 = mouse_dev_count;      // сколько устройств в реестре
+    api.debug2 = dbg_packets;
+    api.debug3 = dbg_resync;
 
-    descr_api.type       = DESCR_MOUSE_DRIVER;
+    api_ptr = &api;
+
+    descr_api.type = DESCR_MOUSE_DRIVER;
     descr_api.struct_ptr = (void *)&api;
 }
 
-description_driver_api_t *driver_get_api(void){
+description_driver_api_t *driver_get_api(void)
+{
     return &descr_api;
 }

@@ -32,6 +32,12 @@
 #include "include-kernel/kpanic.h"
 #include "include-kernel/kload_screen.h"
 
+//Флаг IRQ12 (PS/2 мышь / AUX)
+//Ставится в irq44_handler, читается драйвером мыши
+//Детект и опрос мыши полностью poll-овые: драйвер читает 0x60 напрямую,
+//поэтому мышь работает даже если этот флаг никто не ставит
+volatile uint8_t mouse_irq_fired = 0;
+
 volatile uint8_t floppy_irq_fired = 0;
 volatile uint32_t tick_count = 0;
 volatile uint8_t kernel_schedule_lock = 0;
@@ -184,7 +190,8 @@ void pic_init(void)
     outb(0xA1, 0x01);
     //outb(0x21, 0xFE);  // разрешить только IRQ0
     outb(0x21, 0xB8); // разрешить IRQ0 и IRQ1 и IRQ6
-    outb(0xA1, 0xFF);
+    //outb(0xA1, 0xFF);
+    outb(0xA1, 0xEF); // на PIC2 разрешить только IRQ12 (PS/2 мышь)
 }
 
 
@@ -309,6 +316,19 @@ void irq6_handler(struct regs *r)
 }
 
 
+//IRQ12 — PS/2 мышь (порт AUX контроллера i8042)
+//Обработчик минимальный (дисциплина floppy_irq_fired): только флаг и EOI
+//Байты пакета из порта 0x60 читает драйвер мыши в poll()
+void irq44_handler(struct regs *r){
+    (void)r;
+    mouse_irq_fired = 1;
+    //EOI в PIC2 (IRQ8-15 живут там) и в PIC1 — иначе шина мыши "залипнет"
+    outb(0xA0, 0x20);
+    outb(0x20, 0x20);
+}
+
+
+
 void isr_handler(struct regs *r)
 {
     if (r->int_no == 8)
@@ -343,6 +363,11 @@ void isr_handler(struct regs *r)
     {
         irq6_handler(r); //Вызываем обработчик (он выставит floppy_irq_fired = 1 и пошлет EOI)
         return;// r;
+    }
+
+    if (r->int_no == 44){
+        irq44_handler(r); //IRQ12: PS/2 мышь — флаг mouse_irq_fired + EOI
+        return;
     }
 
     //Аппаратные прерывания (32–47)
