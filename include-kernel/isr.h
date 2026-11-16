@@ -30,6 +30,17 @@ extern volatile uint8_t init_kernel_schedule_lock;
 extern volatile uint8_t stdin_cancel_flag;
 //extern volatile uint32_t tty_foreground_pid;
 
+//Забрать AUX-байт мыши из ядерного кольца (заполняется обработчиками
+//IRQ1/IRQ12 в isr.c). 0 — байт в *out, -1 — пусто. Пришивается драйверу
+//мыши как read_byte в use_drivers.c: с ABI v2 драйвер не читает 0x60 сам,
+//иначе глотает скан-коды клавиатуры
+int kernel_mouse_read_byte(uint8_t *out);
+
+//Вычитать и разложить выходной буфер i8042 (клавиатурные байты — клавиатуре,
+//AUX — в кольцо мыши). Публично для драйвера мыши как страховка на случай,
+//когда IRQ12 не срабатывает и байты застревают в буфере контроллера
+void kernel_i8042_drain(void);
+
 //Структура состояния регистров, передаваемая из обработчика
 struct regs
 {

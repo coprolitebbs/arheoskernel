@@ -39,6 +39,7 @@
 #include "include-kernel/font.h"
 #include "include-kernel/kload_screen.h"
 #include "include-kernel/usb_registry.h"
+#include "include-kernel/ports_io.h"
 
 //указатель на api драйвера framebuffer
 fb_driver_api_t *fb = 0;
@@ -338,6 +339,18 @@ int load_additional_drivers(cfg_file_t *cfg)
         //cfg_close(cfg);
         return DRV_STATUS_LOAD_ERROR;
     }
+    //На время загрузки дополнительных драйверов маскируем IRQ1 и IRQ12.
+    //Драйвер мыши внутри init ведет с контроллером диалог (чтение CCB,
+    //Reset, ACK), и ответ на команду 0x20 приходит как обычный байт с AUX==0 —
+    //контроллер оформляет его прерыванием клавиатуры. Без маски обработчик
+    //IRQ1 вычитал бы этот байт как скан-код, и детект иногда падал на шаге
+    //чтения CCB (наблюдалось на 86box). Внутри цикла return нет, так что
+    //маски гарантированно снимаются после цикла
+    uint8_t pic1_imr = inb(0x21);
+    uint8_t pic2_imr = inb(0xA1);
+    outb(0x21, pic1_imr | 0x02);   //IRQ1 — клавиатура
+    outb(0xA1, pic2_imr | 0x10);   //IRQ12 — AUX
+
     //Последовательный перебор секций [driver_1], [driver_2]...
     for (int i = 1; i <= drivers_count; i++)
     {
@@ -455,8 +468,13 @@ int load_additional_drivers(cfg_file_t *cfg)
                     mouse_driver_api->malloc_ptr = kmalloc;
                     mouse_driver_api->free_ptr   = kfree;
                     mouse_driver_api->yield_ptr  = sys_yield;
-                    //Флаг IRQ12 из isr.c (работает и без него: детект poll-овый)
+                    //Флаг IRQ12 из isr.c (оставлен для диагностики)
                     mouse_driver_api->irq_fired_ptr = &mouse_irq_fired;
+                    //Кольцо AUX-байтов из isr.c: с ABI v2 драйвер забирает байты
+                    //мыши через него и не читает порт 0x60 сам. Прямое чтение
+                    //из poll глотало скан-коды клавиатуры — терялись нажатия
+                    mouse_driver_api->read_byte = kernel_mouse_read_byte;
+                    mouse_driver_api->drain_ptr = kernel_i8042_drain;
                     if (mouse_driver_api->enabled)
                         {
                             //bit1 в debug6 — провайдер зарегистрирован без
@@ -521,6 +539,11 @@ int load_additional_drivers(cfg_file_t *cfg)
         }
 
     }
+
+    //Возвращаем оба прерывания: клавиатура и мышь начинают жить по IRQ,
+    //байты мыши отныне стекут в кольцо isr.c, а не в poll драйвера
+    outb(0xA1, pic2_imr);
+    outb(0x21, pic1_imr);
 
     kfree(section_name);
     kfree(drv_name);

@@ -32,10 +32,12 @@
 #include "include-kernel/kpanic.h"
 #include "include-kernel/kload_screen.h"
 
-//Флаг IRQ12 (PS/2 мышь / AUX)
-//Ставится в irq44_handler, читается драйвером мыши
-//Детект и опрос мыши полностью poll-овые: драйвер читает 0x60 напрямую,
-//поэтому мышь работает даже если этот флаг никто не ставит
+//Флаг IRQ12 (PS/2 мышь / AUX). Ставится при каждом принятом байте мыши.
+//Раньше опрос был полностью poll-овым (драйвер мыши читал 0x60 напрямую)
+//и глотал скан-коды клавиатуры, попавшие в буфер между опросами — терялись
+//нажатия. Теперь порт принадлежит ядру: обработчики IRQ1/IRQ12 раскладывают
+//байты сами, AUX-байты копятся в кольце ниже и отдаются драйверу мыши через
+//kernel_mouse_read_byte. Флаг остался для диагностики и совместимости
 volatile uint8_t mouse_irq_fired = 0;
 
 volatile uint8_t floppy_irq_fired = 0;
@@ -273,34 +275,84 @@ void isr_pagefault(struct regs *r)
 
 
 
+//Кольцо AUX-байтов мыши. Контроллер i8042 выдает байты мыши и клавиатуры
+//через один порт 0x60, различие — только бит AUX (bit5) в статусе (0x64),
+//поэтому порт принадлежит ядру, а не драйверу мыши. Писатель — обработчики
+//IRQ1/IRQ12 (вложений нет: стаб не включает IF), читатель — poll драйвера
+//мыши через kernel_mouse_read_byte. Классический SPSC-кольцевой буфер,
+//head/tail — свободно бегущие индексы без.wrap-веток
+#define MOUSE_RX_SIZE 128   //степень двойки
+#define MOUSE_RX_MASK (MOUSE_RX_SIZE - 1)
+
+static volatile uint8_t  mouse_rx[MOUSE_RX_SIZE];
+static volatile uint32_t mouse_rx_head = 0;     //пишет только ISR
+static volatile uint32_t mouse_rx_tail = 0;     //пишет только читатель (драйвер)
+static volatile uint32_t mouse_rx_dropped = 0;  //потери при переполнении кольца
+
+//Забрать один AUX-байт из кольца. 0 — байт в *out, -1 — кольцо пусто.
+//Вызывается из poll драйвера мыши (контекст задач и системных вызовов)
+int kernel_mouse_read_byte(uint8_t *out)
+{
+    if (!out) return -1;
+    uint32_t t = mouse_rx_tail;
+    if (t == mouse_rx_head) return -1;
+    *out = mouse_rx[t & MOUSE_RX_MASK];
+    mouse_rx_tail = t + 1;
+    return 0;
+}
+
+//Разложить один байт выходного буфера i8042 по назначению:
+//AUX — в кольцо мыши, клавиатурный — хоткеям и драйверу клавиатуры
+static void i8042_dispatch_byte(uint8_t st, uint8_t b)
+{
+    if (st & 0x20)                     //bit5 статуса = AUX: байт от мыши
+    {
+        uint32_t h = mouse_rx_head;
+        if ((uint32_t)(h - mouse_rx_tail) >= MOUSE_RX_SIZE)
+        {
+            //Кольцо переполнено (драйвер давно не звал poll) — байт теряем.
+            //Граница пакета развалится, драйвер пересинхронизируется по bit3
+            mouse_rx_dropped++;
+            return;
+        }
+        mouse_rx[h & MOUSE_RX_MASK] = b;
+        mouse_rx_head = h + 1;
+        mouse_irq_fired = 1;
+    }
+    else
+    {
+        //Хоткей смены раскладки читает только модификаторы и переключает
+        //раскладку, сам скан-код при этом идет дальше обычным путем
+        kbd_hotkey_process(b);
+        if (kbd_driver_api && kbd_driver_api->irq_callback)
+        {
+            kbd_driver_api->irq_callback(b);
+        }
+    }
+}
+
+//Вычитать и разложить все байты, успевшие попасть в выходной буфер.
+//Общий тракт для IRQ1 и IRQ12: каждый обработчик забирает все, что есть,
+//и раскладывает по биту AUX — мышиные байты не теряются в обработчике
+//клавиатуры и наоборот. Ограничение итераций, поскольку вызывается из ISR
+void kernel_i8042_drain(void)
+{
+    int guard = 16;
+    while (guard--)
+    {
+        uint8_t st = inb(0x64);
+        if (!(st & 0x01)) break;       //bit0 статуса = OBF: буфер пуст
+        i8042_dispatch_byte(st, inb(0x60));
+    }
+}
+
 void irq33_handler(struct regs *r)
 {
-    //Аппаратно вычитываем скан-код клавиши из порта контроллера i8042
-    uint8_t scancode = inb(0x60);
-    //Посылаем сигнал EOI (End of Interrupt) контроллеру прерываний PIC,
-    //чтобы клавиатурная шина не вешала систему на время выполнения кода
+    (void)r;
+    //Скан-коды уходят клавиатуре, случайные AUX-байты — в кольцо мыши
+    kernel_i8042_drain();
+    //EOI в PIC1 после разбора буфера
     outb(0x20, 0x20);
-    //Обрабатываем хоткей смены раскладки. Он читает только
-    //состояние модификаторов и переключает раскладку при нажатии комбинации,
-    //сам скан-код при этом идёт дальше обычным путём
-    kbd_hotkey_process(scancode);
-    //Передаем скан-код в драйвер клавы
-    //Это наполнит кольцевой буфер kbd_event_buf, и sekhmet_read_line(), или кому там еще нужно, увидит нажатие
-    if (kbd_driver_api && kbd_driver_api->irq_callback)
-    {
-        kbd_driver_api->irq_callback(scancode);
-    }
-    if (current_tty && current_tty->foreground_pid != 0)
-    {
-        //Если терминал захвачен активным шеллом/процессором Ring 3 — выходим
-        //Оставим только обработку переключения TTY по комбинациям клавиш
-        return;
-    }
-    //Канонический (cooked) ввод строки теперь полностью обрабатывает ядро
-    //в systemcall_file_read (SYS_READ STDIN): эхо, Backspace/DEL, стрелки,
-    //HOME/END, Ctrl+C и мигающий курсор. Прежний fallback-редактор из IRQ
-    //удален: он не наполнял буфер, не печатал символы и рисовал второй
-    //блочный курсор поверх нового редактора ядра
 }
 
 
@@ -317,11 +369,13 @@ void irq6_handler(struct regs *r)
 
 
 //IRQ12 — PS/2 мышь (порт AUX контроллера i8042)
-//Обработчик минимальный (дисциплина floppy_irq_fired): только флаг и EOI
-//Байты пакета из порта 0x60 читает драйвер мыши в poll()
-void irq44_handler(struct regs *r){
+//Байты мыши кладем в кольцо (драйвер заберет их через read_byte),
+//случайный клавиатурный байт не теряем — отдаем клавиатурному тракту
+void irq44_handler(struct regs *r)
+{
     (void)r;
     mouse_irq_fired = 1;
+    kernel_i8042_drain();
     //EOI в PIC2 (IRQ8-15 живут там) и в PIC1 — иначе шина мыши "залипнет"
     outb(0xA0, 0x20);
     outb(0x20, 0x20);
