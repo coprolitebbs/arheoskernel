@@ -72,7 +72,11 @@
 #define TIMEOUT_RESET  1000000   //ожидание 0xAA после Reset (~1-3 с)
 #define TIMEOUT_CCB    200000
 
-static uint8_t  ps2_present   = 0;     //мышь найдена и инициализирована
+//Диагностика детекта: на каком шаге инициализация остановилась (MPST_*)
+//и какой байт был последним принят на этом шаге (для строк "no 0xAA, got XX")
+static uint32_t init_step    = MPST_OK;
+static int32_t  init_last_b  = -1;     //0..255 или -1 (тишина)
+
 static uint8_t  ps2_last_btns = 0;     //последнее состояние кнопок PS/2-мыши
 
 //Накопитель пакетов: байты приходят асинхронно (по IRQ или между опросами),
@@ -150,31 +154,48 @@ static int ps2_command(uint8_t cmd)
 }
 
 // Инициализация PS/2 AUX. Полностью poll-овая: работает даже если IRQ12
-// замаскирован в PIC или обработчик в isr.c еще не пришит.
+// замаскирован в PIC или обработчик в isr.c еще не пришит
 // Возвращает 1, если мышь найдена, 0 — если нет.
+//При неудаче init_step хранит код шага (MPST_*), по которому ядро печатает причину на экране
 static int mouse_ps2_init(void)
 {
     uint8_t ccb;
-    int ack, resp;
+    int resp, attempt, kb_disabled = 0;
+    int ok = 0;
 
     ps2_pkt_idx = 0;
     ps2_acc_dx = 0;
     ps2_acc_dy = 0;
     ps2_last_btns = 0;
+    init_step = MPST_OK;
+    init_last_b = -1;
 
     //0. Отключить клавиатурный порт (0xAD) и очистить мусор в выходном буфере
     //(байты от BIOS/клавиатуры)
     //Без отключения печатающий пользователь мог бы вклинить клавиатурный байт в диалог с мышью
-    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    if (!i8042_wait_write(TIMEOUT_FAST))
+    {
+        init_step = MPST_WR_TIMEOUT;
+        goto done;
+    }
     outb(I8042_STATUS, 0xAD);          //disable keyboard port
+    kb_disabled = 1;
     i8042_flush(TIMEOUT_FAST);
 
     //1. Отключить и включить AUX-порт: приводит контроллер в заведомое
     //состояние (на 86box без этого AUX иногда спит)
-    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    if (!i8042_wait_write(TIMEOUT_FAST))
+    {
+        init_step = MPST_WR_TIMEOUT;
+        goto done;
+    }
     outb(I8042_STATUS, 0xA7);          //disable AUX
     i8042_flush(TIMEOUT_FAST);
-    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    if (!i8042_wait_write(TIMEOUT_FAST))
+    {
+        init_step = MPST_WR_TIMEOUT;
+        goto done;
+    }
     outb(I8042_STATUS, 0xA8);          //enable AUX
     i8042_flush(TIMEOUT_FAST);
 
@@ -183,9 +204,13 @@ static int mouse_ps2_init(void)
     //      bit5 = 0 (разрешить тактирование AUX-порта)
     //Ответ на 0x20 приходит как обычный байт контроллера (AUX==0),
     //читаем его именно контроллерным способом; клавиатура уже отключена,
-    //так что бит AUX==0 здесь значит именно байт контроллера.
-    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
-    outb(I8042_STATUS, 0x20);          //Почитаем Controller Configuration Byte
+    //так что бит AUX==0 здесь значит именно байт контроллера
+    if (!i8042_wait_write(TIMEOUT_FAST))
+    {
+        init_step = MPST_WR_TIMEOUT;
+        goto done;
+    }
+    outb(I8042_STATUS, 0x20);          //почитать Controller Configuration Byte
     {
         int t = TIMEOUT_CCB;
         resp = -1;
@@ -202,43 +227,82 @@ static int mouse_ps2_init(void)
     }
     if (resp < 0)
     {
-        //контроллер не ответил — AUX нет, вернуть клавиатуру и выйти
-        if (i8042_wait_write(TIMEOUT_FAST)) outb(I8042_STATUS, 0xAE);
-        return 0;
+        init_step = MPST_NO_CCB;       //контроллер не ответил — AUX нет
+        goto done;
     }
+    init_last_b = resp;
     ccb = (uint8_t)resp;
     ccb |=  (1 << 1);                  //enable AUX IRQ12
     ccb &= ~(1 << 5);                  //enable AUX clock
-    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
-    outb(I8042_STATUS, 0x60);          //Запишем Controller Configuration Byte
-    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
+    if (!i8042_wait_write(TIMEOUT_FAST))
+    {
+        init_step = MPST_WR_TIMEOUT;
+        goto done;
+    }
+    outb(I8042_STATUS, 0x60);          //записать Controller Configuration Byte
+    if (!i8042_wait_write(TIMEOUT_FAST))
+    {
+        init_step = MPST_WR_TIMEOUT;
+        goto done;
+    }
     outb(I8042_DATA, ccb);
 
     //3. Reset мыши: 0xFF -> ACK 0xFA, потом 0xAA (self-test ok) и 0x00 (id)
-    //0xFC вместо 0xAA — ошибка самотеста, тишина — устройства нет
-    if (!ps2_command(0xFF)) return 0;
-    ack = ps2_read_byte(TIMEOUT_RESET);            //0xAA
-    if (ack != 0xAA) return 0;
-    (void)ps2_read_byte(TIMEOUT_RESET);            //device id (0x00), не проверяем жестко
+    //0xFC вместо 0xAA — ошибка самотеста, тишина — устройства нет.
+    //Блок 3-6 делаем дважды: часть контроллеров теряет первый Reset, если
+    //между 0xA8 и командой прошло слишком мало времени (наблюдалось на 86box)
+    for (attempt = 0; attempt < 2 && !ok; attempt++)
+    {
+        i8042_flush(TIMEOUT_FAST);     //хвосты предыдущей попытки (AA/00/ACK)
 
-    // 4. Заводские настройки по умолчанию
-    if (!ps2_command(0xF6)) return 0;
+        if (!ps2_command(0xFF))
+        {
+            init_step = MPST_NO_ACK;
+            continue;
+        }
+        resp = ps2_read_byte(TIMEOUT_RESET);       //0xAA
+        init_last_b = resp;
+        if (resp != 0xAA)
+        {
+            init_step = MPST_NO_BT;
+            continue;
+        }
+        (void)ps2_read_byte(TIMEOUT_RESET);        //device id (0x00), не проверяем жестко
+        init_step = MPST_OK;
+        init_last_b = -1;
 
-    // 5. Частота опроса 40 отчетов/с (стабильность на реальном железе;
-    //    заодно задел под будущую магию включения колеса)
-    if (!ps2_command(0xF3)) return 0;
-    if (!ps2_command(0x28)) return 0;
+        //4. Заводские настройки по умолчанию
+        if (!ps2_command(0xF6))
+        {
+            init_step = MPST_NO_F6;
+            continue;
+        }
 
-    // 6. Разрешить стриминг отчетов
-    if (!ps2_command(0xF4)) return 0;
+        //5. Частота опроса 40 отчетов/с (стабильность на реальном железе;
+        //    заодно задел под будущую магию включения колеса)
+        if (!ps2_command(0xF3) || !ps2_command(0x28))
+        {
+            init_step = MPST_NO_F3;
+            continue;
+        }
 
-    // 7. Слить все, что успело прийти между шагами, и вернуть клавиатуру
+        //6. Разрешить стриминг отчетов
+        if (!ps2_command(0xF4))
+        {
+            init_step = MPST_NO_F4;
+            continue;
+        }
+        ok = 1;
+    }
+
+done:
+    //Хвост общий для всех выходов: слить остатки и вернуть клавиатуру (0xAE).
+    //Раньше при неудаче после шага 0 ядро оставалось без клавиатуры до ребута
     i8042_flush(TIMEOUT_FAST);
-    if (!i8042_wait_write(TIMEOUT_FAST)) return 0;
-    outb(I8042_STATUS, 0xAE);          // enable keyboard port
+    if (kb_disabled && i8042_wait_write(TIMEOUT_FAST))
+        outb(I8042_STATUS, 0xAE);      //enable keyboard port
 
-    ps2_present = 1;
-    return 1;
+    return ok;
 }
 
 // poll_fn провайдера PS/2: вычитывает все, что лежит в буфере, собирает
@@ -457,13 +521,15 @@ void driver_main(struct boot_info *boot)
     idx = -1;
     if (mouse_ps2_init())
     {
-        idx = mouse_api_register_device("ps2aux0", PTYPE_PS2, 10, mouse_ps2_poll, 0);
+        idx = mouse_api_register_device("ps2", PTYPE_PS2, 10, mouse_ps2_poll, 0);
     }
 
     api.enabled = (idx >= 0) ? 1 : 0;
     api.debug1 = mouse_dev_count;      //сколько устройств в реестре
     api.debug2 = dbg_packets;
     api.debug3 = dbg_resync;
+    api.debug4 = init_step;            //шаг детекта при неудаче (MPST_*), 0 — все ок
+    api.debug5 = (init_last_b < 0) ? 0xFFFFFFFFu : (uint32_t)init_last_b;
 
     api_ptr = &api;
 

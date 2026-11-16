@@ -2418,7 +2418,7 @@ void systemcall_gr_prim(struct regs *r)
 //Единый курсор по модели Windows: все зарегистрированные провайдеры
 //(PS/2 сейчас, USB-HID в будущем) суммируются драйвером в один курсор
 
-//SYS_MOUSE_GET (67): eax=x (или -1 если мыши нет), ebx=y, ecx=buttons
+//SYS_MOUSE_GET (72): eax=x (или -1 если мыши нет), ebx=y, ecx=buttons
 void systemcall_mouse_get(struct regs *r){
     if (!mouse_driver_api || !mouse_driver_api->poll){
         r->eax = (uint32_t)-1;
@@ -2431,7 +2431,7 @@ void systemcall_mouse_get(struct regs *r){
     r->ecx = st.buttons;
 }
 
-//SYS_MOUSE_POLL (68): ebx = указатель Ring-3 на mouse_state_t -> eax=0/-1
+//SYS_MOUSE_POLL (73): ebx = указатель Ring-3 на mouse_state_t -> eax=0/-1
 //Отдает и позицию, и дельту, накопленную с предыдущего вызова.
 void systemcall_mouse_poll(struct regs *r){
     if (!mouse_driver_api || !mouse_driver_api->poll){
@@ -2450,7 +2450,7 @@ void systemcall_mouse_poll(struct regs *r){
     r->eax = 0;
 }
 
-//SYS_MOUSE_SET_POS (69): ebx=x, ecx=y -> eax=0/-1 (телепорт курсора)
+//SYS_MOUSE_SET_POS (74): ebx=x, ecx=y -> eax=0/-1 (телепорт курсора)
 void systemcall_mouse_set_pos(struct regs *r){
     if (!mouse_driver_api || !mouse_driver_api->set_pos){
         r->eax = (uint32_t)-1;

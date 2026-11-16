@@ -441,25 +441,72 @@ int load_additional_drivers(cfg_file_t *cfg)
                 }
                 break;
             }
-            case DESCR_MOUSE_DRIVER:{  //Драйвер мыши (PS/2 AUX + реестр провайдеров)
-                    mouse_driver_api = (mouse_driver_api_t *)fb_descr->struct_ptr;
-                    if (!mouse_driver_api || !mouse_driver_api->poll){
-                        res = DRV_STATUS_LOAD_ERROR;
-                        load_screen_add_string("Mouse drv %s: load error", drv_name);
-                    } else {
-                        //Пришиваем ядерный рантайм к интерфейсу подгруженного ELF-модуля
-                        mouse_driver_api->malloc_ptr = kmalloc;
-                        mouse_driver_api->free_ptr   = kfree;
-                        mouse_driver_api->yield_ptr  = sys_yield;
-                        //Флаг IRQ12 из isr.c (работает и без него: детект poll-овый)
-                        mouse_driver_api->irq_fired_ptr = &mouse_irq_fired;
-                        if (mouse_driver_api->enabled)
-                            load_screen_add_string("Mouse drv %s: %d dev(s), packets=%d",
-                                                   drv_name, mouse_driver_api->debug1, mouse_driver_api->debug2);
-                        else
-                            load_screen_add_string("Mouse drv %s: no mouse (ps2aux not found)", drv_name);
-                    }
-                    break;
+            case DESCR_MOUSE_DRIVER:   //Драйвер мыши (PS/2 AUX + реестр провайдеров)
+            {
+                mouse_driver_api = (mouse_driver_api_t *)fb_descr->struct_ptr;
+                if (!mouse_driver_api || !mouse_driver_api->poll)
+                {
+                    res = DRV_STATUS_LOAD_ERROR;
+                    load_screen_add_string("Mouse drv %s: load error", drv_name);
+                }
+                else
+                {
+                    //Пришиваем ядерный рантайм к интерфейсу подгруженного ELF-модуля
+                    mouse_driver_api->malloc_ptr = kmalloc;
+                    mouse_driver_api->free_ptr   = kfree;
+                    mouse_driver_api->yield_ptr  = sys_yield;
+                    //Флаг IRQ12 из isr.c (работает и без него: детект poll-овый)
+                    mouse_driver_api->irq_fired_ptr = &mouse_irq_fired;
+                    if (mouse_driver_api->enabled)
+                        {
+                            //bit1 в debug6 — провайдер зарегистрирован без
+                            //handshake (fallback-детект), полезно знать при отладке
+                            if (mouse_driver_api->debug6 & 2)
+                                load_screen_add_string("Mouse drv %s: %d dev(s), packets=%d (fallback, no handshake)",
+                                                       drv_name, mouse_driver_api->debug1, mouse_driver_api->debug2);
+                            else
+                                load_screen_add_string("Mouse drv %s: %d dev(s), packets=%d",
+                                                       drv_name, mouse_driver_api->debug1, mouse_driver_api->debug2);
+                        }
+                    else
+                        {
+                            //Расшифровка шага детекта (MPST_* из drv_format.h):
+                            //печатаем, на каком месте драйвер не увидел мышь —
+                            //сразу видно, настройка ли это эмулятора или проблема кода
+                            switch (mouse_driver_api->debug4)
+                            {
+                                case MPST_WR_TIMEOUT:
+                                    load_screen_add_string("Mouse drv %s: no mouse (i8042 write timeout)", drv_name);
+                                    break;
+                                case MPST_NO_CCB:
+                                    load_screen_add_string("Mouse drv %s: no mouse (i8042 not responding)", drv_name);
+                                    break;
+                                case MPST_NO_ACK:
+                                    if (mouse_driver_api->debug6 & 1)
+                                        load_screen_add_string("Mouse drv %s: no mouse (no ACK to reset, is a mouse attached?)", drv_name);
+                                    else
+                                        load_screen_add_string("Mouse drv %s: no mouse (reset no ACK, i8042 cmds ignored)", drv_name);
+                                    break;
+                                case MPST_NO_BT:
+                                    load_screen_add_string("Mouse drv %s: no mouse (no 0xAA after reset, got %x)",
+                                                           drv_name, mouse_driver_api->debug5);
+                                    break;
+                                case MPST_NO_F6:
+                                    load_screen_add_string("Mouse drv %s: no mouse (0xF6 defaults no ACK)", drv_name);
+                                    break;
+                                case MPST_NO_F3:
+                                    load_screen_add_string("Mouse drv %s: no mouse (0xF3 rate no ACK)", drv_name);
+                                    break;
+                                case MPST_NO_F4:
+                                    load_screen_add_string("Mouse drv %s: no mouse (0xF4 enable no ACK)", drv_name);
+                                    break;
+                                default:
+                                    load_screen_add_string("Mouse drv %s: no mouse (ps2aux not found)", drv_name);
+                                    break;
+                            }
+                        }
+                }
+                break;
             }
 
 

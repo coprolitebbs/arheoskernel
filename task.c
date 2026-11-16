@@ -1402,9 +1402,7 @@ void kernel_init_thread(void)
     }
 
     load_screen_add_string("Spawning Chorus & Sekhmet");
-    //for(;;);  //отладочная остановка удалена: она замораживала init-поток после
-                //этой строки, и Chorus/Sekhmet не запускались никогда
-
+//for(;;);
     //draw_hex_dword(console_bgcolor, 20, 50);
     //task_spawn_from_file("/usbin/hello.bin", 0x40000000,"-v --test-mode");
     task_spawn_from_file("/bin/chorus.bin", 0x40000000, NULL);
