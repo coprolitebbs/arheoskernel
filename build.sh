@@ -281,8 +281,8 @@ $CC $USER_CCFLAGS -c "userspace/system procs/rmdir/rmdir.c" -o bin/u_rmdir.o
 #setbg
 $CC $USER_CCFLAGS -c "userspace/system procs/setbg/setbg.c" -o bin/u_setbg.o
 #thoth — исходники удалены из репозитория, блок выключен до возвращения файлов
-#$CC $USER_CCFLAGS_ELF -c "userspace/system procs/thoth/thoth.c" -o bin/u_thoth.o
-#$CC $USER_CCFLAGS_ELF -c "userspace/system procs/thoth/platform_arheos.c" -o bin/u_thoth_platform.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/thoth/thoth.c" -o bin/u_thoth.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/thoth/platform_arheos.c" -o bin/u_thoth_platform.o
 #lsusb
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/lsusb/lsusb.c" -o bin/u_lsusb.o
 #lspci
@@ -294,10 +294,10 @@ $CC $USER_CCFLAGS_ELF -c "userspace/system procs/graphinfo/graphinfo.c" -o bin/u
 #df
 $CC $USER_CCFLAGS_ELF -c "userspace/system procs/df/df.c" -o bin/u_df.o
 #arcom — исходники удалены из репозитория, блок выключен до возвращения файлов
-#$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/fm_ui.c" -o bin/u_arcom_ui.o
-#$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/fm_core.c" -o bin/u_arcom_core.o
-#$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/arheos/fm_arheos.c" -o bin/u_arcom_ah.o
-#$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/arheos/main_arheos.c" -o bin/u_arcom_am.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/fm_ui.c" -o bin/u_arcom_ui.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/fm_core.c" -o bin/u_arcom_core.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/arheos/fm_arheos.c" -o bin/u_arcom_ah.o
+$CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/arheos/main_arheos.c" -o bin/u_arcom_am.o
 
 
 
@@ -329,13 +329,13 @@ $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x400
 $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_rmdir.o -o bin/rmdir.bin
 $LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_lib.o bin/u_memory.o bin/u_uimage.o bin/u_setbg.o -o bin/setbg.bin
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_uconfig_elf.o bin/u_uimage_elf.o bin/u_sekhmet.o -o bin/sekhmet.elf
-#$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_thoth.o bin/u_thoth_platform.o -o bin/thoth.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_thoth.o bin/u_thoth_platform.o -o bin/thoth.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_lsusb.o -o bin/lsusb.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_udevices_elf.o bin/u_lspci.o -o bin/lspci.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_uimage_elf.o bin/u_arfetch.o -o bin/arfetch.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_ugraph_elf.o bin/u_graphinfo.o -o bin/graphinfo.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_lib_elf.o bin/u_df.o -o bin/df.elf
-#$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_arcom_ui.o bin/u_arcom_core.o bin/u_arcom_ah.o bin/u_arcom_am.o -o bin/arcom.elf
+$LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_arcom_ui.o bin/u_arcom_core.o bin/u_arcom_ah.o bin/u_arcom_am.o -o bin/arcom.elf
 
 #clear
 #rm -f bin/*.o
@@ -392,12 +392,12 @@ create_fat_image() {
     mcopy -i "$IMG" bin/mkdir.bin ::/BIN/
     mcopy -i "$IMG" bin/rmdir.bin ::/BIN/
     mcopy -i "$IMG" bin/setbg.bin ::/BIN/
-    mcopy -i "$IMG" bin/thoth.elf ::/BIN/ 2>/dev/null || true
+    mcopy -i "$IMG" bin/thoth.elf ::/BIN/
     mcopy -i "$IMG" bin/lsusb.elf ::/BIN/
     mcopy -i "$IMG" bin/lspci.elf ::/BIN/
     mcopy -i "$IMG" bin/arfetch.elf ::/BIN/
     mcopy -i "$IMG" bin/df.elf ::/BIN/
-    #mcopy -i "$IMG" bin/arcom.elf ::/BIN/
+    mcopy -i "$IMG" bin/arcom.elf ::/BIN/
     mcopy -i "$IMG" bin/graphinfo.elf ::/BIN/GRINFO.ELF
     mcopy -i "$IMG" bin/mtest.elf ::/BIN/MTEST.ELF
 
@@ -509,12 +509,12 @@ e2cp bin/rm.bin tmp_ext2.img:/bin/rm.bin
 e2cp bin/mkdir.bin tmp_ext2.img:/bin/mkdir.bin
 e2cp bin/rmdir.bin tmp_ext2.img:/bin/rmdir.bin
 e2cp bin/setbg.bin tmp_ext2.img:/bin/setbg.bin
-#e2cp bin/thoth.elf tmp_ext2.img:/bin/thoth.elf
+e2cp bin/thoth.elf tmp_ext2.img:/bin/thoth.elf
 e2cp bin/lsusb.elf tmp_ext2.img:/bin/lsusb.elf
 e2cp bin/lspci.elf tmp_ext2.img:/bin/lspci.elf
 e2cp bin/arfetch.elf tmp_ext2.img:/bin/arfetch.elf
 e2cp bin/df.elf tmp_ext2.img:/bin/df.elf
-#e2cp bin/arcom.elf tmp_ext2.img:/bin/arcom.elf
+e2cp bin/arcom.elf tmp_ext2.img:/bin/arcom.elf
 e2cp bin/graphinfo.elf tmp_ext2.img:/bin/grinfo.elf
 
 e2mkdir tmp_ext2.img:/config

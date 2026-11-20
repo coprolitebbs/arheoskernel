@@ -17,6 +17,7 @@
 - [Драйвер файловой системы FAT12](/DOCS/fat12_driver/README.md)
 - [Драйвер файловой системы EXT2](/DOCS/ext2_driver/README.md)
 - [Драйвер клавиатуры](/DOCS/kbd_driver/README.md)
+- [Драйвер мыши](/DOCS/mouse/README.md)
 - [Драйвер блочного устройства](/DOCS/block_driver/README.md)
 - [Драйвер usb-стека](/DOCS/usb_driver/README.md)
 
@@ -250,8 +251,8 @@ qemu-system-i386 -drive file=output/hdd_ext2.img,format=raw,if=ide -vga std -dis
 
 ## Ближайшие задачи проекта:
 
-- драйвер мыши
-- текстовый редактор и полезные утилиты
+- Драйверы звука и верхний слой API управления звуком
+- Полезные утилиты
 - графическая подсистема с оконным интерфейсом
 
 # arheoskernel

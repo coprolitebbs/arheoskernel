@@ -15,11 +15,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-//mtest.c — тест драйвера мыши ARHeOS.
-//Рисует курсор '+' по данным SYS_MOUSE_POLL, показывает позицию, дельту
-//с прошлого опроса, кнопки и число устройств в реестре драйвера.
-//Выход — любая клавиша (не раньше ~1.5 с после старта). Сборка:
-//u_std_elf.o + u_memory_elf.o + u_mouse_elf.o + u_mtest.o + u_ugraph_elf.o.
+//mouse_check.c — тест драйвера мыши ARHeOS.
+//Рисует курсор '+' по данным SYS_MOUSE_GET, показывает координаты и кнопки.
+//Выход — любая клавиша. Сборка: u_std.o + u_mouse.o + u_mouse_check.o.
 
 #include "../../include/ustd.h"
 #include "../../include/mouse.h"
@@ -37,62 +35,53 @@ int main(int argc, char *argv[])
 {
     (void)argc; (void)argv;
     uint32_t cols, rows, cw, ch;
+    int16_t x = 0, y = 0;
+    uint8_t b = 0;
     int last_px = -1, last_py = -1;
-    u_mouse_state_t st = {0};
 
     u_get_console_geometry(&cols, &rows, &cw, &ch);
 
-    if (u_mouse_poll(&st) != 0){
-        u_printf(4, 4, COL_TEXT, "SYS_MOUSE_POLL: -1 (mouse.drv not loaded or no device)");
+    if (u_mouse_get(&x, &y, &b) != 0){
+        u_printf(4, 4, COL_TEXT, "SYS_MOUSE_GET: -1 (mouse.drv not loaded or no device)");
         return 1;
     }
 
-    //Хвостовой Enter, которым запускали нас из Сехмет, еще висит в буфере
-    //клавиатуры: осушаем буфер, иначе тест закрывается сразу после армирования
-    while (u_kbhit()) (void)u_read_scancode();
-    uint32_t arm_ticks = get_ticks() + 150;
-
     u_printf(4, 4, COL_TEXT, "ARHeOS mouse check: move mouse, click buttons. Any key = exit");
-    u_printf(4, 400, COL_OK,
-             "init: x=%d y=%d b=%x devs=%d",
-             st.x, st.y, st.buttons, st.device_count);
-    //нарисовать курсор сразу, чтобы видеть, где драйвер его держит
-    u_draw_char((uint32_t)st.x, (uint32_t)st.y, '+', COL_TEXT);
-    last_px = st.x; last_py = st.y;
+    u_printf(4, 4 + (int)ch, COL_OK, "cursor init: x=%d y=%d buttons=%02x", x, y, b);
 
     for (;;){
-        if (u_mouse_poll(&st) != 0) break;
+        int16_t nx, ny;
+        uint8_t nb;
 
-        if (st.x != last_px || st.y != last_py || st.buttons){
+        u_mouse_get(&nx, &ny, &nb);
+
+        if (nx != x || ny != y || nb != b){
             //перерисовать курсор
-            u_clear_tile((uint32_t)last_px, (uint32_t)last_py, COL_BG);
+            if (last_px >= 0) u_clear_tile((uint32_t)last_px, (uint32_t)last_py, COL_BG);
             {
                 uint32_t col = COL_TEXT;
-                if (st.buttons & U_MOUSE_BTN_LEFT)   col = COL_LEFT;
-                if (st.buttons & U_MOUSE_BTN_RIGHT)  col = COL_RIGHT;
-                if (st.buttons & U_MOUSE_BTN_MIDDLE) col = COL_MID;
-                u_draw_char((uint32_t)st.x, (uint32_t)st.y, '+', col);
+                if (nb & U_MOUSE_BTN_LEFT)   col = COL_LEFT;
+                if (nb & U_MOUSE_BTN_RIGHT)  col = COL_RIGHT;
+                if (nb & U_MOUSE_BTN_MIDDLE) col = COL_MID;
+                u_draw_char((uint32_t)nx, (uint32_t)ny, '+', col);
             }
-            last_px = st.x;
-            last_py = st.y;
+            last_px = nx;
+            last_py = ny;
+            x = nx; y = ny; b = nb;
+
+            u_printf(4, 4 + 2 * (int)ch, COL_TEXT,
+                     "x=%5d y=%5d buttons=%02x %s%s%s   ",
+                     x, y, b,
+                     (b & U_MOUSE_BTN_LEFT)  ? "L" : "-",
+                     (b & U_MOUSE_BTN_RIGHT) ? "R" : "-",
+                     (b & U_MOUSE_BTN_MIDDLE)? "M" : "-");
         }
 
-        //статус печатаем всегда, раз в ~0.5 с: видно и дельту, и покой
-        //форматные строки без ширин (%5d и т.п. не поддержаны u_printf и
-        //съезжают аргументы) — см. разбор в описании теста
-        static uint32_t next_stat = 0;
-        if ((int32_t)(get_ticks() - next_stat) >= 0){
-            next_stat = get_ticks() + 50;
-            u_printf(4, 430, COL_TEXT,
-                     "x=%d y=%d dx=%d dy=%d b=%x devs=%d   ",
-                     st.x, st.y, st.dx, st.dy, st.buttons, st.device_count);
-        }
-
-        if (get_ticks() >= arm_ticks && u_kbhit()) break;
+        if (u_kbhit()) break;
         u_mouse_yield();
     }
 
-    u_clear_tile((uint32_t)last_px, (uint32_t)last_py, COL_BG);
-    u_printf(4, 460, COL_TEXT, "mouse check: exit");
+    if (last_px >= 0) u_clear_tile((uint32_t)last_px, (uint32_t)last_py, COL_BG);
+    u_printf(4, 4 + 3 * (int)ch, COL_TEXT, "mouse check: exit");
     return 0;
 }
