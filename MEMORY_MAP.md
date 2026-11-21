@@ -264,7 +264,8 @@ KERNEL → `vbe_init` (таблица режимов в `0x5400`) → bootinfo �
 | Диапазон (VA) | Область |
 |---|---|
 | `0x00000000…` | identity-маппинг всей RAM (`vmm_kernel_identity_pdes` PDE по 4 МБ); ядро живёт по VA == PA |
-| `0x40000000` | база пользовательских процессов (`userspace.ld -Ttext 0x40000000`) |
+| `0x40000000–0x40A8FFFF` | identity-окно видео Geode GX1: `GX_BASE` (регистры DC/GP/VID, база из GCR) на `0x40000000` и LFB на `gx_phys+0x800000`; PDE помечены critical, в user-PD копируются supervisor-only (`vmm_sync_pde_into_user_pd`), изменения ядра разносятся по задачам (`task_propagate_kernel_pte`) |
+| `0x48000000` | база пользовательских процессов (`userspace.ld -Ttext 0x48000000`, `USER_VA_BASE` в `task.h`); поднята с `0x40000000` — на Geode GX1 старая база попадала под identity-окно, и kernel-PTE MMIO затирали код процессов при первой нативной смене режима (page fault ERR=5, CR2==EIP сразу после возврата из сисколла) |
 | `0x80000000` | верх пользовательского стека (`USER_STACK_VA_TOP`, 64 страницы = 256 КБ вниз) |
 | `0x80000000–0xB0000000` | куча ядра `kmalloc` (`KERNEL_HEAP_VA_BASE/LIMIT`) |
 | `0xC0000000+` | kernel half; ниже — guard PCI hole (`syscalls.c` считает user < 0x40000000) |

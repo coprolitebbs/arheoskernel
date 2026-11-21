@@ -302,32 +302,35 @@ $CC $USER_CCFLAGS_ELF -c "userspace/system procs/arcom/arheos/main_arheos.c" -o 
 
 
 # Линк flat-бинарника без ELF-заголовков
-# Базовый адрес -Ttext 0x40000000 совпадает с картой памяти процессов.
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_hello.o -o bin/hello.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_vfs_test.o -o bin/vfs_test.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_ucat.o -o bin/ucat.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_memory.o bin/u_kb_check.o -o bin/kb_check.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_memory.o bin/u_allocram.o -o bin/allocram.bin
-#$LD -m elf_i386 -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_memory.o bin/u_arr_test.o -o bin/arr_test.elf
+# Базовый адрес 0x48000000 - USER_VA_BASE из task.h: выше identity-окна видео
+# Geode GX1 (MMIO на 0x40000000, LFB на 0x40800000). Старая база 0x40000000
+# попадала под распространение kernel-PTE в user-PD, и процессы теряли
+# страницы кода на первой нативной смене режима
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_hello.o -o bin/hello.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_vfs_test.o -o bin/vfs_test.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_ucat.o -o bin/ucat.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_memory.o bin/u_kb_check.o -o bin/kb_check.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_memory.o bin/u_allocram.o -o bin/allocram.bin
+#$LD -m elf_i386 -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_memory.o bin/u_arr_test.o -o bin/arr_test.elf
 #Линковка elf-файлов
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_arr_test.o -o bin/arr_test.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_scanf_check.o -o bin/sc_test.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_gputest.o bin/u_ugraph_elf.o -o bin/gputest.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_mouse_elf.o bin/u_mtest.o bin/u_ugraph_elf.o -o bin/mtest.elf
 
-#$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 \
+#$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 \
 #-e _start bin/u_std.o bin/u_memory.o bin/u_lib.o bin/u_uconfig.o bin/u_sekhmet.o \
 #bin/u_uimage.o -o bin/sekhmet.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_chorus.o -o bin/chorus.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_halt.o -o bin/halt.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_cat.o bin/u_lib.o -o bin/cat.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_ls.o bin/u_lib.o -o bin/ls.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_memory.o bin/u_free.o -o bin/free.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_touch.o -o bin/touch.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_rm.o -o bin/rm.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_mkdir.o -o bin/mkdir.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_rmdir.o -o bin/rmdir.bin
-$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x40000000 -e _start bin/u_std.o bin/u_lib.o bin/u_memory.o bin/u_uimage.o bin/u_setbg.o -o bin/setbg.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_chorus.o -o bin/chorus.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_halt.o -o bin/halt.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_cat.o bin/u_lib.o -o bin/cat.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_ls.o bin/u_lib.o -o bin/ls.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_memory.o bin/u_free.o -o bin/free.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_touch.o -o bin/touch.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_rm.o -o bin/rm.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_mkdir.o -o bin/mkdir.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_rmdir.o -o bin/rmdir.bin
+$LD -m elf_i386 --oformat binary -N -T ./userspace/lib/userspace.ld -Ttext 0x48000000 -e _start bin/u_std.o bin/u_lib.o bin/u_memory.o bin/u_uimage.o bin/u_setbg.o -o bin/setbg.bin
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_lib_elf.o bin/u_uconfig_elf.o bin/u_uimage_elf.o bin/u_sekhmet.o -o bin/sekhmet.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_memory_elf.o bin/u_thoth.o bin/u_thoth_platform.o -o bin/thoth.elf
 $LD $USER_LDFLAGS_ELF bin/u_std_elf.o bin/u_lib_elf.o bin/u_udevices_elf.o bin/u_lsusb.o -o bin/lsusb.elf

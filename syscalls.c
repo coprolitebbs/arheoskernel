@@ -1280,7 +1280,7 @@ void systemcall_spawn_process(struct regs *r)
         k_cmdline[end_space--] = '\0';
     }
 
-    task_t *new_task = task_spawn_from_file(k_path, 0x40000000, k_cmdline[0] != '\0' ? k_cmdline : NULL);
+    task_t *new_task = task_spawn_from_file(k_path, USER_VA_BASE, k_cmdline[0] != '\0' ? k_cmdline : NULL);
     if (!new_task)
     {
         kernel_schedule_lock = saved_sched_lock;

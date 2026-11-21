@@ -592,7 +592,9 @@ void vm_pages_free_all(task_t *task)
 
 task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t program_size, const char *cmdline)
 {
-    if (entry_virt < 0x40000000 || entry_virt >= 0xC0000000) return NULL;
+    //Ниже USER_VA_BASE процессы не живут: там identity-окно видео ядра
+    //и спавн по старой базе 0x40000000 снова порождает коллизию с MMIO
+    if (entry_virt < USER_VA_BASE || entry_virt >= 0xC0000000) return NULL;
     task_t *task = (task_t*)kmalloc(sizeof(task_t));
     if (!task) return NULL;
     memset(task, 0, sizeof(task_t));
@@ -789,8 +791,10 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
     }
     //Базовый адрес (Delta) для релокации PIE-исполняемого файла
     //Если файл статический (ehdr->type == ET_EXEC), load_base будет 0.
-    //Если файл позиционно-независимый (ehdr->type == ET_DYN), сажаем на 0x40000000.
-    uint32_t load_base = (ehdr->type == 3) ? 0x40000000 : 0; //ET_DYN = 3
+    //Если файл позиционно-независимый (ehdr->type == ET_DYN), сажаем на USER_VA_BASE.
+    //0x48000000, а не 0x40000000: на Geode GX1 низ окна 0x40000000 занят
+    //identity-маппингом MMIO/LFB ядра, см. комментарий у USER_VA_BASE в task.h
+    uint32_t load_base = (ehdr->type == 3) ? USER_VA_BASE : 0; //ET_DYN = 3
 
     task_t *task = (task_t*)kmalloc(sizeof(task_t));
     if (!task) return NULL;
@@ -837,7 +841,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
         {
             //Применяем смещение load_base к виртуальному адресу сегмента
             uint32_t vaddr = phdr[i].vaddr + load_base;
-            if (vaddr < 0x40000000 || vaddr >= 0xC0000000)
+            if (vaddr < USER_VA_BASE || vaddr >= 0xC0000000)
             {
                 com_puts("[ELF] vaddr out of user range: ");
                 com_puthex(vaddr);
@@ -941,7 +945,7 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
                         //Вычисляем адрес, куда указывает релокация, в памяти процесса
                         uint32_t *patch_ptr = (uint32_t*)(rels[r].offset + load_base);
 
-                        //Прибавляем смещение load_base (0x40000000) к значению по этому адресу
+                        //Прибавляем смещение load_base (USER_VA_BASE) к значению по этому адресу
                         *patch_ptr += load_base;
                     }
                 }
@@ -1144,7 +1148,7 @@ task_t *task_spawn_from_file(const char *path, uint32_t entry_virt, const char *
     }
     else
     {
-        //Обычный FLAT-бинарник разметки 0x40000000
+        //Обычный FLAT-бинарник разметки USER_VA_BASE
         //com_puts("[KERNEL] Format match: Flat binary detected. Loading to default text section...\n");
         task_t *flat_task = task_spawn_builtin(entry_virt, kernel_load_buf, total_bytes_read, cmdline);
         kfree(kernel_load_buf);
@@ -1268,6 +1272,23 @@ void task_propagate_kernel_pte(uint32_t pd_index, uint32_t pt_index, uint32_t pt
             if (user_pde == kernel_pde) continue;//PT шаренная — PTE уже виден
             //Свежая PT: копируем PTE
             page_table_t *user_pt = (page_table_t*)(user_pde & 0xFFFFF000);
+            //Если по этому VA у процесса своя страница (PAGE_USER), затирать ее
+            //kernel-PTE нельзя: процесс потеряет страницу и упадет на выборке
+            //инструкции или чтении с ERR=5 сразу после возврата из сисколла.
+            //Нормальная работа механизма предполагает, что identity-окно ядра
+            //и user-VA живут в разных PDE - при коллизии пишем маркер в COM
+            //и оставляем процессу его страницу
+            if ((*user_pt)[pt_index] & PAGE_USER)
+            {
+                com_puts("[VMM] kernel PTE collision with user page pid=");
+                com_puthex(t->pid);
+                com_puts(" pd=");
+                com_puthex(pd_index);
+                com_puts(" pt=");
+                com_puthex(pt_index);
+                com_puts("\n");
+                continue;
+            }
             (*user_pt)[pt_index] = pte_val & ~PAGE_USER;
         }
         t = t->next;
@@ -1412,15 +1433,15 @@ void kernel_init_thread(void)
     load_screen_add_string("Spawning Chorus & Sekhmet");
 //for(;;);
     //draw_hex_dword(console_bgcolor, 20, 50);
-    //task_spawn_from_file("/usbin/hello.bin", 0x40000000,"-v --test-mode");
-    task_spawn_from_file("/bin/chorus.bin", 0x40000000, NULL);
-    //task_spawn_from_file("/usbin/vfs_test.bin", 0x40000000, NULL);
-    //task_spawn_from_file("/usbin/cat.bin", 0x40000000, NULL);
-    //task_spawn_from_file("/bin/hello.bin", 0x40000000, NULL);
-    //task_spawn_from_file("/usbin/kb_check.bin", 0x40000000, NULL);
-    //task_spawn_from_file("/usbin/allocram.bin", 0x40000000, "512");
+    //task_spawn_from_file("/usbin/hello.bin", USER_VA_BASE,"-v --test-mode");
+    task_spawn_from_file("/bin/chorus.bin", USER_VA_BASE, NULL);
+    //task_spawn_from_file("/usbin/vfs_test.bin", USER_VA_BASE, NULL);
+    //task_spawn_from_file("/usbin/cat.bin", USER_VA_BASE, NULL);
+    //task_spawn_from_file("/bin/hello.bin", USER_VA_BASE, NULL);
+    //task_spawn_from_file("/usbin/kb_check.bin", USER_VA_BASE, NULL);
+    //task_spawn_from_file("/usbin/allocram.bin", USER_VA_BASE, "512");
 
-    task_spawn_from_file("/bin/sekhmet.elf", 0x40000000, NULL);
+    task_spawn_from_file("/bin/sekhmet.elf", USER_VA_BASE, NULL);
 
     //vmm_stress_test_cross_pde();
     //current_task = ready_queue;

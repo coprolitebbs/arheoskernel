@@ -396,17 +396,17 @@ void _start(void)
     //task_t *task1;
     //task_t *task2;
 
-    //task1=create_task(0x40000000);
-    //task2=create_task(0x40000000);
+    //task1=create_task(USER_VA_BASE);
+    //task2=create_task(USER_VA_BASE);
 
     //draw_string(10,350,"Tasks created");
 
-    //load_user_program(task1,0x40000000,user_prog,sizeof(user_prog));
-    //load_user_program(task2,0x40000000,user_prog2,sizeof(user_prog2));
-    //task_spawn_builtin(0x40000000, user_prog, sizeof(user_prog));
-    //task_spawn_builtin(0x40000000, user_prog2, sizeof(user_prog2));
+    //load_user_program(task1,USER_VA_BASE,user_prog,sizeof(user_prog));
+    //load_user_program(task2,USER_VA_BASE,user_prog2,sizeof(user_prog2));
+    //task_spawn_builtin(USER_VA_BASE, user_prog, sizeof(user_prog));
+    //task_spawn_builtin(USER_VA_BASE, user_prog2, sizeof(user_prog2));
     //init_kernel_schedule_lock = 1;
-    //task_spawn_from_file("/hello.bin", 0x40000000);
+    //task_spawn_from_file("/hello.bin", USER_VA_BASE);
     //com_puts("[KERNEL] hello.bin started\n");
     //update_tss_esp0(STACK_ADDRESS);
 

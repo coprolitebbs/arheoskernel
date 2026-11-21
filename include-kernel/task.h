@@ -44,6 +44,19 @@
 #define USER_STACK_PAGES     64u
 #define USER_STACK_VA_FLOOR  (USER_STACK_VA_TOP - USER_STACK_PAGES * PAGE_SIZE)
 
+//База пользовательских процессов (flat-бинарники и PIE-ELF).
+//На Geode GX1 низ окна 0x40000000..0x7FFFFFFF занят identity-маппингом ядра:
+//GX_BASE (регистры DC/GP/VID, читается из GCR) сидит на 0x40000000 и мапится
+//драйвером на первую смену режима, LFB лежит на gx_phys+0x800000. Маппинг
+//идет через vmm_map_pages в kernel_directory, а critical-PTE ядра
+//распространяются во все user-PD (task_propagate_kernel_pte) - при базе
+//0x40000000 они затирали страницы кода процессов, и процесс падал на выборке
+//инструкции сразу после возврата из сисколла (page fault ERR=5, CR2==EIP).
+//База поднята выше всего видео-окна: LFB при максимальном режиме
+//1280x1024x16 кончается на 0x40A80000, образ процесса ограничен 1 МБ,
+//куча Ring 3 начинается на 0x50000000 - 0x48000000 ничего не пересекает
+#define USER_VA_BASE         0x48000000u
+
 //Состояния
 #define TASK_RUNNING  0
 #define TASK_READY    1
