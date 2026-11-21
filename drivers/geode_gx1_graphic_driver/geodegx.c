@@ -27,9 +27,17 @@
 //   после смены разрешения. Нативный путь включается только если
 //   CPU - Cyrix/Geode (CPUID "CyrixInstead"), GCR показывает
 //   включенную графику и LFB stage2 совпадает с gx_base+0x800000.
+//   Инициализация нативной части выполняется лениво, при первой
+//   смене режима: driver_main исполняется до регистрации драйвера
+//   в слое, а рантайм-указатели (vmm_map_pages_uncached_ptr и
+//   остальные) пришиваются только в graphic_layer_register_driver,
+//   поэтому ранняя инициализация всегда падала на нулевом указателе.
+//   На подтвержденном MediaGX-железе резервный путь запрещен совсем:
+//   геометрии вне нативной таблицы возвращают ошибку, железо не
+//   трогается, экран остается в текущем графическом режиме.
 //2) Резервный: прежняя цепочка 4F02 -> 4F03 -> 4F01 через реальнорежимный
-//   тримплин vbe_rm_blob.asm (как в vesa_fb) - для эмуляторов и машин
-//   без Geode, а также для геометрий/глубин вне нативной таблицы.
+//   тримплин vbe_rm_blob.asm (как в vesa_fb) - только для эмуляторов и
+//   машин без MediaGX.
 //
 //Источники аппаратных дефайнов (адреса регистров, раскладка бит, порядок
 //записей, тайминги PLL):
@@ -253,6 +261,8 @@ static struct vbe_bitfields
 static gr_mode_info_t geode_cur_mode;
 static gr_fix_info_t  geode_fix;
 static int            geode_ready = 0;
+static int            native_tried = 0;  //нативная инициализация уже выполнялась
+static int            gx_detected = 0;   //GCR подтвердил графику MediaGX
 
 static description_driver_api_t descr_api;
 static gr_ops_t       geode_ops;
@@ -742,6 +752,14 @@ static int geode_init_native(gr_driver_t *drv)
         return GR_ERR_IO;
     }
 
+    //с этого момента MediaGX-железо подтверждено тремя независимыми
+    //признаками (CPUID Cyrix, GCR с базой графики, LFB stage2 по
+    //gx_base+0x800000) и резервный путь закрывается: runtime int 10h
+    //на MediaGX идет через VSA/SoftVGA и на части машин портит дисплей
+    //(текстовый режим). на не-MediaGX Cyrix (6x86 в эмуляторе) GCR
+    //читается мусором и LFB не совпадет - резервный путь останется доступен
+    gx_detected = 1;
+
     //4. маппинг uncached: GP/DC (+0x8100/+0x8300) и блок VID (+0x10000)
     if (!geode_driver.vmm_map_pages_uncached_ptr)
         return GR_ERR_UNSUPPORTED;
@@ -1126,6 +1144,35 @@ static void geode_finish_mode(uint32_t index, vbe_mode_rec_t *rec)
                                              (uint8_t)geode_cur_mode.bpp);
 }
 
+//ленивая нативная инициализация GX1. driver_main исполняется до регистрации
+//драйвера в слое, а рантайм-указатели (vmm_map_pages_uncached_ptr и
+//остальные) пришиваются только в graphic_layer_register_driver — ранняя
+//инициализация из driver_main всегда падала с GR_ERR_UNSUPPORTED на
+//нулевом указателе, native_ok оставался нулем и любая смена режима
+//уходила в резервный int 10h. первый вызов set_mode происходит уже после
+//регистрации, поэтому инициализация сдвинута сюда; при успехе подключаются
+//аппаратные примитивы (заливка и линия). copy_area сознательно не
+//подключается (чтение source требует BLT-буферов scratchpad, см.
+//комментарий к geode_copy_area); заливка и вектор их не трогают
+static int geode_native_lazy_init(void)
+{
+    if (native_tried) return native_ok;
+    native_tried = 1;
+    if (geode_init_native(&geode_driver) == GR_OK)
+    {
+        native_ok = 1;
+        geode_ops.fill_rect = geode_fill_rect;
+        geode_ops.draw_line = geode_draw_line;
+        //vcom_puts("[GEODE] native GX1 path enabled, GP fill/line on\n");
+    }
+    else
+    {
+        native_ok = 0;
+        //vcom_puts("[GEODE] native init failed, no native mode set\n");
+    }
+    return native_ok;
+}
+
 //ops: смена режима на ходу
 
 //ключевой принцип: после успешной смены железа возвращать ошибку нельзя —
@@ -1140,14 +1187,23 @@ static int vs_set_mode(void *priv, uint32_t index)
     vbe_mode_rec_t *rec = &vbe_recs[vbe_idx_map[index]];
 
     //нативный путь GX1: прямое программирование DC+PLL без BIOS.
-    //На MediaGX-машинах runtime int 10h идет через VSA/SoftVGA (SMM) и на
-    //части машин оставляет дисплей в текстовом режиме - черный экран
-    //с курсором. трамплин ему не нужен
-    if (native_ok && geode_native_set_mode(rec) == 0)
+    //инициализация нативной части ленивая - к этому моменту слой уже
+    //пришил рантайм-указатели (см. geode_native_lazy_init)
+    int native = geode_native_lazy_init();
+    if (native && geode_native_set_mode(rec) == 0)
     {
         geode_finish_mode(index, rec);
         return GR_OK;
     }
+
+    //на подтвержденном MediaGX-железе резервный путь int 10h запрещен:
+    //runtime-вызовы VBE идут через VSA/SoftVGA (SMM) и на части машин
+    //оставляют дисплей в текстовом режиме - черный экран с мигающим
+    //курсором. если нативная инициализация сорвалась или геометрия/глубина
+    //не поддержаны нативно (нет тайминга в таблице, bpp != 16), возвращаем
+    //ошибку: железо не тронуто, слой и экран остаются в текущем режиме,
+    //userspace получает код ошибки вместо мертвого дисплея
+    if (gx_detected) return GR_ERR_UNSUPPORTED;
 
     if (!geode_driver.vbe_rm_exec_ptr) return GR_ERR_UNSUPPORTED;
 
@@ -1499,6 +1555,8 @@ void driver_main(struct boot_info *boot)
     descr_api.struct_ptr = 0;
     geode_ready = 0;
     native_ok = 0;
+    native_tried = 0;
+    gx_detected = 0;
     gx_phys = 0;
     gx_mm = 0;
     gx_base = 0;
@@ -1677,22 +1735,17 @@ void driver_main(struct boot_info *boot)
     descr_api.type = DESCR_GRAPHICS_DRIVER;
     descr_api.struct_ptr = &geode_driver;
 
-    //нативная инициализация GX1 (CPUID -> GCR -> GX_BASE). Аппаратные
-    //примитивы подключаются только при успехе. copy_area сознательно
-    //не подключается (чтение source требует BLT-буферов scratchpad,
+    //нативная инициализация GX1 (CPUID -> GCR -> GX_BASE) здесь не
+    //выполняется: driver_main исполняется до регистрации в слое, а
+    //рантайм-указатели пришиваются только в graphic_layer_register_driver.
+    //ранний вызов geode_init_native всегда падал с GR_ERR_UNSUPPORTED на
+    //нулевом vmm_map_pages_uncached_ptr, native_ok оставался нулем и вся
+    //смена режимов уходила в резервный int 10h, который на MediaGX-машинах
+    //оставляет дисплей в текстовом режиме. инициализация выполняется лениво
+    //при первой смене режима (geode_native_lazy_init из vs_set_mode), там
+    //же подключаются аппаратные примитивы. copy_area сознательно не
+    //подключается (чтение source требует BLT-буферов scratchpad,
     //см. комментарий к geode_copy_area); заливка и вектор их не трогают
-    if (geode_init_native(&geode_driver) == GR_OK)
-    {
-        native_ok = 1;
-        geode_ops.fill_rect = geode_fill_rect;
-        geode_ops.draw_line = geode_draw_line;
-        //vcom_puts("[GEODE] native GX1 path enabled, GP fill/line on\n");
-    }
-    else
-    {
-        native_ok = 0;
-        //vcom_puts("[GEODE] native path unavailable, VBE mode set only\n");
-    }
 
     geode_ready = 1;
 }
