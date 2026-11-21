@@ -20,19 +20,41 @@
 #include "include-kernel/draw.h"
 #include "include-kernel/debug.h"
 #include "include-kernel/bootinfo.h"
+#include "include-kernel/graphic_layer.h"
 
 
+
+//Геометрия экрана для окна паники: активный режим графического слоя.
+//bootinfo описывает только режим, выставленный загрузчиком: после смены
+//разрешения на ходу (SYS_GRAPH_INFO SET_MODE) его ширина и высота
+//перестают совпадать с реальным скан-аутом, окно центрируется по старым
+//1024x768 и уезжает за край экрана, отладочные поля не видны.
+//Слой отвечает актуальной геометрией всегда; bootinfo — fallback для
+//ранних паник, когда графический слой еще не инициализирован
+static void panic_screen_dims(uint32_t *w, uint32_t *h)
+{
+    gr_mode_info_t m;
+    if (gr_get_current_mode(&m) == GR_OK && m.xres != 0 && m.yres != 0)
+    {
+        *w = m.xres;
+        *h = m.yres;
+        return;
+    }
+    *w = boot_info ? boot_info->width : 0;
+    *h = boot_info ? boot_info->height : 0;
+}
 
 //Рисует по центру экрана окошко "Kernel Panic" с тенью, рамкой,
 //красной шапкой и списком пар "LABEL: 0xXXXXXXXX"
 //Работает и через fb-драйвер, и через boot_info LFB (ранние стадии).
-//Если boot_info == 0 или экран не инициализирован — тихо ничего не рисует,
+//Если экран не инициализирован — тихо ничего не рисует,
 //вызывающий всё равно попадает в for(;;).
 void draw_kernel_panic(const char *title, const panic_field_t *fields, uint32_t count)
 {
     if (!boot_info) return;
-    uint32_t scr_w = boot_info->width;
-    uint32_t scr_h = boot_info->height;
+    uint32_t scr_w = 0;
+    uint32_t scr_h = 0;
+    panic_screen_dims(&scr_w, &scr_h);
     if (scr_w < 64 || scr_h < 64) return;
 
     const uint32_t cell_w  = 8;    //шаг шрифта kernel_draw_string / draw_hex_dword

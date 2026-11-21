@@ -44,6 +44,7 @@ volatile uint8_t floppy_irq_fired = 0;
 volatile uint32_t tick_count = 0;
 volatile uint8_t kernel_schedule_lock = 0;
 volatile uint8_t init_kernel_schedule_lock = 0;
+volatile uint8_t kernel_panic_active = 0;
 volatile uint8_t stdin_cancel_flag = 0;
 
 //Внешние символы из isr.asm (обработчики)
@@ -201,6 +202,12 @@ void pic_init(void)
 //GENRAL PROTECTION FAULT
 void isr_halt13(struct regs *r)
 {
+    //Окно паники рисуется через примитивы графического слоя, а те на Geode
+    //ждут движок GP; если ждать с отдачей кванта, планировщик переключил бы
+    //задачу прямо из обработчика фолта и бросил окно недорисованным.
+    //Флаг глушит sys_yield до конца жизни системы (мы все равно в halt-цикле)
+    kernel_panic_active = 1;
+
     panic_field_t fields[6] =
     {
         { "ERR",   r->err_code          },
@@ -231,6 +238,10 @@ void isr_double_fault(struct regs *r)
 //PAGE FAULT
 void isr_pagefault(struct regs *r)
 {
+    //та же защита окна паники, что в isr_halt13: переключение контекста
+    //из обработчика фолта запрещено до конца работы
+    kernel_panic_active = 1;
+
     uint32_t cr2, cr3;
     __asm__ __volatile__("mov %%cr2,%0":"=r"(cr2));
     __asm__ __volatile__("mov %%cr3,%0":"=r"(cr3));
@@ -487,6 +498,11 @@ void pit_init(void)
 
 void sys_yield(void)
 {
+    //Во время паники квант не отдаем: обработчик фолта рисует окно через
+    //слой, и переключение задачи бросило бы его недорисованным, а возврат
+    //в задачу по старому esp сыграл бы фолтящую инструкцию заново.
+    //Ждущие циклы драйверов в этом контексте просто докручивают спин
+    if (kernel_panic_active) return;
     schedule(NULL);
 }
 

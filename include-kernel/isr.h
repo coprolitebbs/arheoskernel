@@ -27,6 +27,7 @@ extern volatile uint8_t mouse_irq_fired;   //IRQ12: PS/2 мышь (AUX), ста�
 extern volatile uint8_t floppy_irq_fired;
 extern volatile uint8_t kernel_schedule_lock;
 extern volatile uint8_t init_kernel_schedule_lock;
+extern volatile uint8_t kernel_panic_active;   //идет отрисовка окна паники: sys_yield глушится
 extern volatile uint8_t stdin_cancel_flag;
 //extern volatile uint32_t tty_foreground_pid;
 

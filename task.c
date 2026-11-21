@@ -135,6 +135,14 @@ void load_user_program(task_t *task,uint32_t virt_addr,uint8_t *program,uint32_t
 //Планировщик (вызывается из обработчика таймера)
 void schedule(struct regs *r)
 {
+    //Блокировка планировщика обязана работать и вне ветки IRQ0: sys_yield
+    //из драйверов (ожидание движка GP в geodegx, циклы kbd и sound) попадает
+    //сюда из syscall-контекста, где секция смены режима/spawn держит lock.
+    //Переключение посреди такой секции уводит CR3 на чужой каталог страниц
+    //и бросает недоделанную смену режима или маппинг кучи на полпути.
+    //Раньше чек был только в обработчике таймера, и yield обходил его
+    if (kernel_schedule_lock != 0) return;
+
     task_t *old_task = current_task;
     uint32_t old_state = old_task ? old_task->state : 0;
     uint32_t old_pid   = old_task ? old_task->pid   : 0;
