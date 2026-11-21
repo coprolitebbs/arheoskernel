@@ -84,8 +84,8 @@ void vmm_init(/*uint32_t vbe_phys, uint32_t vbe_size*/);
 void vmm_map_pages(uint32_t vbe_phys, uint32_t vbe_size);
 
 //Явно пометить PDE как kernel-critical (LFB/MMIO): копируется в user-PD
-//даже из диапазона 256..511. Вызывается из vmm_map_pages() автоматически
-//для LFB; для других MMIO-регионов — вручную после vmm_map_page()
+//даже из диапазона 256..511. Вызывается автоматически из vmm_map_pages()
+//и vmm_map_pages_uncached(); вручную нужен только для маппинга мимо них
 void vmm_mark_pde_critical(uint32_t pd_index);
 
 page_directory_t* vmm_create_user_space(void);

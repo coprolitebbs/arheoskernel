@@ -230,6 +230,16 @@ void vmm_map_pages_uncached(uint32_t phys, uint32_t size)
     {
         uint32_t p_addr = phys + offset;
         uint32_t v_addr = phys + offset;
+        //MMIO-окно обязано быть видно и из user-контекста: сисколлы драйверов
+        //(смена режима Geode, обход регистров DC/GP, EHCI) исполняются на CR3
+        //звонившей задачи, а не на kernel_directory. Без critical-PDE окно
+        //оседало бы только в kernel_directory: task_mirror_kernel_pde при
+        //рождении PDE пропускает некритичные PDE диапазона 256..511,
+        //task_propagate_kernel_pte пропускал задачи с пустым PDE, а
+        //spawn-sync их тоже не копирует. Первый же обход регистра из
+        //сисколла падал page fault present=0 (на GX1 - чтение GP_BLT_STATUS
+        //по 0x4000820C прямо после установки окна, до программирования режима)
+        vmm_mark_pde_critical(v_addr >> 22);
         vmm_map_page(kernel_directory, v_addr, p_addr,
                      PAGE_PRESENT | PAGE_WRITE | PAGE_PCD | PAGE_PWT);
     }

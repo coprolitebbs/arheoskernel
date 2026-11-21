@@ -1268,7 +1268,20 @@ void task_propagate_kernel_pte(uint32_t pd_index, uint32_t pt_index, uint32_t pt
         {
             uint32_t user_pde    = (*t->page_dir)[pd_index];
             uint32_t kernel_pde  = (*kernel_directory)[pd_index];
-            if (user_pde == 0) continue;         //PDE ещё нет — догонит spawn-sync
+            if (user_pde == 0)
+            {
+                //PDE у задачи еще нет — создаем на месте вместо слепого
+                //continue в расчете на spawn-sync: spawn-sync переносит в
+                //user-PD только critical PDE диапазона 256..511, поэтому PDE,
+                //рожденный после спавна задач (MMIO-окно Geode при первой
+                //смене режима), оставался бы невидимым из user-контекста:
+                //зеркало в vmm_map_page срабатывает лишь однажды, при рождении
+                //PDE в kernel_directory. Для critical здесь заводится свежая
+                //PT-копия уже с записанным PTE, для остальных — shared PT
+                vmm_sync_pde_into_user_pd(t->page_dir, pd_index);
+                user_pde = (*t->page_dir)[pd_index];
+                if (user_pde == 0) continue;          //диапазон не попадает в user-PD
+            }
             if (user_pde == kernel_pde) continue;//PT шаренная — PTE уже виден
             //Свежая PT: копируем PTE
             page_table_t *user_pt = (page_table_t*)(user_pde & 0xFFFFF000);
