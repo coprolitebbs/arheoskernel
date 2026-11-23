@@ -26,26 +26,26 @@ e820_detect:
     push es
     push di
     xor ebx, ebx
-    xor cx, cx              ; счётчик
+    xor cx, cx              ;Счётчик
     mov edx, 0x534D4150
 
 .next_entry:
-    push cx                 ; ← сохраняем счётчик ДО mov ecx
+    push cx                 ;Сохраняем счётчик ДО mov ecx
     mov eax, 0xE820
     mov ecx, 20
     push di
     int 0x15
     pop di
-    pop cx                  ; ← восстанавливаем счётчик ПОСЛЕ
+    pop cx                  ;Восстанавливаем счётчик ПОСЛЕ
     jc .done
     cmp eax, 0x534D4150
     jne .done
 
-    ; Защита от «финальной» пустой записи (base=0, length=0)
-    cmp dword [es:di+8], 0  ; length low
+    ; Защита от финальной пустой записи (base=0, length=0)
+    cmp dword [es:di+8], 0  ;length low
     jne .store
-    cmp dword [es:di+4], 0  ; base high
-    je .done                ; и base=0, и length=0 → конец списка
+    cmp dword [es:di+4], 0  ;base high
+    je .done                ;и base=0, и length=0 → конец списка
 
 .store:
     inc cx
@@ -54,12 +54,12 @@ e820_detect:
     jnz .next_entry
 
 .done:
-    ; Сохраняем СЧЁТЧИК в память до popa
+    ;Сохраняем счетчик в память до popa
     mov [cs:e820_count], cx
     pop di
     pop es
     popa
-    mov cx, [cs:e820_count] ; ← возвращаем счётчик в CX для вызывающего
+    mov cx, [cs:e820_count] ;Возвращаем счётчик в CX для вызывающего
     test cx, cx
     jz .fail
     clc

@@ -543,7 +543,7 @@ static void pci_scan_bus(uint32_t bus, int depth)
     }
 }
 
-//Полное сканирование. Повторные вызовы — no-op
+//Полное сканирование. Повторные вызовы не обрабатываются
 int pci_scan_all(void)
 {
     if (g_pci_scanned) return g_pci_devs_count;

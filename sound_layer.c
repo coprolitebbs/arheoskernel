@@ -15,15 +15,15 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-/*
- * sound_layer.c — реализация высокоуровневого слоя звука (Ring 0).
- * API описан в drivers/include_drivers/kernel_sound_layer.h.
- *
- * Здесь только реестр snd_driver_t с автопереключением по priority,
- * кэш параметров потоков и проходные snd_*-функции. Fallback-драйвера
- * (как fbdrv у графики) нет: пока ни один звуковой драйвер не загружен,
- * все snd_*-функции честно возвращают SND_ERR_NODEV.
- */
+
+//sound_layer.c — реализация высокоуровневого слоя звука (Ring 0)
+//API описан в drivers/include_drivers/kernel_sound_layer.h
+
+//Здесь только реестр snd_driver_t с автопереключением по priority,
+//кэш параметров потоков и проходные snd_*-функции.
+//Фолбэка-драйвера (как fbdrv у графики) пока еще нет, пока ни один звуковой драйвер не загружен,
+//все snd_*-функции честно возвращают SND_ERR_NODEV
+
 
 #include <stdint.h>
 #include <stddef.h>

@@ -514,7 +514,7 @@ static uint32_t gr_screen_bytes(void)
 //Буфер обоев хранится в формате режима на момент установки, поэтому
 //при смене разрешения перепаковываем пиксели в новый формат: читаем пиксель
 //в старом bpp, распаковываем в 0x00RRGGBB по bitfields источника, пакуем
-//в новый bpp и пишем с масштабом nearest-neighbor
+//в новый bpp и пишем с масштабом по методу ближайших соседей
 static void gr_wp_forget_format(void)
 {
     gr_wp_w = 0;
@@ -1237,11 +1237,11 @@ int gr_draw_line(int x0, int y0, int x1, int y1, uint32_t color)
         int rc = gr_active->ops->draw_line(gr_active->priv, x0, y0, x1, y1, color);
         if (rc == GR_OK) return rc;
         //Аппаратная линия не удалась (вне экрана, движок занят чужим pitch) —
-        //дорисовываем программным Брезенхэмом, put_pixel сам синхронизируется
+        //дорисовываем программным Брезенхамом, put_pixel сам синхронизируется
         //с движком
     }
 
-    //Брезенхэм, отсечением по экрану не заморачиваемся — put_pixel сам отбросит
+    //Брезенхам, отсечением по экрану не заморачиваемся — put_pixel сам отбросит
     int dx = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
     int dy = (y1 >= y0) ? (y1 - y0) : (y0 - y1);
     int sx = (x1 >= x0) ? 1 : -1;
@@ -1291,7 +1291,7 @@ int gr_copy_area(int sx, int sy, int w, int h, int dx, int dy)
     {
         int rc = gr_active->ops->copy_area(gr_active->priv, sx, sy, w, h, dx, dy);
         if (rc == GR_OK) return rc;
-        //Драйвер отказался — программное копирование
+        //Если драйвер отказался, то программное копирование
     }
     gr_sync_engine();
     return gr_lfb_copy_area(sx, sy, w, h, dx, dy);

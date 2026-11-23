@@ -1429,7 +1429,7 @@ void s_loading_page_step(uint32_t current_point)
     for(uint32_t i = ocpr; i <= cpr; i++)
     {
         //printf("\033[%d;%dH%c",loading_screen_y,i,((i % 2) == 0) ? ((i % 3) == 0) ? 0x05 : 0x04 : 0x20);
-        printf("\033[%d;%dH%c",loading_screen_y,i,((i % 2) == 0) ?  0x05 : 0x04);
+        printf("\033[%d;%dH%c",loading_screen_y,i,((i % 2) == 0) ?  0xB0 : 0xB1);
     }
 }
 

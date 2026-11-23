@@ -153,7 +153,7 @@ void systemcall_get_fb_info(struct regs *r)
     //графика рисовались в формате уже несуществующего режима
     gr_mode_info_t m;
     if (gr_get_current_mode(&m) == GR_OK &&
-        m.xres != 0 && m.yres != 0 && m.bpp != 0 && m.pitch != 0)
+            m.xres != 0 && m.yres != 0 && m.bpp != 0 && m.pitch != 0)
     {
         r->eax = m.pitch;
         r->ebx = m.bpp;
@@ -1463,9 +1463,9 @@ void systemcall_sbrk(struct regs *r)
             //kernel stack текущей задачи (стек теперь 4 страницы, не одна)
             uint32_t kstack_base = current_task->kernel_stack_phys;
             if (phys >= 0x00100000 && phys < 0xC0000000 &&
-                !(kstack_base != 0 &&
-                  phys >= kstack_base &&
-                  phys < kstack_base + KERNEL_STACK_PAGES * PAGE_SIZE))
+                    !(kstack_base != 0 &&
+                      phys >= kstack_base &&
+                      phys < kstack_base + KERNEL_STACK_PAGES * PAGE_SIZE))
             {
                 break;
             }
@@ -1916,9 +1916,7 @@ void systemcall_fb_blit(struct regs *r)
         r->eax = -1;
         return;
     }
-    //границы из активного режима слоя: после смены разрешения blit по
-    //bootinfo отбрасывал валидные прямоугольники (графика "не видна совсем")
-    //или пропускал запись за пределы реального экрана
+    //границы из активного режима слоя
     uint32_t scr_w = 0, scr_h = 0;
     gr_sys_screen_dims(&scr_w, &scr_h);
     if (x + w > (int32_t)scr_w)
@@ -2012,7 +2010,7 @@ void systemcall_usb_get_dev(struct regs *r)
 
 
 //USB ручной hotplug
-//SYS_USB_RESCAN (lsusb -update): драйвер пересматривает порты активных контроллеров
+//SYS_USB_RESCAN (usbscan -update): драйвер пересматривает порты активных контроллеров
 //(добавляет вставленное, снимает вынутое вместе с его block-регистрацией),
 //после чего ядро переложит devices[] в реестр
 //-> eax = число устройств после обновления или отрицательный код
@@ -2049,33 +2047,41 @@ void systemcall_usb_rescan(struct regs *r)
 //-> eax = dword из конфиг-пространства или -1
 //Читаются только устройства из реестра — userspace не может тыкать произвольные конфиг-циклы в живую шину
 
-void systemcall_pci_count(struct regs *r){
+void systemcall_pci_count(struct regs *r)
+{
     r->eax = (uint32_t)pci_scan_all();
 }
 
-void systemcall_pci_get_dev(struct regs *r){
+void systemcall_pci_get_dev(struct regs *r)
+{
     int idx = (int)r->ebx;
     u_pci_dev_t *user_out = (u_pci_dev_t *)r->ecx;
 
-    if (!user_out || (uint32_t)user_out < 0x40000000){
-        r->eax = (uint32_t)-1; return;
+    if (!user_out || (uint32_t)user_out < 0x40000000)
+    {
+        r->eax = (uint32_t)-1;
+        return;
     }
 
     pci_dev_record_t rec;
-    if (pci_registry_get(idx, &rec) != 0){
-        r->eax = (uint32_t)-1; return;
+    if (pci_registry_get(idx, &rec) != 0)
+    {
+        r->eax = (uint32_t)-1;
+        return;
     }
 
     *user_out = rec;
     r->eax = 0;
 }
 
-void systemcall_pci_read_cfg(struct regs *r){
+void systemcall_pci_read_cfg(struct regs *r)
+{
     uint32_t bdf    = r->ebx;
     uint32_t offset = r->ecx & 0xFFFF;
 
     uint32_t value = 0;
-    if (pci_registry_read_cfg(bdf, (uint8_t)offset, &value) != 0){
+    if (pci_registry_read_cfg(bdf, (uint8_t)offset, &value) != 0)
+    {
         r->eax = (uint32_t)-1;
         return;
     }
@@ -2095,12 +2101,12 @@ void systemcall_get_tty_cursor_pos(struct regs *r)
 }
 
 
-//SYS_TTY_LINE_EDIT — управление курсором редактора строки из Ring-3.
-//Ring-3 шелл (Сехмет) сам рисует строку ввода, а мигающий курсор рисует ядро.
+//SYS_TTY_LINE_EDIT — управление курсором редактора строки из Ring-3
+//Ring-3 шелл (Сехмет) сам рисует строку ввода, а мигающий курсор рисует ядро
 //ebx = 0 — спрятать курсор (строка завершена, идет вывод/выполнение команды)
 //ebx = 1 — включить: ecx = якорь строки (младшие 16 бит — колонка, старшие — строка),
-//          edx = смещение курсора от якоря в ячейках.
-//          Ядро мигает ровно в этой ячейке, переживая переносы и скролл.
+//          edx = смещение курсора от якоря в ячейках
+//          Ядро мигает ровно в этой ячейке, переживая переносы и скролл
 //ebx = 2 — задать глиф курсора: ecx = кодпойнт (например 0xB2 из config.cfg)
 void systemcall_tty_line_edit(struct regs *r)
 {
@@ -2135,9 +2141,7 @@ void systemcall_tty_line_edit(struct regs *r)
     {
         //Глиф курсора. Из config.cfg Сехмета приходит CP866-код
         //(cursor_code=0xB1 и т.п.), а шрифт индексируется Unicode-кодпойнтами:
-        //конвертируем честно, чтобы 0xB1 рисовался как ▒, 0x23 — как '#',
-        //0xDB — как █ и т.д. для ВСЕХ 256 кодов. Значения выше 0xFF
-        //считаются уже готовым кодпойнтом (обратная совместимость)
+        //Значения выше 0xFF считаются уже готовым кодпойнтом
         uint32_t new_code = cp866_byte_to_codepoint(r->ecx);
         if (new_code != current_tty->cursor_code)
         {
@@ -2235,7 +2239,7 @@ _Static_assert(sizeof(u_gr_mode_info_t) == sizeof(gr_mode_info_t),
 _Static_assert(sizeof(u_gr_fix_info_t) == sizeof(gr_fix_info_t),
                "u_gr_fix_info_t layout mismatch");
 
-//SYS_GRAPH_INFO: информация об активном видеодрайвере графического слоя.
+//SYS_GRAPH_INFO: информация об активном видеодрайвере графического слоя
 //ebx = op-код GRAPH_INFO_*; ecx = указатель Ring 3 (для GRAPH_INFO_MODE
 //ecx = индекс режима, а указатель лежит в edx; для GRAPH_INFO_SET_MODE
 //ecx = индекс целевого режима). Возврат: eax = 0/-1, для SET_MODE —
@@ -2252,7 +2256,7 @@ void systemcall_graph_info(struct regs *r)
     //Указатель Ring 3 обязан лежать в пользовательском диапазоне VA (процессы с 0x40000000, ядро с 0xC0000000)
     //SET_MODE указателя не передает: в ecx лежит индекс целевого режима, проверка диапазона к нему не применяется
     if (op != GRAPH_INFO_SET_MODE &&
-        (user_ptr < 0x40000000 || user_ptr >= 0xC0000000))
+            (user_ptr < 0x40000000 || user_ptr >= 0xC0000000))
     {
         r->eax = -1;
         return;
@@ -2260,110 +2264,110 @@ void systemcall_graph_info(struct regs *r)
 
     switch (op)
     {
-        //Карточка активного драйвера
-        case GRAPH_INFO_DRIVER:
+    //Карточка активного драйвера
+    case GRAPH_INFO_DRIVER:
+    {
+        gr_driver_t *drv = graphic_layer_get_active();
+        u_gr_driver_info_t *out = (u_gr_driver_info_t *)user_ptr;
+        if (!drv)
         {
-            gr_driver_t *drv = graphic_layer_get_active();
-            u_gr_driver_info_t *out = (u_gr_driver_info_t *)user_ptr;
-            if (!drv)
-            {
-                r->eax = -1;
-                return;
-            }
-            memset(out, 0, sizeof(u_gr_driver_info_t));
-            out->abi_version  = drv->version;
-            out->priority     = drv->priority;
-            out->current_mode = drv->current_mode;
-            out->mode_count   = (uint32_t)gr_get_mode_count();
-            out->driver_count = graphic_layer_get_driver_count();
-            for (uint32_t i = 0; i < sizeof(out->name); i++)
-                out->name[i] = drv->name[i];
-            for (uint32_t i = 0; i < sizeof(out->longname); i++)
-                out->longname[i] = drv->longname[i];
-            r->eax = 0;
-            break;
-        }
-
-        //Режим по индексу из списка драйвера
-        case GRAPH_INFO_MODE:
-        {
-            gr_mode_info_t mode;
-            if (gr_enum_mode(r->ecx, &mode) != GR_OK)
-            {
-                r->eax = -1;
-                return;
-            }
-            memcpy((void *)user_ptr, &mode, sizeof(gr_mode_info_t));
-            r->eax = 0;
-            break;
-        }
-
-        //Текущий режим (кэш слоя, валидируется при регистрации и смене)
-        case GRAPH_INFO_CURRENT:
-        {
-            gr_mode_info_t mode;
-            if (gr_get_current_mode(&mode) != GR_OK)
-            {
-                r->eax = -1;
-                return;
-            }
-            memcpy((void *)user_ptr, &mode, sizeof(gr_mode_info_t));
-            r->eax = 0;
-            break;
-        }
-
-        //Неизменяемая часть: имя, размеры видеопамяти, визуальный класс
-        case GRAPH_INFO_FIX:
-        {
-            gr_fix_info_t fix;
-            if (gr_get_fix_info(&fix) != GR_OK)
-            {
-                r->eax = -1;
-                return;
-            }
-            memcpy((void *)user_ptr, &fix, sizeof(gr_fix_info_t));
-            r->eax = 0;
-            break;
-        }
-
-        //Смена режима активного драйвера на ходу: ecx = индекс режима (0 .. mode_count-1)
-        // Указателя нет — операция только переключает режим
-        //Возврат не -1, а сам отрицательный код GR_ERR_*: Ring 3
-        //может отличить "нет такого режима" (-9) от "драйвер не умеет менять режим"
-        //(-3, fbdrv-fallback) и "ошибка ввода-вывода" (-7)
-        case GRAPH_INFO_SET_MODE:
-        {
-            //трасса: syscall дошел до ядра с нужным индексом
-            com_puts("[GINFO] set_mode idx=");
-            com_puthex(r->ecx);
-            com_puts("\n");
-            //смена режима — атомарная секция ядра: таймер не должен вытеснять контекст задачи
-            //посреди gr_set_mode
-            //Внутри нее ядро меняет глобальное состояние графического слоя, а трамплин real mode
-            //(vbe_rm_exec) уходит в BIOS int 10h.
-            //прилетевший посреди этого IRQ0 с schedule() переключает CR3/esp, и контекст продолжения
-            //смены режима становится мусором. держим блокировку до конца redraw консолей
-            uint8_t saved_sched_lock = kernel_schedule_lock;
-            kernel_schedule_lock = 1;
-
-            int rc = gr_set_mode(r->ecx);
-            kprintf("set %d\n",rc);
-            if (rc != GR_OK)
-            {
-                kernel_schedule_lock = saved_sched_lock;
-                r->eax = (uint32_t)rc;
-                return;
-            }
-            //геометрия консолей привязана к разрешению: пересчитываем окна TTY под новый режим и очищаем экран
-            kconsole_mode_changed();
-            kernel_schedule_lock = saved_sched_lock;
-            r->eax = 0;
-            break;
-        }
-
-        default:
             r->eax = -1;
-            break;
+            return;
+        }
+        memset(out, 0, sizeof(u_gr_driver_info_t));
+        out->abi_version  = drv->version;
+        out->priority     = drv->priority;
+        out->current_mode = drv->current_mode;
+        out->mode_count   = (uint32_t)gr_get_mode_count();
+        out->driver_count = graphic_layer_get_driver_count();
+        for (uint32_t i = 0; i < sizeof(out->name); i++)
+            out->name[i] = drv->name[i];
+        for (uint32_t i = 0; i < sizeof(out->longname); i++)
+            out->longname[i] = drv->longname[i];
+        r->eax = 0;
+        break;
+    }
+
+    //Режим по индексу из списка драйвера
+    case GRAPH_INFO_MODE:
+    {
+        gr_mode_info_t mode;
+        if (gr_enum_mode(r->ecx, &mode) != GR_OK)
+        {
+            r->eax = -1;
+            return;
+        }
+        memcpy((void *)user_ptr, &mode, sizeof(gr_mode_info_t));
+        r->eax = 0;
+        break;
+    }
+
+    //Текущий режим (кэш слоя, валидируется при регистрации и смене)
+    case GRAPH_INFO_CURRENT:
+    {
+        gr_mode_info_t mode;
+        if (gr_get_current_mode(&mode) != GR_OK)
+        {
+            r->eax = -1;
+            return;
+        }
+        memcpy((void *)user_ptr, &mode, sizeof(gr_mode_info_t));
+        r->eax = 0;
+        break;
+    }
+
+    //Неизменяемая часть: имя, размеры видеопамяти, визуальный класс
+    case GRAPH_INFO_FIX:
+    {
+        gr_fix_info_t fix;
+        if (gr_get_fix_info(&fix) != GR_OK)
+        {
+            r->eax = -1;
+            return;
+        }
+        memcpy((void *)user_ptr, &fix, sizeof(gr_fix_info_t));
+        r->eax = 0;
+        break;
+    }
+
+    //Смена режима активного драйвера на ходу: ecx = индекс режима (0 .. mode_count-1)
+    // Указателя нет — операция только переключает режим
+    //Возврат не -1, а сам отрицательный код GR_ERR_*: Ring 3
+    //может отличить "нет такого режима" (-9) от "драйвер не умеет менять режим"
+    //(-3, fbdrv-fallback) и "ошибка ввода-вывода" (-7)
+    case GRAPH_INFO_SET_MODE:
+    {
+        //трасса: syscall дошел до ядра с нужным индексом
+        com_puts("[GINFO] set_mode idx=");
+        com_puthex(r->ecx);
+        com_puts("\n");
+        //смена режима — атомарная секция ядра: таймер не должен вытеснять контекст задачи
+        //посреди gr_set_mode
+        //Внутри нее ядро меняет глобальное состояние графического слоя, а трамплин real mode
+        //(vbe_rm_exec) уходит в BIOS int 10h.
+        //прилетевший посреди этого IRQ0 с schedule() переключает CR3/esp, и контекст продолжения
+        //смены режима становится мусором. держим блокировку до конца redraw консолей
+        uint8_t saved_sched_lock = kernel_schedule_lock;
+        kernel_schedule_lock = 1;
+
+        int rc = gr_set_mode(r->ecx);
+        kprintf("set %d\n",rc);
+        if (rc != GR_OK)
+        {
+            kernel_schedule_lock = saved_sched_lock;
+            r->eax = (uint32_t)rc;
+            return;
+        }
+        //геометрия консолей привязана к разрешению: пересчитываем окна TTY под новый режим и очищаем экран
+        kconsole_mode_changed();
+        kernel_schedule_lock = saved_sched_lock;
+        r->eax = 0;
+        break;
+    }
+
+    default:
+        r->eax = -1;
+        break;
     }
 }
 
@@ -2419,8 +2423,10 @@ void systemcall_gr_prim(struct regs *r)
 //(PS/2 сейчас, USB-HID в будущем) суммируются драйвером в один курсор
 
 //SYS_MOUSE_GET (72): eax=x (или -1 если мыши нет), ebx=y, ecx=buttons
-void systemcall_mouse_get(struct regs *r){
-    if (!mouse_driver_api || !mouse_driver_api->poll){
+void systemcall_mouse_get(struct regs *r)
+{
+    if (!mouse_driver_api || !mouse_driver_api->poll)
+    {
         r->eax = (uint32_t)-1;
         return;
     }
@@ -2432,15 +2438,18 @@ void systemcall_mouse_get(struct regs *r){
 }
 
 //SYS_MOUSE_POLL (73): ebx = указатель Ring-3 на mouse_state_t -> eax=0/-1
-//Отдает и позицию, и дельту, накопленную с предыдущего вызова.
-void systemcall_mouse_poll(struct regs *r){
-    if (!mouse_driver_api || !mouse_driver_api->poll){
+//Отдает и позицию, и дельту, накопленную с предыдущего вызова
+void systemcall_mouse_poll(struct regs *r)
+{
+    if (!mouse_driver_api || !mouse_driver_api->poll)
+    {
         r->eax = (uint32_t)-1;
         return;
     }
     mouse_state_t *dst = (mouse_state_t *)r->ebx;
     //Та же защита от указателей в ядерное пространство, что в fb_blit
-    if (!dst || (uint32_t)dst < 0x40000000){
+    if (!dst || (uint32_t)dst < 0x40000000)
+    {
         r->eax = (uint32_t)-1;
         return;
     }
@@ -2451,8 +2460,10 @@ void systemcall_mouse_poll(struct regs *r){
 }
 
 //SYS_MOUSE_SET_POS (74): ebx=x, ecx=y -> eax=0/-1 (телепорт курсора)
-void systemcall_mouse_set_pos(struct regs *r){
-    if (!mouse_driver_api || !mouse_driver_api->set_pos){
+void systemcall_mouse_set_pos(struct regs *r)
+{
+    if (!mouse_driver_api || !mouse_driver_api->set_pos)
+    {
         r->eax = (uint32_t)-1;
         return;
     }

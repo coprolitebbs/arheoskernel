@@ -93,6 +93,10 @@
 			<Option compilerVar="CC" />
 		</Unit>
 		<Unit filename="drivers/kbd_driver/kbd_start.asm" />
+		<Unit filename="drivers/mouse/mouse.c">
+			<Option compilerVar="CC" />
+		</Unit>
+		<Unit filename="drivers/mouse/mouse_start.asm" />
 		<Unit filename="drivers/usb_driver/include/usb_core.h" />
 		<Unit filename="drivers/usb_driver/include/usb_driver.h" />
 		<Unit filename="drivers/usb_driver/include/usb_ehci.h" />
@@ -264,6 +268,9 @@
 		<Unit filename="userspace/examples/kb_check/kb_check.c">
 			<Option compilerVar="CC" />
 		</Unit>
+		<Unit filename="userspace/examples/mouse_test/mtest.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="userspace/examples/scanf_check/scanf_check.c">
 			<Option compilerVar="CC" />
 		</Unit>
@@ -276,6 +283,7 @@
 		<Unit filename="userspace/filesystem/config/sekhmet/sekhmet.hlp" />
 		<Unit filename="userspace/include/fileattrs.h" />
 		<Unit filename="userspace/include/mount_structures.h" />
+		<Unit filename="userspace/include/mouse.h" />
 		<Unit filename="userspace/include/syscall.h" />
 		<Unit filename="userspace/include/uconfig.h" />
 		<Unit filename="userspace/include/udevices.h" />
@@ -284,6 +292,9 @@
 		<Unit filename="userspace/include/uimage.h" />
 		<Unit filename="userspace/include/umemory.h" />
 		<Unit filename="userspace/include/ustd.h" />
+		<Unit filename="userspace/lib/mouse.c">
+			<Option compilerVar="CC" />
+		</Unit>
 		<Unit filename="userspace/lib/uconfig.c">
 			<Option compilerVar="CC" />
 		</Unit>

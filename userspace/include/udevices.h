@@ -57,7 +57,7 @@ uint32_t u_pci_read_cfg(uint32_t bdf, uint8_t off);
 //Утилита: имя базового класса PCI (без malloc)
 const char* u_pci_class_name(uint8_t base_class);
 
-//Утилита: «полное» имя класса с учётом подкласса (без malloc)
+//Утилита: "полное" имя класса с учётом подкласса (без malloc)
 const char* u_pci_class_sub_name(uint8_t base_class, uint8_t subclass);
 
 //Утилита: имя вендора по VID или NULL (без malloc)

@@ -38,4 +38,5 @@ int ext2_write_inode(ext2_volume_t *vol, uint32_t inode_no, const ext2_inode_t *
 int ext2_alloc_block(ext2_volume_t *vol, uint32_t group, uint32_t *out_block_no);
 int ext2_alloc_inode(ext2_volume_t *vol, uint32_t group, uint32_t *out_inode_no);
 
+
 #endif

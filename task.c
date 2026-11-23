@@ -137,10 +137,7 @@ void schedule(struct regs *r)
 {
     //Блокировка планировщика обязана работать и вне ветки IRQ0: sys_yield
     //из драйверов (ожидание движка GP в geodegx, циклы kbd и sound) попадает
-    //сюда из syscall-контекста, где секция смены режима/spawn держит lock.
-    //Переключение посреди такой секции уводит CR3 на чужой каталог страниц
-    //и бросает недоделанную смену режима или маппинг кучи на полпути.
-    //Раньше чек был только в обработчике таймера, и yield обходил его
+    //сюда из syscall-контекста, где секция смены режима/spawn держит lock
     if (kernel_schedule_lock != 0) return;
 
     task_t *old_task = current_task;
@@ -171,7 +168,8 @@ void schedule(struct regs *r)
     //Опрос мыши: единый курсор живет внутри mouse.drv (модель Windows), ядро
     //просто дергает poll(), чтобы AUX-буфер 8042 вычитывался даже тогда, когда
     //приложения не звали SYS_MOUSE_*. Неблокирующе, вызывается под cli
-    if (mouse_driver_api && mouse_driver_api->enabled && mouse_driver_api->poll){
+    if (mouse_driver_api && mouse_driver_api->enabled && mouse_driver_api->poll)
+    {
         mouse_state_t ms;
         mouse_driver_api->poll(&ms);
     }
@@ -361,7 +359,7 @@ void cleanup_tasks(void)
     //Освобождаем PD текущей задачи -> CR3 не должен на неё указывать
     //Принудительно переключаемся на kernel_directory: там все page tables ядра
     //(identity map, LFB/MMIO, kernel heap) гарантированно живы
-    //switch_task / vmm_switch_directory(next_task) в конце schedule() переключит CR3 на реальную следующую задачу
+    //switch_task / vmm_switch_directory(next_task) в конце schedule() переключит CR3 на следующую задачу
     uint32_t cur_cr3;
     __asm__ __volatile__("mov %%cr3, %0" : "=r"(cur_cr3) : : "memory");
     if (kernel_directory &&
@@ -550,7 +548,7 @@ int vm_page_remove(task_t *task, uint32_t virt)
                 prev->next = cur->next;
             else
                 task->vm_pages = cur->next;
-            kfree(cur);   // ← освобождаем узел
+            kfree(cur);   //освобождаем узел
             return 1;
         }
         prev = cur;
@@ -593,7 +591,6 @@ void vm_pages_free_all(task_t *task)
 task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t program_size, const char *cmdline)
 {
     //Ниже USER_VA_BASE процессы не живут: там identity-окно видео ядра
-    //и спавн по старой базе 0x40000000 снова порождает коллизию с MMIO
     if (entry_virt < USER_VA_BASE || entry_virt >= 0xC0000000) return NULL;
     task_t *task = (task_t*)kmalloc(sizeof(task_t));
     if (!task) return NULL;
@@ -615,7 +612,7 @@ task_t* task_spawn_builtin(uint32_t entry_virt, uint8_t *program_code, uint32_t 
             }
             // наследуем, увеличивая refcount
             task->fds[i] = pfd;
-            // (refcount у вас неявный — считается по всем fds всех задач)
+            // (refcount неявный — считается по всем fds всех задач)
         }
         // Специально для STDOUT/STDERR redirect:
         // если у родителя fds[1] != 1 — наследуем именно это
@@ -792,8 +789,8 @@ task_t* task_spawn_elf(const char *path, uint8_t *elf_image, uint32_t size, cons
     //Базовый адрес (Delta) для релокации PIE-исполняемого файла
     //Если файл статический (ehdr->type == ET_EXEC), load_base будет 0.
     //Если файл позиционно-независимый (ehdr->type == ET_DYN), сажаем на USER_VA_BASE.
-    //0x48000000, а не 0x40000000: на Geode GX1 низ окна 0x40000000 занят
-    //identity-маппингом MMIO/LFB ядра, см. комментарий у USER_VA_BASE в task.h
+    //0x48000000: на Geode GX1 низ окна 0x40000000 занят
+    //identity-маппингом MMIO/LFB ядра
     uint32_t load_base = (ehdr->type == 3) ? USER_VA_BASE : 0; //ET_DYN = 3
 
     task_t *task = (task_t*)kmalloc(sizeof(task_t));
@@ -1256,7 +1253,7 @@ void task_mirror_kernel_pde(uint32_t pd_index)
     while (t != ready_queue);
 }
 
-//Зеркалит один kernel-PTE в user-PD, если у того в этом PDE СВЕЖАЯ PT
+//Зеркалит один kernel-PTE в user-PD, если у того в этом PDE свежая PT
 //(а не шаренная — шаренная и так видит изменения). Актуально для critical PDE (LFB/MMIO)
 void task_propagate_kernel_pte(uint32_t pd_index, uint32_t pt_index, uint32_t pte_val)
 {
@@ -1270,14 +1267,8 @@ void task_propagate_kernel_pte(uint32_t pd_index, uint32_t pt_index, uint32_t pt
             uint32_t kernel_pde  = (*kernel_directory)[pd_index];
             if (user_pde == 0)
             {
-                //PDE у задачи еще нет — создаем на месте вместо слепого
-                //continue в расчете на spawn-sync: spawn-sync переносит в
-                //user-PD только critical PDE диапазона 256..511, поэтому PDE,
-                //рожденный после спавна задач (MMIO-окно Geode при первой
-                //смене режима), оставался бы невидимым из user-контекста:
-                //зеркало в vmm_map_page срабатывает лишь однажды, при рождении
-                //PDE в kernel_directory. Для critical здесь заводится свежая
-                //PT-копия уже с записанным PTE, для остальных — shared PT
+                //PDE у задачи еще нет — создаем на месте в расчете на spawn-sync:
+                //он перенесет в user-PD только critical PDE диапазона 256..511
                 vmm_sync_pde_into_user_pd(t->page_dir, pd_index);
                 user_pde = (*t->page_dir)[pd_index];
                 if (user_pde == 0) continue;          //диапазон не попадает в user-PD
@@ -1289,7 +1280,7 @@ void task_propagate_kernel_pte(uint32_t pd_index, uint32_t pt_index, uint32_t pt
             //kernel-PTE нельзя: процесс потеряет страницу и упадет на выборке
             //инструкции или чтении с ERR=5 сразу после возврата из сисколла.
             //Нормальная работа механизма предполагает, что identity-окно ядра
-            //и user-VA живут в разных PDE - при коллизии пишем маркер в COM
+            //и user-VA живут в разных PDE - при коллизии пишем сообщения в COM-порт
             //и оставляем процессу его страницу
             if ((*user_pt)[pt_index] & PAGE_USER)
             {

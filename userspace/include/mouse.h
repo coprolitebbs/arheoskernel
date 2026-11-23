@@ -31,7 +31,8 @@
 #define U_MOUSE_BTN_MIDDLE  0x04
 
 //Дельта мыши за один опрос (экранные координаты: dy>0 — вниз по экрану)
-typedef struct{
+typedef struct
+{
     int16_t dx;
     int16_t dy;
     int16_t wheel;
@@ -39,7 +40,8 @@ typedef struct{
 } u_mouse_delta_t;
 
 //Состояние единого курсора (модель Windows: все устройства двигают один курсор)
-typedef struct{
+typedef struct
+{
     int16_t x, y;      //текущая позиция курсора
     int16_t dx, dy;    //дельта, накопленная с предыдущего вызова u_mouse_poll
     uint8_t buttons;

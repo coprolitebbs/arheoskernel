@@ -53,7 +53,7 @@ int gr_clear(uint32_t color);
 int gr_hline(int x, int y, int w, uint32_t color);
 int gr_vline(int x, int y, int h, uint32_t color);
 int gr_draw_rect(int x, int y, int w, int h, uint32_t color);       //рамка
-int gr_draw_line(int x0, int y0, int x1, int y1, uint32_t color);   //Брезенхэм
+int gr_draw_line(int x0, int y0, int x1, int y1, uint32_t color);   //Брезенхам
 int gr_blit(int x, int y, int w, int h, const void *src);           //RAM -> FB
 int gr_copy_area(int sx, int sy, int w, int h, int dx, int dy);     //внутри FB
 

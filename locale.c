@@ -21,6 +21,7 @@
 #include "include-kernel/kernel_heap.h"
 #include "userspace/include/fileattrs.h"
 
+//Максимум локалей
 #define LOCALE_REGISTRY_MAX 8
 
 static const locale_t *g_locales[LOCALE_REGISTRY_MAX];

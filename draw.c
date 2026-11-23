@@ -414,8 +414,8 @@ void kernel_fill_screen(uint32_t color)
 //Fallback: fb-драйвер ещё не загружен
 //Работаем через font_data[] — таблицу CP866-шрифта из BIOS
 //Всё, что приходит, конвертируется в CP866-байты для _draw_char
-//Это низкоуровневый путь для ранних паник, после init_drivers() сюда
-//попасть уже нельзя — fb->draw_string уйдёт в font_draw_codepoint
+//Это низкоуровневый путь для ранних паник, после init_drivers()
+//сюда попасть уже нельзя — fb->draw_string уйдёт в font_draw_codepoint
 void kernel_draw_string(uint32_t x, uint32_t y, const char *str, uint32_t color)
 {
     if (fb && fb->draw_string)

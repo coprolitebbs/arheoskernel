@@ -18,29 +18,25 @@
 #ifndef DRIVER_GRAPHIC_LAYER_H
 #define DRIVER_GRAPHIC_LAYER_H
 
-/*
- * driver_graphic_layer.h — высокоуровневый слой абстракции графики
- *
- * Схема (по образцу Linux framebuffer API: fb_var_screeninfo /
- * fb_fix_screeninfo / fb_ops / fb_info, в упрощённом виде):
- *
- *     ядро / GUI / системные процессы
- *                 |
- *        gr_* функции слоя        (graphic_layer.c, Ring 0)
- *                 |
- *     gr_driver_t + gr_ops_t      <-- любой драйвер: VESA, Geode GX1/LX, fbdrv
- *                 |
- *               железо
- *
- * Заголовок общий для ядра и драйверов, чтобы описания структур совпадали
- * у обеих сторон. Нижний драйвер заполняет gr_driver_t и отдаёт его ядру
- * через description_driver_api_t (type = DESCR_GRAPHICS_DRIVER, см.
- * drv_format.h). Регистрацией, выбором активного драйвера и программными
- * fallback'ами ведает graphic_layer.c (компилируется в ядро).
- *
- * Функции gr_* объявлены здесь для общности, но драйверы их НЕ линкуют:
- * они вызываются только из кода ядра.
- */
+//driver_graphic_layer.h — высокоуровневый слой абстракции графики
+//
+//Схема (по образцу Linux framebuffer API: fb_var_screeninfo / fb_fix_screeninfo / fb_ops / fb_info,
+//в упрощённом виде):
+//     ядро / GUI / системные процессы
+//                 |
+//        gr_* функции слоя        (graphic_layer.c, Ring 0)
+//                 |
+//     gr_driver_t + gr_ops_t      <-- любой драйвер: VESA, Geode GX1/LX, fbdrv
+//                 |
+//              железо
+//
+//Заголовок общий для ядра и драйверов, чтобы описания структур совпадали  у обеих сторон.
+//Нижний драйвер заполняет gr_driver_t и отдаёт его ядру через description_driver_api_t
+//(type = DESCR_GRAPHICS_DRIVER, см. drv_format.h).
+//Регистрацией, выбором активного драйвера и программными fallback'ами ведает graphic_layer.c (компилируется в ядро).
+//
+//Функции gr_* объявлены здесь для общности, но драйверы их не линкуют:
+//они вызываются только из кода ядра.
 
 #include <stdint.h>
 #include <stddef.h>
@@ -86,10 +82,11 @@
 #define GR_ACCEL_HLINE     0x0008
 #define GR_ACCEL_VLINE     0x0010
 
-//Область трамплина в младшей памяти. Адреса обязаны совпадать с
-//vbe_rm_blob.asm и gdt.c (дескрипторы с базой 0x4000 на индексах 128/129)
-//Зона 0x4000..0x4BFF не занята никем: BDA заканчивается на 0x4FF,
-//bootinfo с 0x5000, stage2 с 0x7E00, pmm никогда не раздаёт память ниже 1 МБ
+//Область трамплина в младшей памяти. Адреса обязаны совпадать с vbe_rm_blob.asm и gdt.c
+//(дескрипторы с базой 0x4000 на индексах 128/129)
+//Зона 0x4000..0x4BFF не занята никем:
+//BDA заканчивается на 0x4FF, bootinfo с 0x5000, stage2 с 0x7E00, pmm никогда не раздаёт память
+//ниже 1 МБ
 //Карта: код блоба 0x4000.., вход-параметры 0x4300, результаты 0x4320,
 //служебные ячейки 0x4340..0x434f, метка целостности 0x4350, ячейки
 //on-screen маяков 0x4370..0x4375, буфер VBE 4F01 (1 КБ) 0x4400..0x47FF.
@@ -198,7 +195,7 @@ typedef struct gr_ops
 typedef struct gr_driver
 {
     uint32_t version;       // = GR_LAYER_ABI_VERSION
-    char     name[24];      //короткое имя: "vesa", "geode_gx1", "fbdrv"
+    char     name[24];      //короткое имя: "vesa", "geodegx1", "fbdrv"
     char     longname[48];  //развёрнутое имя для логов
     uint32_t flags;         //зарезервировано, 0
     uint32_t priority;      //чем больше, тем вероятнее станет активным; fbdrv = 0
@@ -213,8 +210,8 @@ typedef struct gr_driver
 
     uint32_t current_mode;  //индекс текущего режима (0 по умолчанию)
 
-    // --- внедряемый ядром рантайм (заполняет graphic_layer.c при
-    //регистрации; драйвер может ничего тут не писать) ---
+    //Внедряемый ядром рантайм (заполняет graphic_layer.c при
+    //регистрации; драйвер может ничего тут не писать)
     void *(*malloc_ptr)(uint32_t size);
     void  (*free_ptr)(void *ptr);
     void  (*yield_ptr)(void);
@@ -222,11 +219,11 @@ typedef struct gr_driver
     void  (*vmm_map_pages_uncached_ptr)(uint32_t phys, uint32_t size);
     void  (*printf_ptr)(const char *fmt, ...);   /* kprintf ядра */
 
-    //Вызов функций BIOS int 10h (VBE) через real-mode тримплин vbe_rm.c.
+    //Вызов функций BIOS int 10h (VBE) через real-mode трамплин vbe_rm.c.
     //Нужно драйверам, умеющим менять видеорежим на ходу (vesa_fb).
     int (*vbe_rm_exec_ptr)(vbe_rm_regs_t *regs);
 
-    //Установка дескриптора on-screen маяков тримплина (см. vbe_rm.c):
+    //Установка дескриптора on-screen маяков трамплина (см. vbe_rm.c):
     //стадии смены режима рисуются в видимый LFB — отладка на машинах
     //без COM-терминала
     int (*vbe_rm_screen_trace_ptr)(uint32_t lfb, uint32_t pitch, uint8_t bpp);
@@ -243,4 +240,4 @@ typedef struct gr_driver
 
 
 
-#endif /* KERNEL_GRAPHIC_LAYER_H */
+#endif /* DRIVER_GRAPHIC_LAYER_H */

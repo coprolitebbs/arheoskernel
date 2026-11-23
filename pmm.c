@@ -107,7 +107,7 @@ void pmm_init(uint16_t num_entries, struct e820_entry *entries)
 
     extern char _kernel_end;
     uint32_t kernel_end_addr = ((uint32_t)&_kernel_end + 0xFFF) & ~0xFFFu;
-    if (kernel_end_addr < 0x100000) kernel_end_addr = 0x200000;  // sanity
+    if (kernel_end_addr < 0x100000) kernel_end_addr = 0x200000;  //sanity
 
     bitmap = (uint8_t*)kernel_end_addr;
     size_t bitmap_size = (total_pages + 7) / 8;
@@ -257,11 +257,9 @@ void pmm_free_page(void *addr)
 }
 
 
-//Освобождает диапазон [addr, addr+size) в PMM.
-//В отличие от pmm_free_page / pmm_free_pages, умеет освобождать
-//страницы ниже 1 MB (там загрузчик держал образы модулей).
-//Не освобождает BIOS-критичные регионы, даже если они попали в диапазон.
-//Идемпотентна: повторный вызов для уже свободных страниц ничего не делает.
+//Освобождает диапазон [addr, addr+size) в PMM
+//Не освобождает BIOS-критичные регионы, даже если они попали в диапазон
+//Идемпотентно: повторный вызов для уже свободных страниц ничего не делает
 void pmm_free_region(uint32_t addr, uint32_t size)
 {
     if (size == 0) return;
