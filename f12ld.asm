@@ -55,6 +55,11 @@ start:
     ;BIOS int 13h на TA-NC529/CS5530 зависает в ожидании IRQ6,
     ;поэтому все чтения stage2 идёт мимо BIOS.
     call fdc_drv_init
+    call fdc_mot_keep       ; РЕД. 15: счётчик мотора BIOS (0x40:0x40)
+                            ; на максимум сразу после старта stage2:
+                            ; stage1 оставил его догорать, int 08h мог
+                            ; погасить мотор до первой раскрутки
+                            ; в fdc_reset (внешний ревью)
 
     ;pusha
     ;mov al, 'T'
