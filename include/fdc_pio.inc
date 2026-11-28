@@ -118,6 +118,44 @@
 ;      вокруг int 13h (fdc_bios_read), с повторной маскировкой и
 ;      осушением результатов после.
 ;
+;   14) РЕД. 16 (сессия «Sl>r0af481 r2123a4267f710 L2 123r1123a4f481
+;      L3 123r0123a4f481 L4 B00 WB00 eD»). Лог железа после РЕД. 15:
+;      PIO-попытки 1/3/4 гибнут на RECALIBRATE ('f481'), попытка 2
+;      (300 кбит/с) прошла recal, выдала READ и повисла в фазе данных
+;      ('f710', MSR=0x10 — чип ждёт циклов DMA), BIOS-ярус прочитал
+;      сектор 0 ('W') и провалился на FAT ('e' + "Disk error").
+;      Разбор по коду: маркера 'Q' в логе нет НИ РАЗУ — wait_seek_done
+;      ни разу не сдался по дедлайну, значит recal завершался, но SENSEI
+;      отдавал ГРЯЗНЫЙ ST0 (IC!=00 / EC / PCN!=0), который fdc_recal
+;      отвергал. 'f710' при MSR=0x10: READ исполняется, фазы результатов
+;      нет за весь TMO_CMD (~3 c) — данные либо не пошли по DMA, либо
+;      ушли, но чип не увидел терминальный счёт.
+;      Меры РЕД. 16:
+;      - fdc_recal/fdc_seek очищают fdc_irq6_flag ДО выдачи команды:
+;        мгновенное завершение recal (голова уже на треке 0) больше не
+;        теряется между выдачей команды и входом в wait_seek_done;
+;      - грязный ST0 больше не роняет recal сразу: осушаются до 3
+;        дополнительных результатов SENSEI (собственный результат recal
+;        мог стоять за чужим — хвост сброса/poll-режима), при неудаче
+;        recal повторяется один раз после полного fdc_reset — тот же
+;        лог показал: после сброса recal завершается чисто (попытка 2);
+;      - фаза данных READ: при таймауте читается остаток счётчика
+;        канала 2 DMA; 0xFFFF = TC достигнут, все 512 байт УЖЕ в
+;        bounce — данные спасаются ('D'+счётчик), зависшая команда
+;        прерывается импульсом RESET, калибровка сбрасывается. Иной
+;        остаток = DMA не стартовал — попытка сдаётся как раньше;
+;      - fdc_dor_pulse больше не гасит работающий мотор (fdc_motor_up=1):
+;        перецикл мотора в recover_bios давал BIOS-чтение сразу после
+;        повторного включения мотора — шпиндель не набрал обороты,
+;        AH=02 = "not ready";
+;      - fdc_recover_bios после перецикла мотора ждёт раскрутку
+;        (fdc_spinup) перед осушением/SPECIFY/BIOS-чтением;
+;      - fdc_bios_read сам запускает мотор с раскруткой, если флаг
+;        fdc_motor_up=0 (защита от "not ready" на любом пути);
+;      - маркер 'f' печатает ST0+ST3, маркер 'b' — ST3 опроса SENSE
+;        DRIVE STATUS (RDY/DSKCHG/WP): следующий лог железа покажет,
+;        ЧТО отвечал чип на recal и ПОЧЕМУ отказал int 13h на FAT.
+;
 ;   13) РЕД. 15 (сессия «Sl>r0af481 r2a — дисковод молчит, лампочка
 ;      горит» после РЕД. 14; на эмуляторах загрузка идёт). КОРНЕВАЯ
 ;      ПРИЧИНА: на CS5530 завершение RECALIBRATE/SEEK не ловится
@@ -182,8 +220,14 @@
 ;   '>' — начало bpb_init; 'a' — fdc_reset прошёл;
 ;   'b'/'c' —
 ;   recalibrate/seek прошли (только когда лестница поднималась);
-;   'f'+фаза+MSR — PIO-попытка не удалась;
-;   'b'+AH — BIOS-попытка не удалась;
+;   'f'+фаза+MSR+ST0+ST3 — PIO-попытка не удалась (РЕД. 16: ST0/ST3 —
+;         последний ответ SENSEI/SENSE DRIVE STATUS: грязный recal
+;         виден сразу, а не только факт отказа);
+;   'b'+AH+ST3 — BIOS-попытка не удалась; ST3 — опрос SENSE DRIVE
+;         STATUS после провала (бит 5 = RDY, бит 6 = WP,
+;         бит 7 = DSKCHG); '??' = чип не принял опрос;
+;   'D'+счётчик CH2 — фаза данных READ спасена по TC: все 512 байт
+;         прошли DMA, чип не увидел терминальный счёт (РЕД. 16);
 ;   'B'+hex(C) — начало BIOS-попытки при поднятой лестнице (атрибуция висяков внутри int 13h);
 ;   'L'+шаг — выполнено действие лестницы (2..7);
 ;   'r'+код скорости — ротация скоростей PIO;
@@ -649,16 +693,44 @@ fdc_read_lba:
         call debug_char
         mov al, [cs:fdc_bios_ah]
         call screen_hex_byte
+        ; РЕД. 16: опрос SENSE DRIVE STATUS после BIOS-провала — ST3
+        ; показывает ПОЧЕМУ int 13h отказал: бит 5 = RDY (привод готов),
+        ; бит 6 = WP, бит 7 = DSKCHG (смена дискеты). '??' = чип не
+        ; принял опрос (команда ещё исполняется)
+        mov bl, 0x04
+        call fdc_out
+        jc  .dbg_nosts
+        mov bl, [cs:fdc_H]
+        shl bl, 2
+        or  bl, [cs:fdc_unit]
+        call fdc_out
+        jc  .dbg_nosts
+        call fdc_in
+        jc  .dbg_nosts
+        mov [cs:fdc_st3], bl
+        mov al, bl
+        call screen_hex_byte
+        jmp .dbg_sts_done
+.dbg_nosts:
+        mov al, '?'
+        call debug_char
+        mov al, '?'
+        call debug_char
+.dbg_sts_done:
         mov al, ' '
         call debug_char
         jmp .dbg_done
 .dbg_pio:
-        mov al, 'f'             ; PIO: 'f' + фаза + последний MSR
-        call debug_char
-        mov al, [cs:fdc_ph]
-        add al, '0'
+        mov al, 'f'             ; PIO: 'f' + фаза + MSR + ST0 + ST3
+        call debug_char         ; РЕД. 16: грязный результат recal виден
+        mov al, [cs:fdc_ph]     ; сразу ('f4 81 60 30' = IC=01+SE, ST3
+        add al, '0'             ; RDY/T0), а не только факт отказа
         call debug_char
         mov al, [cs:fdc_msr_last]
+        call screen_hex_byte
+        mov al, [cs:fdc_st0]
+        call screen_hex_byte
+        mov al, [cs:fdc_st3]
         call screen_hex_byte
         mov al, ' '
         call debug_char
@@ -895,9 +967,22 @@ fdc_trace:
 ; ------------------------------------------------------------
 fdc_dor_pulse:
         push ax
+        push cx
         push dx
         mov al, [cs:fdc_unit]
         or  al, 0x08            ; RESET=0 — контроллер в сбросе
+        ; РЕД. 16: если шпиндель уже раскручен (fdc_motor_up=1), мотор
+        ; НЕ гасим на время импульса: раньше recover_bios каждый раз
+        ; перецикливал мотор (выкл -> вкл без раскрутки), и следующее
+        ; BIOS-чтение уходило в "not ready" — дискета не успевала
+        ; набрать обороты за миллисекунды между включением и AH=02
+        cmp byte [cs:fdc_motor_up], 0
+        je  .dp_out
+        mov cl, [cs:fdc_unit]
+        mov ah, 0x10
+        shl ah, cl
+        or  al, ah              ; мотор юнита остаётся включённым
+.dp_out:
         mov dx, FDC_DOR
         out dx, al
         FDC_IOWAIT
@@ -906,8 +991,12 @@ fdc_dor_pulse:
         mov dx, FDC_DOR
         out dx, al
         FDC_IOWAIT
+        cmp byte [cs:fdc_motor_up], 0
+        jne .dp_keep            ; РЕД. 16: мотор не гасился — флаг не сбрасываем
         mov byte [cs:fdc_motor_up], 0
+.dp_keep:
         pop dx
+        pop cx
         pop ax
         ret
 
@@ -1013,6 +1102,14 @@ fdc_recover_bios:
         push dx
         push ds
         call fdc_dor_pulse
+        cmp byte [cs:fdc_motor_up], 0
+        jne .rb_spun
+        ; РЕД. 16: мотор был выключен (fdc_motor_cycle) и включён
+        ; импульсом заново — без раскрутки AH=02 уходит в "not ready":
+        ; шпиндель не набрал обороты. Ждём так же, как PIO-ярус
+        call fdc_spinup
+        mov byte [cs:fdc_motor_up], 1
+.rb_spun:
         call fdc_wait_idle
         jnc .idle
         call fdc_dor_pulse      ; второй заход
@@ -1114,6 +1211,20 @@ fdc_bios_read:
         push di
         push si
         push ds
+        ; РЕД. 16: если мотор по нашему флагу не поднят (после
+        ; fdc_motor_cycle без последующего PIO-раскрута), BIOS включит
+        ; его и сразу полезнет читать — AH=02 вернёт "not ready",
+        ; потому что шпиндель не набрал обороты. Раскручиваем сами,
+        ; тем же порядком, что и PIO-ярус
+        cmp byte [cs:fdc_motor_up], 0
+        jne .br_motup
+        call fdc_mot_keep
+        call fdc_dor_motor
+        mov dx, FDC_DOR
+        out dx, al
+        call fdc_spinup
+        mov byte [cs:fdc_motor_up], 1
+.br_motup:
         ; Не даём BIOS погасить мотор по своему таймеру: серия
         ; чтений может длиться дольше стандартных 2 с мотора.
         push ds
@@ -1502,27 +1613,66 @@ fdc_wait_seek_done:
 ; ------------------------------------------------------------
 ; fdc_recal: RECALIBRATE (головка на цилиндр 0). CF=0 при успехе.
 ; ------------------------------------------------------------
+; РЕД. 16: флаг IRQ6 очищается ДО выдачи команды (мгновенное
+; завершение recal — голова уже на треке 0 — больше не теряется между
+; fdc_out и входом в wait_seek_done); грязный ST0 (IC!=00/EC/PCN!=0)
+; осушается до 3 дополнительных SENSEI (собственный результат recal
+; мог стоять за чужим — хвост сброса/poll-режима); при неудаче recal
+; повторяется один раз после полного fdc_reset — лог железа РЕД. 16
+; показал, что после сброса recal завершается чисто (попытка 2:
+; 'f481' на 500 кбит/с -> успех на 300).
 fdc_recal:
         push bx
+        push cx
+        mov cx, 2               ; одна чистая попытка + одна после сброса
+.rc_try:
         mov byte [cs:fdc_ph], PH_RECAL
         call fdc_ph_mark        ; РЕД. 14: трасса фаз на эскалациях
+        mov byte [cs:fdc_irq6_flag], 0
         mov bl, 0x07
         call fdc_out
-        jc .rc_fail
+        jc .rc_bad
         mov bl, [cs:fdc_unit]
         call fdc_out
-        jc .rc_fail
+        jc .rc_bad
         call fdc_wait_seek_done
-        jc .rc_fail
+        jc .rc_bad
         mov al, [cs:fdc_st0]
         test al, 0xC0
-        jnz .rc_fail            ; IC != 00
+        jnz .rc_stale           ; IC != 00 — возможно, чужой результат
         test al, 0x10
-        jnz .rc_fail            ; equipment check
+        jnz .rc_stale           ; equipment check
         test al, 0x20
-        jz  .rc_fail            ; нет признака seek-end
+        jz  .rc_stale           ; нет признака seek-end
         test bh, bh
-        jnz .rc_fail            ; PCN != 0
+        jnz .rc_stale           ; PCN != 0
+        jmp .rc_ok
+.rc_stale:
+        push cx
+        mov cx, 3
+.rc_drain:
+        call fdc_sense_int      ; РЕД. 16: ищем ЧИСТЫЙ результат recal за
+        jc  .rc_drain_done      ; чужим; INVALID = результатов больше нет
+        mov al, [cs:fdc_st0]    ; (чип в покое) — осушение кончилось
+        test al, 0xC0
+        jnz .rc_drain_next
+        test al, 0x20
+        jz  .rc_drain_next
+        test bh, bh
+        jnz .rc_drain_next
+        pop cx
+        jmp .rc_ok
+.rc_drain_next:
+        loop .rc_drain
+.rc_drain_done:
+        pop cx
+.rc_bad:
+        dec cx
+        jz  .rc_fail
+        call fdc_reset          ; РЕД. 16: повтор после полного сброса
+        jc  .rc_fail
+        jmp .rc_try
+.rc_ok:
         mov byte [cs:fdc_cyl_cur], 0
         mov byte [cs:fdc_calibrated], 1
         clc
@@ -1530,6 +1680,7 @@ fdc_recal:
 .rc_fail:
         stc
 .rc_ret:
+        pop cx
         pop bx
         ret
 
@@ -1538,8 +1689,10 @@ fdc_recal:
 ; ------------------------------------------------------------
 fdc_seek:
         push bx
+        push cx
         mov byte [cs:fdc_ph], PH_SEEK
         call fdc_ph_mark        ; РЕД. 14
+        mov byte [cs:fdc_irq6_flag], 0  ; РЕД. 16: до команды (см. fdc_recal)
         mov al, bl
         mov [cs:fdc_stmp], al
         mov bl, 0x0F
@@ -1557,14 +1710,39 @@ fdc_seek:
         jc .sk_fail
         mov al, [cs:fdc_st0]
         test al, 0xC0
-        jnz .sk_fail
+        jnz .sk_stale
         test al, 0x10
-        jnz .sk_fail
+        jnz .sk_stale
         test al, 0x20
-        jz  .sk_fail
+        jz  .sk_stale
         mov al, [cs:fdc_stmp]
         cmp bh, al
-        jne .sk_fail            ; PCN != цель
+        jne .sk_stale           ; PCN != цель
+        jmp .sk_ok
+.sk_stale:
+        ; РЕД. 16: чужой результат SENSEI (хвост сброса/poll) — осушаем
+        ; до 3 результатов в поиске чистого seek-end с верным PCN
+        push cx
+        mov cx, 3
+.sk_drain:
+        call fdc_sense_int
+        jc  .sk_drain_done
+        mov al, [cs:fdc_st0]
+        test al, 0xC0
+        jnz .sk_drain_next
+        test al, 0x20
+        jz  .sk_drain_next
+        mov al, [cs:fdc_stmp]
+        cmp bh, al
+        jne .sk_drain_next
+        pop cx
+        jmp .sk_ok
+.sk_drain_next:
+        loop .sk_drain
+.sk_drain_done:
+        pop cx
+        jmp .sk_fail
+.sk_ok:
         call fdc_settle
         mov al, [cs:fdc_stmp]
         mov [cs:fdc_cyl_cur], al
@@ -1573,6 +1751,7 @@ fdc_seek:
 .sk_fail:
         stc
 .sk_ret:
+        pop cx
         pop bx
         ret
 
@@ -1672,7 +1851,48 @@ fdc_read_op:
         mov ah, 0xC0
         mov cx, TMO_CMD
         call fdc_wait_msr
-        jc  .ro_drain           ; результатов нет: осушить хвосты и выйти
+        jnc .ro_results
+        ; РЕД. 16: фаза результатов не пришла за TMO_CMD, чип ещё
+        ; исполняет READ (MSR=0x10: CB=1, RQM=0 — ждёт циклов DMA).
+        ; Проверяем остаток счётчика канала 2: 0xFFFF означает, что все
+        ; 512 байт прошли по DMA и канал дошёл до TC (чип терминальный
+        ; счёт не увидел — причуда CS5530). Данные в bounce годны —
+        ; спасаем, зависшую команду прерываем импульсом RESET.
+        ; Любой другой остаток = DMA не прошёл — сдаёмся как раньше.
+        xor al, al
+        out 0x0C, al            ; сброс указателя младший/старший
+        FDC_IOWAIT
+        in  al, 0x05            ; счётчик CH2, младший байт
+        mov bl, al
+        in  al, 0x05            ; старший байт
+        mov bh, al
+        cmp bx, 0xFFFF          ; TC достигнут?
+        jne .ro_drain
+        pusha
+        mov al, 'D'             ; РЕД. 16: спасение фазы данных по TC
+        call debug_char
+        mov al, bl
+        call screen_hex_byte
+        mov al, bh
+        call screen_hex_byte
+        mov al, ' '
+        call debug_char
+        popa
+        call fdc_dor_pulse      ; READ висит без TC — прервать
+        mov byte [cs:fdc_calibrated], 0 ; позиция после RESET неизвестна:
+        mov byte [cs:fdc_cyl_cur], 0xFF ; следующий сектор начнёт с recal
+        push ds
+        xor ax, ax
+        mov ds, ax
+        mov si, 0x7C00
+        mov es, [cs:fdc_dst_seg]
+        mov di, [cs:fdc_dst_off]
+        mov cx, 256
+        cld
+        rep movsw
+        pop ds
+        clc
+        ret
 .ro_results:
 
         ; фаза результатов: ровно 7 байт ST0 ST1 ST2 C H R N
